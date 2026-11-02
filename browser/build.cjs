@@ -75,7 +75,7 @@ try {
   if (ytcNative) wasm_bindgen.boot_native(); else wasm_bindgen.boot();
 } catch (e) {
   // Crash fallback: native YouTube for this page.
-  console.error('[YourTube Client] boot failed', e);
+  console.error('[Lumen] boot failed', e);
   try { chrome.runtime.sendMessage({ ytcIncident: JSON.stringify({ kind: 'boot-failed', reason: String(e && e.stack || e), at: Date.now(), path: location.pathname + location.search }) }).catch(() => {}); } catch {}
   if (!ytcNative) { const u = new URL(location.href); u.searchParams.set('yt-native', '1'); location.replace(u.href); }
 }

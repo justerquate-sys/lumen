@@ -1,4 +1,4 @@
-//! Navigation motion (the motion law, `.claude/skills/yourtube-motion`):
+//! Navigation motion (the motion law, `.claude/skills/lumen-motion`):
 //! the thumbnail → player morph on watch open (pattern (c), FLIP), the theater
 //! switch morph, the short settle of watch content that replaces a skeleton,
 //! and the `data-still` gate that keeps CSS entrances (`@starting-style`) off

@@ -1,4 +1,4 @@
-# Contributing to YourTube
+# Contributing to Lumen
 
 Thanks for helping. The short version: logic in Rust, privacy rules are strict, motion never costs speed,
 and `npm test` stays green with `extension/` holding the public build.
@@ -57,7 +57,7 @@ steps). `tests/live-*.cjs` talk to real YouTube or Deepgram: run them by hand, r
 - **The player never leaves by itself.** Failures and stalls stay in the player box with the reason and Try
   again / Open on YouTube; only that button opens YouTube's own page.
 - **Motion never delays anything**: follow [docs/motion.md](docs/motion.md) (also the agent skill
-  `.claude/skills/yourtube-motion/SKILL.md`). Keyboard paths and back/forward are instant.
+  `.claude/skills/lumen-motion/SKILL.md`). Keyboard paths and back/forward are instant.
 - Prefer immediate, reversible interactions and remembered settings: no Save buttons or confirmation steps
   for ordinary display preferences; optimistic actions roll back with the reason on failure.
 - Every page must survive unknown YouTube data: unknown renderers are counted (debug overlay), never fatal;

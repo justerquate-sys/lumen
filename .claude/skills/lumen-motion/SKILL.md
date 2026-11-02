@@ -1,9 +1,9 @@
 ---
-name: yourtube-motion
-description: The motion law and implementation patterns for YourTube. Load it before adding, changing or reviewing any animation, transition, hover/press state, popover, page change or player-control motion in extension/client.css, browser/bridge.js or src/.
+name: lumen-motion
+description: The motion law and implementation patterns for Lumen. Load it before adding, changing or reviewing any animation, transition, hover/press state, popover, page change or player-control motion in extension/client.css, browser/bridge.js or src/.
 ---
 
-# YourTube motion
+# Lumen motion
 
 The client should feel silky, alive and instantaneous. The point is speed you can feel; motion is how
 speed looks, never a cost on top of it.

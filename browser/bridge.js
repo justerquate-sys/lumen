@@ -18,12 +18,12 @@ const YTC = (() => {
     if (policy) { el.innerHTML = policy.createHTML(html); return; }
     try { el.innerHTML = html; } catch (e) {
       if (!globalThis.trustedTypes) throw e;
-      policy = trustedTypes.createPolicy('yourtube-client', { createHTML: s => s });
+      policy = trustedTypes.createPolicy('lumen', { createHTML: s => s });
       el.innerHTML = policy.createHTML(html);
     }
   };
   const call = (name, ...args) => {
-    try { return wasm_bindgen[name](...args); } catch (e) { console.error('[YourTube Client]', name, e); }
+    try { return wasm_bindgen[name](...args); } catch (e) { console.error('[Lumen]', name, e); }
   };
   let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null;
   const insert = (el, html) => {
@@ -781,7 +781,7 @@ const YTC = (() => {
         sb.addEventListener('updateend', () => evt(h, 'updateend'));
         sb.addEventListener('error', () => evt(h, 'error'));
         return true;
-      } catch (e) { console.warn('[YourTube Client] addSourceBuffer', mime, e); return false; }
+      } catch (e) { console.warn('[Lumen] addSourceBuffer', mime, e); return false; }
     },
     // Returns '' on success, else the exception name (e.g. QuotaExceededError).
     sb_append(h, bytes) { try { mo.get(h).appendBuffer(bytes.slice()); return ''; } catch (e) { return (e && e.name) || 'Error'; } },

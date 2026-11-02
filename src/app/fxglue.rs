@@ -24,7 +24,7 @@ const BLANK_LIMIT: u32 = 4;
 const ANON_OPTS: &str = "{\"credentials\":\"omit\",\"priority\":\"low\"}";
 const ANON_HEADERS: &str = "{\"Content-Type\":\"application/json\"}";
 
-// Feed and chip motion (the motion law, `.claude/skills/yourtube-motion`): every write below is
+// Feed and chip motion (the motion law, `.claude/skills/lumen-motion`): every write below is
 // final first; these only animate paint, from pointer actions only.
 /// Cards that join an entrance wave, the step between them (≤ 7 steps), its length and rise.
 const ENTER_MAX: u32 = 15;

@@ -1,4 +1,4 @@
-//! YourTube Client: an own YouTube front-end running at www.youtube.com.
+//! Lumen: an own YouTube front-end running at www.youtube.com.
 //! Rust owns routing, InnerTube requests and parsing, state and HTML.
 
 pub mod actions;

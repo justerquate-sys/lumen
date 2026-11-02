@@ -1,4 +1,4 @@
-# YourTube architecture and behaviour
+# Lumen architecture and behaviour
 
 The design reference for contributors: how the client works, page by page, and why. For installing and
 building see the [README](../README.md); for the motion rules see [motion.md](motion.md); for the

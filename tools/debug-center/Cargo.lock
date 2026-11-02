@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "yourtube-debug-center"
+name = "lumen-debug-center"
 version = "0.1.0"

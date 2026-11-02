@@ -1,6 +1,6 @@
-# YourTube debug center (optional developer tool)
+# Lumen debug center (optional developer tool)
 
-A local collector for YourTube **development builds** (`./build.sh --dev`). Rust, standard library only.
+A local collector for Lumen **development builds** (`./build.sh --dev`). Rust, standard library only.
 It listens on `127.0.0.1:47321` only and appends every report the extension's background worker POSTs to
 `/incident` (incidents and speed-telemetry batches) as one line to its incidents file. The public build
 has no collector code and never talks to it.
@@ -24,9 +24,9 @@ repository:
 
 | OS | Default incidents file |
 |---|---|
-| macOS | `~/Library/Application Support/YourTube/incidents.ndjson` |
-| Linux | `$XDG_DATA_HOME/yourtube/incidents.ndjson` (usually `~/.local/share/yourtube/incidents.ndjson`) |
-| Windows | `%APPDATA%\YourTube\incidents.ndjson` |
+| macOS | `~/Library/Application Support/Lumen/incidents.ndjson` |
+| Linux | `$XDG_DATA_HOME/lumen/incidents.ndjson` (usually `~/.local/share/lumen/incidents.ndjson`) |
+| Windows | `%APPDATA%\Lumen\incidents.ndjson` |
 
 Reports contain no cookies, tokens, search terms or keys, but they do contain video ids, timings and your
 browser's user agent: keep the file to yourself.
@@ -36,8 +36,8 @@ browser's user agent: keep the file to yourself.
 ```sh
 cd tools/debug-center
 cargo build --release --locked && cargo test --locked
-./target/release/yourtube-debug-center            # default incidents file (above)
-./target/release/yourtube-debug-center /tmp/x.ndjson
+./target/release/lumen-debug-center            # default incidents file (above)
+./target/release/lumen-debug-center /tmp/x.ndjson
 ```
 
 Then open http://127.0.0.1:47321/ and http://127.0.0.1:47321/perf.
@@ -47,26 +47,26 @@ itself only talks to port 47321 (or to the URL in its `ytcCollectorV1` storage k
 ## Start it at login (macOS)
 
 Copy the binary somewhere stable and add a LaunchAgent, e.g.
-`~/Library/LaunchAgents/com.yourtube.debug-center.plist`:
+`~/Library/LaunchAgents/com.lumen.debug-center.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.yourtube.debug-center</string>
+  <key>Label</key><string>com.lumen.debug-center</string>
   <key>ProgramArguments</key><array>
-    <string>/Users/YOU/Library/Application Support/YourTube/yourtube-debug-center</string>
+    <string>/Users/YOU/Library/Application Support/Lumen/lumen-debug-center</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/Users/YOU/Library/Application Support/YourTube/debug-center.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Application Support/Lumen/debug-center.log</string>
 </dict></plist>
 ```
 
 With no second `ProgramArguments` entry the incidents file is the default one above. Load it with
-`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.yourtube.debug-center.plist`, restart it
-after replacing the binary with `launchctl kickstart -k gui/$(id -u)/com.yourtube.debug-center`, stop it
-with `launchctl bootout gui/$(id -u)/com.yourtube.debug-center`.
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.lumen.debug-center.plist`, restart it
+after replacing the binary with `launchctl kickstart -k gui/$(id -u)/com.lumen.debug-center`, stop it
+with `launchctl bootout gui/$(id -u)/com.lumen.debug-center`.
 
-On Linux a systemd user service (`ExecStart=/path/to/yourtube-debug-center`) does the same; on Windows a
+On Linux a systemd user service (`ExecStart=/path/to/lumen-debug-center`) does the same; on Windows a
 Task Scheduler task "At log on".

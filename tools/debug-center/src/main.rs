@@ -1,4 +1,4 @@
-//! YourTube debug center: a tiny local collector for YourTube Client incident
+//! Lumen debug center: a tiny local collector for Lumen incident
 //! reports and speed telemetry. Listens on 127.0.0.1 only. The extension's
 //! background worker POSTs each incident (player fallback, InnerTube error, Rust
 //! panic, boot failure) and each telemetry batch (`kind: "perf"`, `schema: 2`) to
@@ -27,7 +27,7 @@ fn main() {
     // YTC_DEBUG_CENTER_ADDR: another 127.0.0.1 port (tests); the extension only talks to ADDR.
     let addr = std::env::var("YTC_DEBUG_CENTER_ADDR").ok().filter(|a| a.starts_with("127.0.0.1:")).unwrap_or_else(|| ADDR.to_string());
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("cannot listen on {addr}: {e}"));
-    eprintln!("YourTube debug center on http://{addr}/ → {}", file.display());
+    eprintln!("Lumen debug center on http://{addr}/ → {}", file.display());
     // One thread per connection: a long dashboard read never holds up an incoming report.
     for stream in listener.incoming().flatten() {
         let file = file.clone();
@@ -40,17 +40,17 @@ fn main() {
 }
 
 /// Where incidents go without an argument: the user's data folder, outside any checkout.
-/// macOS `~/Library/Application Support/YourTube/incidents.ndjson`, Windows
-/// `%APPDATA%\YourTube\incidents.ndjson`, Linux and others `$XDG_DATA_HOME/yourtube/incidents.ndjson`
-/// (default `~/.local/share/yourtube/incidents.ndjson`); `incidents.ndjson` here when none is known.
+/// macOS `~/Library/Application Support/Lumen/incidents.ndjson`, Windows
+/// `%APPDATA%\Lumen\incidents.ndjson`, Linux and others `$XDG_DATA_HOME/lumen/incidents.ndjson`
+/// (default `~/.local/share/lumen/incidents.ndjson`); `incidents.ndjson` here when none is known.
 fn default_file() -> PathBuf {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let dir = if cfg!(target_os = "macos") {
-        env("HOME").map(|h| h.join("Library/Application Support/YourTube"))
+        env("HOME").map(|h| h.join("Library/Application Support/Lumen"))
     } else if cfg!(windows) {
-        env("APPDATA").map(|a| a.join("YourTube"))
+        env("APPDATA").map(|a| a.join("Lumen"))
     } else {
-        env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share"))).map(|d| d.join("yourtube"))
+        env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share"))).map(|d| d.join("lumen"))
     };
     dir.map_or_else(|| PathBuf::from("incidents.ndjson"), |d| d.join("incidents.ndjson"))
 }
@@ -140,8 +140,8 @@ fn overview(file: &Path) -> String {
             }
         }
     }
-    let mut page = String::from("<!doctype html><meta charset=utf-8><title>YourTube debug center</title><style>body{background:#111;color:#ddd;font:13px ui-monospace,monospace;margin:20px}h1{font:600 18px system-ui;color:#b7ebca}a{color:#9cc8ff}pre{white-space:pre-wrap;word-break:break-all;background:#1a1a1a;padding:10px;border-radius:8px}</style>");
-    page.push_str(&format!("<h1>YourTube debug center</h1><p>{incidents} incident(s) and {batches} telemetry batch(es) stored in {} · <a href=/perf>speed dashboard</a></p>", escape(&file.display().to_string())));
+    let mut page = String::from("<!doctype html><meta charset=utf-8><title>Lumen debug center</title><style>body{background:#111;color:#ddd;font:13px ui-monospace,monospace;margin:20px}h1{font:600 18px system-ui;color:#b7ebca}a{color:#9cc8ff}pre{white-space:pre-wrap;word-break:break-all;background:#1a1a1a;padding:10px;border-radius:8px}</style>");
+    page.push_str(&format!("<h1>Lumen debug center</h1><p>{incidents} incident(s) and {batches} telemetry batch(es) stored in {} · <a href=/perf>speed dashboard</a></p>", escape(&file.display().to_string())));
     for l in last.iter().rev() {
         page.push_str("<pre>");
         page.push_str(&escape(l));

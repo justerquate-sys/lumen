@@ -156,7 +156,7 @@ pub fn shell(route: &Route, _url: &str, main: Option<&str>) -> String {
     let mut side = String::with_capacity(1600);
     sidebar(&mut side, side_index(route.nav_key()).unwrap_or(0));
     format!(
-        "<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>YourTube</title>\
+        "<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Lumen</title>\
 <link rel=\"preconnect\" href=\"https://i.ytimg.com\"><link rel=\"preconnect\" href=\"https://yt3.ggpht.com\"></head>\
 <body id=\"ytc\" data-nav=\"{nav}\"><header id=\"ytc-top\">\
 <a id=\"{LOGO_ID}\" class=\"logo\" href=\"/\" aria-label=\"YouTube home\" data-hov=\"logo\">{LOGO}<span>YouTube</span></a>\
@@ -766,7 +766,7 @@ pub struct DebugInfo<'a> {
 }
 
 pub fn debug(d: &DebugInfo) -> String {
-    let mut s = format!("<b>YourTube Client {} debug</b> (press ` or Shift+D to close)\n", env!("CARGO_PKG_VERSION"));
+    let mut s = format!("<b>Lumen {} debug</b> (press ` or Shift+D to close)\n", env!("CARGO_PKG_VERSION"));
     s.push_str(&format!("route  {}\n", esc(d.route)));
     s.push_str(&format!(
         "client WEB {} · visitor {} · SAPISID cookie {} · server loggedOut {} · authuser {}\n",

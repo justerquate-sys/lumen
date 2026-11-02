@@ -2,7 +2,7 @@
 // Every request is answered by context.route (stub youtube.com documents with a
 // fake "YouTube app", InnerTube fixtures, stub embed/images); nothing reaches the
 // network. Run: npm run test:e2e (or node tests/e2e.cjs).
-// Env (optional): YOURTUBE_EXTENSION_CHROMIUM (a full Chrome/Chromium that loads
+// Env (optional): LUMEN_EXTENSION_CHROMIUM (a full Chrome/Chromium that loads
 // unpacked extensions; default: Playwright's Chromium), YTC_ONLY=<regexp> (run
 // matching steps only), YTC_EXT (another extension folder).
 // Public build: the debug-center steps that need development-build telemetry are

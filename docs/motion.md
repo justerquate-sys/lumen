@@ -1,6 +1,6 @@
-# YourTube motion
+# Lumen motion
 
-(The same text is the agent skill `.claude/skills/yourtube-motion/SKILL.md`; keep both in step.)
+(The same text is the agent skill `.claude/skills/lumen-motion/SKILL.md`; keep both in step.)
 
 The client should feel silky, alive and instantaneous. The point is speed you can feel; motion is how
 speed looks, never a cost on top of it.

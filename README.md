@@ -1,6 +1,6 @@
-# YourTube
+# Lumen
 
-**Your own YouTube front-end, running at www.youtube.com.** YourTube is a browser extension that stops
+**Your own YouTube front-end, running at www.youtube.com.** Lumen is a browser extension that stops
 YouTube's web app before it starts and renders its own fast, quiet pages from YouTube's own data (the
 InnerTube API), with its own video player. Your account, subscriptions, history and playlists keep working,
 because it is still youtube.com with your session. The logic is Rust compiled to WebAssembly; JavaScript is
@@ -88,7 +88,7 @@ the way the extension does (details in [tv/README.md](tv/README.md)).
 
 ### Install
 
-The newest app is always at **`SHORT-LINK`** <!-- curator: the short link to the address below -->
+The newest app is always at **`is.gd/lumentv`**
 (the short form of <https://github.com/justerquate-sys/lumen/releases/latest/download/lumen-tv.apk>, which every release keeps pointing at the newest APK; each release on
 the [Releases](https://github.com/justerquate-sys/lumen/releases) page also carries it as
 `lumen-tv-<version>.apk`). You install it once; after that it updates itself.
@@ -100,7 +100,7 @@ the [Releases](https://github.com/justerquate-sys/lumen/releases) page also carr
 2. Install **Downloader** (by AFTVnews) from the Play Store on the TV.
 3. Allow it to install apps: *Settings → Apps → Security & restrictions → Unknown sources* (on Google TV:
    *Settings → Apps → Install unknown apps*) → **Downloader**.
-4. In the Downloader app, enter: **`SHORT-LINK`**, let it download and choose **Install**.
+4. In the Downloader app, enter: **`is.gd/lumentv`**, let it download and choose **Install**.
 5. **Lumen** appears in *Apps* with its banner; add it to your favourites if you like.
 
 **With ADB over Wi-Fi (from a computer with Android's
@@ -137,7 +137,7 @@ rare, is offered on screen: **Install** downloads it, checks it the same way and
 
 ## Privacy
 
-YourTube has no server, no analytics and no account of its own. What it stores stays in your browser's
+Lumen has no server, no analytics and no account of its own. What it stores stays in your browser's
 extension storage on this device (preferences, the last 100 searches, resume positions for up to 2,000
 videos, your topics and blocked websites, an optional Deepgram key). Feeds, descriptions and recommendations
 are kept in memory and in this tab's session only.
@@ -191,7 +191,7 @@ npm test              # cargo test --locked + the end-to-end browser test (no ne
 npm run check:public  # extension/ holds the public build (run before committing)
 ```
 
-`npm test` drives Playwright's Chromium; set `YOURTUBE_EXTENSION_CHROMIUM` to another Chrome/Chromium binary
+`npm test` drives Playwright's Chromium; set `LUMEN_EXTENSION_CHROMIUM` to another Chrome/Chromium binary
 that can load unpacked extensions to use that instead. `YTC_ONLY=<regexp> npm run test:e2e` runs matching
 steps only.
 
@@ -205,7 +205,7 @@ steps only.
   Rust telemetry, `/* @dev-start */ … /* @dev-end */` blocks in `browser/*.js`);
 - auto-reload: open YouTube tabs ask the worker every 4 s whether the files changed (`build-id.txt`), and the
   extension reloads itself after each build;
-- the name "YourTube Client (dev)" and a build id in the version name.
+- the name "Lumen (dev)" and a build id in the version name.
 
 Run `./build.sh` again before committing; `npm run check:public` fails on a development build.
 
@@ -230,4 +230,4 @@ Rust, privacy rules are strict, motion follows [docs/motion.md](docs/motion.md),
 
 ## License
 
-[MIT](LICENSE) © 2026 justerquate-sys. YourTube is not affiliated with YouTube or Google.
+[MIT](LICENSE) © 2026 justerquate-sys. Lumen is not affiliated with YouTube or Google.

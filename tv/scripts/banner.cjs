@@ -18,7 +18,7 @@ body{display:flex;align-items:center;justify-content:center;gap:32px;font-family
 .s{color:#b7ebca;font-size:26px;font-weight:700;letter-spacing:.04em;margin:10px 0 0 4px;line-height:1}
 </style><div class="g"><svg viewBox="0 0 44 44"><path d="M4 2 L42 22 L4 42 Z" fill="#101315"/></svg></div><div class="n"><div class="t">${esc(name)}</div><div class="s">TV</div></div>`;
 (async () => {
-  const browser = await chromium.launch(process.env.YOURTUBE_EXTENSION_CHROMIUM ? { executablePath: process.env.YOURTUBE_EXTENSION_CHROMIUM } : {});
+  const browser = await chromium.launch(process.env.LUMEN_EXTENSION_CHROMIUM ? { executablePath: process.env.LUMEN_EXTENSION_CHROMIUM } : {});
   const page = await browser.newPage({ viewport: { width: 640, height: 360 } });
   await page.setContent(html);
   await page.screenshot({ path: out });

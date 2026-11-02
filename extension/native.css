@@ -1,4 +1,4 @@
-/* YourTube Client: YouTube's own pages (native mode: ?yt-native=1 fallbacks and pages the client does not
+/* Lumen: YouTube's own pages (native mode: ?yt-native=1 fallbacks and pages the client does not
    render). Injected only there (manifest.json, second content script). The old extension's essential
    cleanup, moved from its theme.css / watch-page.css / player-controls.css / captions.css / promotions.css
    with their verified selectors; logic (captions, keys, CC, promo dismissal, Shorts switch) lives in

@@ -12,7 +12,7 @@ shell sets (`YTC_PLATFORM = "tv"`).
 ## Install it on your TV (first time)
 
 (The same steps are in the main [README](../README.md#google-tv--android-tv).) The newest APK is always at
-**`SHORT-LINK`** <!-- curator: the short link to the address below --> →
+**`is.gd/lumentv`** →
 https://github.com/justerquate-sys/lumen/releases/latest/download/lumen-tv.apk (every release uploads it as `lumen-tv.apk` besides `lumen-tv-<version>.apk` and is
 marked *latest*). After this first install the app keeps itself up to date (see *Updates*).
 
@@ -23,7 +23,7 @@ marked *latest*). After this first install the app keeps itself up to date (see 
 2. Install **Downloader** (by AFTVnews) from the Play Store on the TV.
 3. *Settings → Apps → Security & restrictions → Unknown sources* (on Google TV: *Settings → Apps →
    Install unknown apps*) → allow **Downloader**.
-4. In the Downloader app, enter: **`SHORT-LINK`**, then install.
+4. In the Downloader app, enter: **`is.gd/lumentv`**, then install.
 5. Find **Lumen** in *Apps* (it shows its banner); move it to your favourites if you like.
 
 **Option B: ADB over Wi-Fi (from your computer)**

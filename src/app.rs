@@ -858,7 +858,7 @@ impl App {
 
     fn set_title(&mut self, t: &str) {
         self.title = t.to_string();
-        bridge::title(&if t.is_empty() { "YourTube".to_string() } else { format!("{t} - YourTube") });
+        bridge::title(&if t.is_empty() { "Lumen".to_string() } else { format!("{t} - Lumen") });
     }
 
     /// Immediate UI for the current route, then `load()`.

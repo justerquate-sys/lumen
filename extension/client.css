@@ -1,5 +1,5 @@
-/* YourTube Client: the whole page is ours (YouTube's app is stopped). Charcoal + mint.
-   THE MOTION LAW (.claude/skills/yourtube-motion/SKILL.md): motion never delays anything. Content and
+/* Lumen: the whole page is ours (YouTube's app is stopped). Charcoal + mint.
+   THE MOTION LAW (.claude/skills/lumen-motion/SKILL.md): motion never delays anything. Content and
    state are final on the first frame; animation is a compositor-only layer on top (transform/opacity),
    always interruptible (transitions retarget from the current value), feedback on pointerdown,
    ease-out or critically damped springs only (never ease-in), keyboard and back/forward instant. */
