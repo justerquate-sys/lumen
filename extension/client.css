@@ -1103,3 +1103,86 @@ details.pl:not([open]) summary::after{transform:translateY(2px) rotate(-135deg)}
 #ytc-imp .imp-m.ok{color:var(--ac)}
 #ytc-imp .imp-m.er{color:var(--er)}
 #ytc-imp .imp-b{display:flex;justify-content:flex-end;align-items:center;gap:16px}
+/* ===== TV app (tv/, html[data-ytc-tv]) =====
+   The Google TV / Android TV WebView lays out at 960×540 CSS px (1080p at 2×: the 10-foot dp grid). Overscan-safe
+   margins 5 % per side (48 × 27 px there, Android TV guidelines; a set laying out at 1920×1080 gets 96 × 54), one focus stop per card, a mint focus ring that settles in and a
+   slight lift of the focused card (the focus is final at once; the lift rides on top, --e-out, ≤ 200 ms, × --mv).
+   Pointer-only affordances (mic, hover buttons, logo dwell) are gone; menus open with OK. There is no pointer,
+   so the ring follows :focus (a focus the client sets itself is not always :focus-visible). */
+html[data-ytc-tv]{--tvx:max(48px,5vw);--tvy:max(27px,5vh);scroll-padding:calc(var(--tvy) + 64px) 0 var(--tvy)}
+html[data-ytc-tv] #ytc{--sw:72px;font-size:16px}
+html[data-ytc-tv] #ytc-top{height:56px;padding:var(--tvy) var(--tvx) 0;grid-template-columns:auto minmax(0,1fr) auto;gap:20px}
+html[data-ytc-tv] #ytc-mic,html[data-ytc-tv] #ytc-vk,html[data-ytc-tv] .c .ca,html[data-ytc-tv] .logo::before{display:none}
+html[data-ytc-tv] #ytc-q{font-size:17px}
+/* Sidebar: an icon rail inside the safe area that opens over the grid while the focus is in it (its surface is
+   revealed by clip-path from the rail; the links never move under the focus). */
+html[data-ytc-tv] #ytc-side{top:calc(56px + var(--tvy) + 12px);left:calc(var(--tvx) - 14px);bottom:var(--tvy);width:236px;padding:6px 8px;z-index:9;overflow:visible;clip-path:inset(0 calc(100% - 60px) 0 0 round var(--r-pop));transition:clip-path var(--d-spring) var(--spring)}
+/* The rail shows the icons only (link inset 14 + icon 24 + 14 = 52 px after the 8 px padding); the active pill
+   lines up with the link boxes (rows keep the desktop's 44 px pitch, which Rust's pill offsets assume). */
+html[data-ytc-tv] #ytc-side .sdi{top:6px;left:8px;right:8px}
+/* Collapsed, a link is as wide as its icon: the remote's spatial navigation measures boxes, and full-width links
+   would sit under the content beside the rail (the labels are clipped either way; the width change hides under
+   the clip's reveal). Rail links draw their ring inside (the panel's edge would cut an outer one). */
+html[data-ytc-tv] #ytc-side:not(:focus-within) a{width:52px;box-sizing:border-box}
+html[data-ytc-tv] #ytc #ytc-side a:focus{outline-offset:-3px!important;scale:1}
+html[data-ytc-tv] #ytc-side::after{content:"";position:absolute;inset:0;z-index:-2;border-radius:var(--r-pop);background:var(--pn);box-shadow:var(--sh);opacity:0;transition:opacity var(--d-pop-out) var(--e-out)}
+html[data-ytc-tv] #ytc-side:focus-within{clip-path:inset(0 0 0 0 round var(--r-pop))}
+html[data-ytc-tv] #ytc-side:focus-within::after{opacity:1;transition-duration:var(--d-pop)}
+html[data-ytc-tv] #ytc-side a{font-size:17px}
+html[data-ytc-tv] #ytc-main{padding:12px var(--tvx) var(--tvy) calc(var(--tvx) + 72px)}
+html[data-ytc-tv] .grid{--cols:4;gap:26px 16px}
+/* Focus: the whole card is the stop (its title link has the focus). */
+html[data-ytc-tv] .c{transition:transform var(--d-pop) var(--e-out)}
+html[data-ytc-tv] .c:focus-within{transform:translateY(calc(-3px * var(--mv))) scale(calc(1 + .04 * var(--mv)));z-index:2}
+html[data-ytc-tv] .c:focus-within .th{outline:3px solid var(--ac);outline-offset:3px}
+html[data-ytc-tv] .c:focus-within .t{color:var(--ac)}
+html[data-ytc-tv] #ytc :focus:not(.t):not(input):not(#ytc-player){outline:3px solid var(--ac);outline-offset:3px}
+html[data-ytc-tv] #ytc button:focus:not(.pb),html[data-ytc-tv] #ytc-side a:focus{scale:calc(1 + .04 * var(--mv));transition:scale var(--d-pop) var(--e-out)}
+html[data-ytc-tv] #ytc-q:focus,html[data-ytc-tv] .hero input:focus{box-shadow:0 0 0 3px var(--ac)}
+/* Watch page: the player fills the screen (video is full-bleed; controls stay inside the safe area); the page
+   continues below it (↓ from the control bar). */
+html[data-ytc-tv] #ytc[data-nav=watch] #ytc-top{display:none}
+html[data-ytc-tv] #ytc[data-nav=watch] #ytc-main{padding:0 0 var(--tvy)}
+html[data-ytc-tv] .watch,html[data-ytc-tv] .watch.theater{grid-template-columns:minmax(0,1fr);gap:20px}
+html[data-ytc-tv] .wp,html[data-ytc-tv] .watch.theater .wp{max-width:none;width:100vw;margin:0}
+html[data-ytc-tv] .watch .player{width:100vw;height:100vh;aspect-ratio:auto;border-radius:0}
+html[data-ytc-tv] .watch>:not(.wp),html[data-ytc-tv] #ytc-info{padding:0 var(--tvx)}
+/* The bar's buttons ring outwards (3 + 1 px, lifted 8 %) and the playhead knob overhangs the track's ends: 10 px more
+   inside keeps both in the safe area. */
+html[data-ytc-tv] .pctl{padding:0 calc(var(--tvx) + 10px) var(--tvy)}
+html[data-ytc-tv] #ytc-player:focus{outline:none}
+html[data-ytc-tv] .player.idle:has(.pctl :focus) .pctl{opacity:1;transition-duration:var(--d-pop)}
+html[data-ytc-tv] .player:has(.pctl :focus),html[data-ytc-tv] .player:has(.pctl :focus) *{cursor:default!important}
+html[data-ytc-tv] .pctl .pb:focus,html[data-ytc-tv] .pctl button:focus{outline:3px solid var(--ac);outline-offset:1px;border-radius:var(--r-ctl);scale:calc(1 + .08 * var(--mv));transition:scale var(--d-pop) var(--e-out)}
+html[data-ytc-tv] .pvol{display:none}
+/* Player menus: the focused row rings inside the scrolling list (an outer ring and the lift would be cut by it). */
+html[data-ytc-tv] #ytc #ytc-menu.pmenu button:focus{outline-offset:-3px;scale:1}
+/* Menus keep the desktop geometry relative to the bar, which sits var(--tvx) - 2px further in and var(--tvy) - 4px
+   higher on TV (padding tvx + 10 / tvy instead of 12 / 4): Speed and Quality stay centred over their shortcuts. */
+html[data-ytc-tv] .pmenu{right:calc(var(--tvx) + 10px);bottom:calc(var(--tvy) + 60px);width:min(304px,calc(100% - 2 * var(--tvx) - 20px))}
+html[data-ytc-tv] .pmenu[data-m=speed]{width:144px;right:calc(176px - 72px + var(--tvx) - 2px)}
+html[data-ytc-tv] .pmenu[data-m=quality]{width:216px;right:calc(122px - 108px + var(--tvx) - 2px)}
+html[data-ytc-tv] .pmi{max-height:calc(100cqh - 2 * var(--tvy) - 60px)}
+/* The caption window and the skip button stay inside the safe area (the video itself is full-bleed). */
+html[data-ytc-tv] .pcw{left:max(var(--tvx),calc(var(--cx,.03) * 100%));top:max(var(--tvy),calc(var(--cy,.05) * 100%));max-width:calc(100% - max(var(--tvx),calc(var(--cx,.03) * 100%)) - var(--tvx))}
+html[data-ytc-tv] .psbt{left:calc(var(--tvx) + 10px);bottom:calc(var(--tvy) + 64px)}
+/* Account control and the device sign-in panel. */
+html[data-ytc-tv] .tva{display:flex;align-items:center;gap:8px;height:40px;padding:0 16px 0 12px;border:0;border-radius:20px;background:var(--cb);color:var(--tx);font:inherit;font-size:16px}
+html[data-ytc-tv] .tva svg{width:22px;height:22px;display:block;fill:none;stroke:currentColor;stroke-width:1.8}
+html[data-ytc-tv] .tva.on{background:transparent}
+html[data-ytc-tv] #ytc .tvb{height:44px;padding:0 22px;border:0;border-radius:22px;background:var(--ac);color:var(--bg);font:inherit;font-size:17px;font-weight:600}
+html[data-ytc-tv] #ytc .hero .tvh{margin-top:16px}
+html[data-ytc-tv] #ytc .tvb.tvx{background:var(--cb);color:var(--tx);font-weight:500}
+.tvs{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 72%,transparent);opacity:0;visibility:hidden;transition:opacity var(--d-pop-out) var(--e-out),visibility 0s var(--d-pop-out)}
+.tvs.on{opacity:1;visibility:visible;transition:opacity var(--d-panel) var(--e-out),visibility 0s}
+/* The panel stays inside the safe area at any size; its one column never grows past the panel (an unbreakable
+   status line or URL wraps instead of widening every row), and a tall state scrolls inside it. */
+.tvs .tvp{width:min(600px,calc(100vw - 2 * var(--tvx)));max-height:calc(100vh - 2 * var(--tvy));overflow-y:auto;box-sizing:border-box;padding:32px 40px;border-radius:var(--r-pop);background:var(--pn);box-shadow:var(--sh);display:grid;grid-template-columns:minmax(0,1fr);gap:14px;justify-items:start;overflow-wrap:anywhere;scale:calc(1 - .03 * var(--mv));transition:scale var(--d-panel) var(--e-out)}
+.tvs.on .tvp{scale:1}
+#ytc .tvs h2{margin:0;font-size:26px;line-height:32px;font-weight:600}
+.tvs .tvo{color:var(--mu);white-space:nowrap}
+.tvs ol{margin:0;padding-left:22px;font-size:18px;line-height:1.6}
+.tvs .tvu{color:var(--ac)}
+.tvs .tvc{margin:4px 0;font:600 52px/1.1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.08em;color:var(--ac)}
+.tvs .m,.tvs .tvst{max-width:100%;margin:0;color:var(--mu);font-size:15px;line-height:21px;white-space:normal}
+.tvs .tvx{justify-self:end}

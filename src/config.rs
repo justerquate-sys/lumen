@@ -202,6 +202,9 @@ pub struct Auth {
     pub sapisid: Option<String>,
     pub p1: Option<String>,
     pub p3: Option<String>,
+    /// TV app only (`crate::tv`): an OAuth access token from the shell's device sign-in. Requests
+    /// carrying it are sent as the TV client (`tv::finish`), never with the cookie hashes.
+    pub bearer: Option<String>,
 }
 
 impl Auth {
@@ -223,11 +226,14 @@ impl Auth {
     }
 
     pub fn signed_in(&self) -> bool {
-        self.sapisid.is_some() || self.p3.is_some()
+        self.bearer.is_some() || self.sapisid.is_some() || self.p3.is_some()
     }
 
     /// `SAPISIDHASH <ts>_<sha1> SAPISID1PHASH … SAPISID3PHASH …`
     pub fn header(&self, ts_secs: u64) -> Option<String> {
+        if let Some(t) = &self.bearer {
+            return Some(format!("Bearer {t}"));
+        }
         let one = |scheme: &str, sid: &str| {
             let hash = sha1_smol::Sha1::from(format!("{ts_secs} {sid} {ORIGIN}")).digest().to_string();
             format!("{scheme} {ts_secs}_{hash}")

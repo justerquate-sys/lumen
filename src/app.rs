@@ -10,7 +10,7 @@
 //! refreshes in place (stale-while-revalidate).
 
 use crate::actions::{self, Actions, Click};
-use crate::api::{self, CHANNEL_VIDEOS_PARAMS, Req};
+use crate::api::{CHANNEL_VIDEOS_PARAMS, Req};
 use crate::bridge;
 use crate::config::{self, Auth, Config};
 use crate::features::upnext;
@@ -31,6 +31,7 @@ mod logo;
 mod motionglue;
 mod speed;
 mod telglue;
+mod tvglue;
 mod upglue;
 mod voiceglue;
 /// Request context for `actions` (disjoint from `App::acts`).
@@ -174,6 +175,12 @@ enum Timer {
     Logo { generation: u32 },
     /// Probe the network again while a failed player waits for the connection to come back.
     NetProbe,
+    /// TV: the first page stops waiting for the shell's token.
+    TvHold,
+    /// TV: poll the device sign-in (generation).
+    TvPoll { generation: u32 },
+    /// TV: a focus check after a paint (the old page may drop the focus while it goes).
+    TvFocus,
 }
 
 #[derive(PartialEq)]
@@ -325,6 +332,8 @@ pub struct App {
     /// This navigation paints a prefetched first page straight over the old page where it used to
     /// paint the page's snapshot first: like that repaint, the cards make no entrance.
     direct: bool,
+    /// TV mode (`app/tvglue.rs`).
+    tv: tvglue::Tv,
 }
 
 /// Watch-data cache key: the video, plus its playlist (the `next` response differs).
@@ -350,6 +359,8 @@ struct PlayerFailed {
 }
 
 pub fn boot() {
+    // TV app: the platform flag first (it changes how requests are sent and the account is read).
+    let tv_hold = App::tv_boot_flag();
     // Before any card renders (a snapshot repaint happens below).
     render::set_card_hook(crate::features::card_actions);
     let t0 = bridge::now();
@@ -373,7 +384,7 @@ pub fn boot() {
     let mut app = App {
         cfg_ready: false,
         cfg,
-        auth: Auth::from_cookies(&bridge::cookie()),
+        auth: crate::tv::auth(),
         hl,
         route,
         url,
@@ -430,7 +441,7 @@ pub fn boot() {
         api_incident_nav: u32::MAX,
         vision_cache: Vec::new(),
         vision_prefetching: HashSet::new(),
-        fx: fxglue::Fx::new(Auth::from_cookies(&bridge::cookie()).signed_in()),
+        fx: fxglue::Fx::new(crate::tv::auth().signed_in()),
         acts: Actions::default(),
         up_prefetched: 0,
         countdown: None,
@@ -451,6 +462,7 @@ pub fn boot() {
         voice: Default::default(),
         logo: Default::default(),
         direct: false,
+        tv: tvglue::Tv::new(tv_hold),
     };
     app.tel_boot();
     let nav_type = bridge::nav_type();
@@ -477,7 +489,10 @@ pub fn boot() {
     bridge::storage_get(PLAYER_LOG_KEY);
     fxglue::Fx::boot();
     App::voice_boot();
-    if main.is_some() {
+    app.tv_boot();
+    if app.tv.hold {
+        // TV cold start: the skeleton shows until the shell's token answer (`tv_release`).
+    } else if main.is_some() {
         crate::telemetry::nav_src("snapshot");
         bridge::mark("ytcRepaint");
         app.mark("repaint");
@@ -519,9 +534,11 @@ impl App {
 
     fn send(&mut self, req: Req, purpose: Purpose, low: bool) -> u32 {
         let id = next_id();
-        self.auth = Auth::from_cookies(&bridge::cookie());
+        self.auth = crate::tv::auth();
         let body = req.body(&self.cfg, &self.hl, &self.url);
-        let headers = api::headers(&self.cfg, &self.auth, (bridge::epoch() / 1000.0) as u64);
+        // TV: the account's feeds go out as the TV client with the bearer, everything else anonymous.
+        let auth = if self.auth.bearer.is_some() && !self.tv_account_req(&req) { crate::config::Auth::default() } else { self.auth.clone() };
+        let (body, headers) = crate::tv::finish(&self.cfg, &auth, body, (bridge::epoch() / 1000.0) as u64);
         bridge::fetch_opts(id, "POST", &req.url(), &body, &headers, if low { LOW } else { "{}" });
         self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep: req.endpoint() });
         id
@@ -817,6 +834,7 @@ impl App {
     /// A page painted from memory or a snapshot is ready to use.
     fn after_paint(&mut self) {
         self.rendered = true;
+        self.tv_after_paint();
         self.spec_schedule();
         if self.perf_nav != self.nav && self.nav > 1 {
             self.perf_nav = self.nav;
@@ -936,6 +954,8 @@ impl App {
     }
 
     fn ready(&mut self) {
+        // TV: a freshly rendered page gets a focus (never lost on a remote).
+        self.tv_focus_check();
         if !self.first_ready {
             self.first_ready = true;
             bridge::mark("ytcReady");
@@ -1046,7 +1066,11 @@ impl App {
                     self.net_probe();
                 }
             }
+            Some(Timer::TvHold) => self.tv_release(),
+            Some(Timer::TvPoll { generation }) => self.tv_poll(generation),
+            Some(Timer::TvFocus) => self.tv_focus_check(),
             Some(Timer::Bg) => {
+                self.tv_tick();
                 self.bg_check();
                 let id = self.timer(Timer::Bg);
                 bridge::timer(id, BG_TICK_MS);
@@ -1180,7 +1204,7 @@ impl App {
         }
         let route = self.vroute();
         if route == crate::api::VisionRoute::Account {
-            self.auth = Auth::from_cookies(&bridge::cookie());
+            self.auth = crate::tv::auth();
         }
         let (body, headers, opts) = crate::api::vision_request(&self.cfg, &self.auth, (bridge::epoch() / 1000.0) as u64, &route, v);
         let id = next_id();
@@ -1282,6 +1306,10 @@ impl App {
             return false;
         }
         crate::telemetry::input(if kbd { "keyboard" } else { "pointer" });
+        if act.starts_with("tv-") {
+            return self.tv_click(act);
+        }
+        self.tv_opened(href);
         if act.starts_with("vk-") {
             return self.voice_click(act, kbd);
         }
@@ -1461,6 +1489,9 @@ impl App {
         }
         if self.acts.on_key(key) {
             return true;
+        }
+        if let Some(handled) = self.tv_key(key, editable) {
+            return handled;
         }
         if editable {
             return self.fx_key(key);
@@ -2240,7 +2271,7 @@ impl App {
             return;
         }
         self.player_wait = false;
-        self.auth = Auth::from_cookies(&bridge::cookie());
+        self.auth = crate::tv::auth();
         let route = self.vroute();
         let ctx = player::Ctx { cfg: &self.cfg, auth: &self.auth, hl: &self.hl, url: &self.url, route: &route };
         if let Some(p) = self.player.as_mut() {

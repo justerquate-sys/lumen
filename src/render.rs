@@ -527,13 +527,65 @@ pub fn playlist_head(p: &PlaylistPage, wl: bool) -> Head {
 }
 
 pub fn home_nudge(nudge: &str, signed_in: bool) -> String {
-    let mut out = String::from("<section class=\"hero\"><h1>What do you want to watch?</h1><form id=\"ytc-search2\" role=\"search\" action=\"/results\"><input name=\"search_query\" type=\"search\" placeholder=\"Search YouTube\" autocomplete=\"off\" autofocus></form><p class=\"m\">");
+    // TV: no autofocus (a focused field opens the on-screen keyboard, which takes the remote's arrows).
+    let autofocus = if crate::tv::on() { "" } else { " autofocus" };
+    let mut out = format!("<section class=\"hero\"><h1>What do you want to watch?</h1><form id=\"ytc-search2\" role=\"search\" action=\"/results\"><input name=\"search_query\" type=\"search\" placeholder=\"Search YouTube\" autocomplete=\"off\"{autofocus}></form><p class=\"m\">");
     esc_into(&mut out, nudge);
     out.push_str("</p>");
-    if !signed_in {
+    if !signed_in && crate::tv::on() {
+        // TV: Google's sign-in does not run in the app; the device sign-in panel does (app/tvglue.rs).
+        // The button gets its own row under the sentence (inline, it would overflow the text's line box).
+        out.push_str("<p class=\"m\">Sign in for Home recommendations, Subscriptions, History and Watch later.</p><button type=\"button\" class=\"tvb tvh\" data-act=\"tv-signin\">Sign in with your phone</button>");
+    } else if !signed_in {
         out.push_str("<p class=\"m\"><a href=\"https://accounts.google.com/ServiceLogin?service=youtube&amp;passive=true&amp;continue=https%3A%2F%2Fwww.youtube.com%2F\">Sign in</a> for Home recommendations, Subscriptions, History and Watch later.</p>");
     }
     out.push_str("</section>");
+    out
+}
+
+/// TV top-bar account control: Sign in (device code) or the account panel.
+pub fn tv_slot(signed_in: bool) -> String {
+    if signed_in {
+        "<button type=\"button\" class=\"tva on\" data-act=\"tv-account\" aria-label=\"Account\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"8.5\" r=\"3.5\"/><path d=\"M5 19.5c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5\"/></svg><span>Account</span></button>".into()
+    } else {
+        "<button type=\"button\" class=\"tva\" data-act=\"tv-signin\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"8.5\" r=\"3.5\"/><path d=\"M5 19.5c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5\"/></svg><span>Sign in</span></button>".into()
+    }
+}
+
+/// TV sign-in / account panel. `code`: (user code, verification URL) while a device sign-in runs.
+pub fn tv_panel(code: Option<(&str, &str)>, signed_in: bool, status: &str) -> String {
+    let mut out = String::from("<div class=\"tvp\">");
+    match code {
+        Some((c, url)) => {
+            // youtube.com/activate and Google's answer (google.com/device) open the same page
+            // (accounts.google.com/device, checked 2 Nov 2026); YouTube's TV app names the first.
+            let shown = url.trim_start_matches("https://").trim_start_matches("www.");
+            out.push_str("<h2>Sign in to YouTube</h2><ol><li>On your phone or computer, go to <b class=\"tvu\">youtube.com/activate</b>");
+            if shown != "youtube.com/activate" {
+                out.push_str(" <span class=\"tvo\">(or ");
+                esc_into(&mut out, shown);
+                out.push_str(")</span>");
+            }
+            out.push_str("</li><li>Enter this code</li></ol><p class=\"tvc\" aria-live=\"polite\">");
+            esc_into(&mut out, c);
+            out.push_str("</p><p class=\"m\">Then choose your Google account. This screen continues by itself. Your history, subscriptions, Watch later and playlists stay in sync with YouTube on every device.</p>");
+        }
+        None if signed_in => {
+            out.push_str("<h2>Signed in</h2><p class=\"m\">This TV uses your YouTube account: history, subscriptions, Watch later and playlists are the same as on your other devices.</p><button type=\"button\" class=\"tvb\" data-act=\"tv-signout\">Sign out</button>");
+        }
+        None => {
+            out.push_str("<h2>Sign in to YouTube</h2>");
+            if !status.is_empty() && !status.ends_with('…') {
+                out.push_str("<button type=\"button\" class=\"tvb\" data-act=\"tv-newcode\">Get a new code</button>");
+            }
+        }
+    }
+    if !status.is_empty() {
+        out.push_str("<p class=\"tvst\" role=\"status\">");
+        esc_into(&mut out, status);
+        out.push_str("</p>");
+    }
+    out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-close\">Close</button></div>");
     out
 }
 

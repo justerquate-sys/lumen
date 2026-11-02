@@ -58,6 +58,10 @@ pub fn n3(x: f64) -> String {
 /// Values shared by every ping of one playback session.
 #[derive(Clone, Debug, Default)]
 pub struct Session {
+    /// The InnerTube client whose `player` response gave the tracking URLs ("" = WEB) and its
+    /// platform ("" = DESKTOP); the TV app's signed-in session is TVHTML5 / TV.
+    pub client: String,
+    pub platform: String,
     pub cpn: String,
     pub client_version: String,
     pub hl: String,
@@ -103,10 +107,10 @@ fn common(u: &mut String, s: &Session, n: &Now) {
     push(u, "fs", if n.fs { "1" } else { "0" });
     push(u, "rt", &n3(n.rt));
     push(u, "lact", &format!("{}", n.lact.max(0.0).round() as u64));
-    push(u, "c", "WEB");
+    push(u, "c", if s.client.is_empty() { "WEB" } else { &s.client });
     push(u, "cver", &s.client_version);
     push(u, "cplayer", "UNIPLAYER");
-    push(u, "cplatform", "DESKTOP");
+    push(u, "cplatform", if s.platform.is_empty() { "DESKTOP" } else { &s.platform });
     if !s.hl.is_empty() {
         push(u, "hl", &s.hl);
     }
@@ -256,7 +260,7 @@ mod tests {
 
     #[test]
     fn ping_parameters() {
-        let s = Session { cpn: cpn("seed"), client_version: "2.20261030.01.00".into(), hl: "en".into(), referrer: "https://www.youtube.com/watch?v=aqz-KE-bpKQ".into(), len: 635.0, fmt: 303, afmt: 251 };
+        let s = Session { cpn: cpn("seed"), client_version: "2.20261030.01.00".into(), hl: "en".into(), referrer: "https://www.youtube.com/watch?v=aqz-KE-bpKQ".into(), len: 635.0, fmt: 303, afmt: 251, ..Default::default() };
         assert_eq!(s.cpn.len(), 16);
         assert!(s.cpn.bytes().all(|b| CPN_ALPHABET.contains(&b)));
         assert_ne!(cpn("seed"), cpn("seed2"));
@@ -273,6 +277,13 @@ mod tests {
         for (k, v) in [("st", "0,30"), ("et", "10.5,31.25"), ("state", "paused"), ("volume", "80,80"), ("muted", "0,0"), ("rate", "1.5,1.5"), ("final", "1"), ("len", "635")] {
             assert_eq!(q(&w, k).as_deref(), Some(v), "{k} in {w}");
         }
+        // The TV app's signed-in session reports itself as the TV client.
+        let tv = Session { client: "TVHTML5".into(), platform: "TV".into(), client_version: "7.20261027.15.00".into(), ..s.clone() };
+        let u = playback_url(base, &tv, &n);
+        for (k, v) in [("c", "TVHTML5"), ("cplatform", "TV"), ("cver", "7.20261027.15.00")] {
+            assert_eq!(q(&u, k).as_deref(), Some(v), "{k} in {u}");
+        }
+        assert_eq!(q(&playback_url(base, &s, &n), "cplatform").as_deref(), Some("DESKTOP"));
         assert_eq!(n3(1.0), "1");
         assert_eq!(n3(0.1 + 0.2), "0.3");
         assert_eq!(n3(f64::NAN), "0");

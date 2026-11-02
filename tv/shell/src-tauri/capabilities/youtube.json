@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/mobile-schema.json",
+  "identifier": "youtube",
+  "description": "The shared client running on https://www.youtube.com may call the shell's commands (tv/shim/shim.js): account, persistent storage, update status. Nothing else (no core plugins: the page never gets file, shell or window access).",
+  "windows": ["main"],
+  "remote": { "urls": ["https://www.youtube.com/*"] },
+  "permissions": ["allow-ytc"]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "lumen-tv-core"
+version = "0.1.0"
+description = "Lumen TV shell logic without Tauri: signed client updates, the TV device sign-in, the request rules, the storage shim"
+license = "MIT"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+sha2 = "0.10"
+base64 = "0.22"
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+getrandom = "0.3"

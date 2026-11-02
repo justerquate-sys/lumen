@@ -2,7 +2,7 @@
 target/
 pkg/
 tools/debug-center/target/
-node_modules/
+node_modules
 
 # Written by the browser into unpacked extensions; written by ./build.sh --dev
 extension/_metadata/
@@ -14,3 +14,15 @@ incidents*
 *.log
 
 .DS_Store
+
+# Google TV app (tv/): build output, the generated client bundle, signing keys (they live in
+# ~/.config/lumen-tv/ and are never committed; tv/keys/release.pub is the public key on purpose)
+tv/core/target/
+tv/shell/src-tauri/target/
+tv/shell/src-tauri/bundle/
+tv/out/
+*.jks
+*.keystore
+*.pem
+*.p12
+keystore.properties

@@ -18,6 +18,7 @@ pub mod render;
 pub mod route;
 pub mod snap;
 pub mod telemetry;
+pub mod tv;
 pub mod util;
 
 use wasm_bindgen::prelude::*;
@@ -92,6 +93,18 @@ pub fn on_native_input(name: &str, value: &str, committed: bool) {
 #[wasm_bindgen]
 pub fn on_native_intent() {
     native::clean::on_intent();
+}
+
+/// An app shell call answered (`bridge::shell`).
+#[wasm_bindgen]
+pub fn on_shell(seq: u32, ok: bool, json: &str) {
+    app::with(|a| a.on_shell(seq, ok, json));
+}
+
+/// The app shell's Back button: true = handled by the client.
+#[wasm_bindgen]
+pub fn on_back() -> bool {
+    app::with_ret(|a| a.on_back())
 }
 
 #[wasm_bindgen]

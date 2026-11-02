@@ -1,0 +1,2 @@
+# The TV crates (tv/core, tv/shell/src-tauri) follow the client's long-line style.
+max_width = 160

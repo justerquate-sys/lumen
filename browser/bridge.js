@@ -479,6 +479,48 @@ const YTC = (() => {
     replace_doc(url) { location.replace(url); },
     ua: () => navigator.userAgent,
     local_flag(key) { try { return localStorage.getItem(key) === '1'; } catch { return false; } },
+    // ---- app shell (the TV app, tv/). An app shell sets YTC_PLATFORM ('tv') and YTC_SHELL before this
+    // script runs (tv/shim/shim.js); localStorage 'ytc:platform' is a development switch for testing in a browser,
+    // and 'ytc:shell' (JSON {cmd: answer string, or null = the call fails}) stands in for the shell there.
+    platform() { try { return String(globalThis.YTC_PLATFORM || localStorage.getItem('ytc:platform') || ''); } catch { return ''; } },
+    // YTC_SHELL.call(cmd, json) → Promise<string>; answered by on_shell(seq, ok, json).
+    shell(seq, cmd, json) {
+      let s = globalThis.YTC_SHELL;
+      if (!s) try {
+        const t = JSON.parse(localStorage.getItem('ytc:shell') || 'null');
+        if (t) s = { call: c => typeof t[c] === 'string' ? Promise.resolve(t[c]) : Promise.reject(new Error(String(t.error || 'no shell'))) };
+      } catch {}
+      if (!s || typeof s.call !== 'function') { setTimeout(() => call('on_shell', seq, false, '"no shell"'), 0); return; }
+      Promise.resolve().then(() => s.call(cmd, json)).then(r => call('on_shell', seq, true, String(r == null ? 'null' : r)), e => call('on_shell', seq, false, JSON.stringify(String((e && e.message) || e))));
+    },
+    // The platform Back button: the shell calls YTC_BACK() → true = the page handled it.
+    back_hook() { globalThis.YTC_BACK = () => !!call('on_back'); },
+    // Spatial navigation (the decision is Rust's, tv::pick): rects of the visible `sel` elements (minus `skip`)
+    // inside the innermost open `scope` element around the focus (else the last open one, else the document),
+    // as [x, y, w, h]*n followed by the focused element's index (-1: none). The list is kept for spatial_focus.
+    spatial_rects(scope, sel, skip) {
+      const a = d.activeElement, vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (!el.checkVisibility || el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })); };
+      let root = d;
+      if (scope) {
+        const open = [...d.querySelectorAll(scope)].filter(vis);
+        root = open.filter(s => s.contains(a)).pop() || open.pop() || d;
+      }
+      const els = [], out = [];
+      for (const el of root.querySelectorAll(sel)) {
+        if ((skip && el.matches(skip)) || el.closest('[inert],[aria-hidden="true"],[hidden]') || !vis(el)) continue;
+        const r = el.getBoundingClientRect();
+        els.push(el); out.push(r.left, r.top, r.width, r.height);
+      }
+      YTC._sp = els;
+      out.push(els.indexOf(a));
+      return new Float64Array(out);
+    },
+    spatial_focus(i) {
+      const el = (YTC._sp || [])[i]; if (!el) return;
+      el.focus({ preventScroll: true, focusVisible: true });
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    },
+    session_clear() { try { sessionStorage.clear(); } catch {} },
     hidden: () => d.hidden,
     screen_px: () => new Float64Array([screen.width, screen.height, devicePixelRatio || 1]),
     playback_quality(h) { const v = mo.get(h); const q = v && v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null; return new Float64Array(q ? [q.droppedVideoFrames, q.totalVideoFrames] : []); },

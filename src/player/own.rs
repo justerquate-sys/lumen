@@ -318,6 +318,8 @@ pub struct Own {
     route: VisionRoute,
     /// The account's session headers source (for the account route).
     auth: Auth,
+    /// Headers for history pings ("{}" or the TV bearer, `tv::ping_headers`).
+    ping_headers: String,
     recover: Option<Recover>,
     /// A fresh OK VISIONOS body for the app's cache (taken by the app).
     pub vision_ok: Option<std::rc::Rc<Vec<u8>>>,
@@ -563,6 +565,7 @@ impl Own {
             vision_cfg: None,
             route: VisionRoute::Anon,
             auth: Auth::default(),
+            ping_headers: "{}".into(),
             recover: None,
             vision_ok: None,
             retry_heads: Vec::new(),
@@ -741,13 +744,19 @@ impl Own {
         }
         let sts = ctx.cfg.sts(bridge::epoch());
         let body = api::web_player(ctx.cfg, ctx.hl, ctx.url, &self.v, &self.cpn, sts);
-        let headers = api::headers(ctx.cfg, ctx.auth, (bridge::epoch() / 1000.0) as u64);
+        // TV app signed in: the same call as YouTube's TV client with the account's bearer, so the
+        // tracking URLs (and the pings below, sent with the bearer) record the watch in its history.
+        let tv_session = ctx.auth.bearer.is_some();
+        let (body, headers) = crate::tv::finish(ctx.cfg, ctx.auth, body, (bridge::epoch() / 1000.0) as u64);
+        self.ping_headers = crate::tv::ping_headers(ctx.auth);
         let id = next_id();
         bridge::fetch(id, "POST", &api::player_url(), &body, &headers);
         self.fetches.insert(id, Inflight { req: Req::Web, sent: bridge::now(), what: "player WEB".into() });
         self.session = Session {
+            client: if tv_session { crate::tv::TV_NAME.into() } else { String::new() },
+            platform: if tv_session { "TV".into() } else { String::new() },
             cpn: self.cpn.clone(),
-            client_version: ctx.cfg.version.clone(),
+            client_version: if tv_session { crate::tv::TV_VERSION.into() } else { ctx.cfg.version.clone() },
             hl: ctx.hl.to_string(),
             referrer: format!("https://www.youtube.com{}", ctx.url),
             ..Default::default()
@@ -801,7 +810,7 @@ impl Own {
         }
         let Some(cfg) = self.vision_cfg.clone() else { return self.fail(format!("VISIONOS LOGIN_REQUIRED: {reason}")) };
         let mut r = Recover { pending: 0, steps: vec![format!("{} (bot check)", self.route.label())], all_bot: true, reason: reason.to_string() };
-        if self.auth.signed_in() && self.route != VisionRoute::Account {
+        if self.auth.signed_in() && self.auth.bearer.is_none() && self.route != VisionRoute::Account {
             self.send_vision(&cfg, &VisionRoute::Account);
             r.pending += 1;
         }
@@ -2651,6 +2660,13 @@ impl Own {
 
     fn ping(&mut self, url: String, keepalive: bool) {
         self.pings += 1;
+        if self.ping_headers.len() > 2 {
+            // TV: the bearer goes with the ping (no cookies in the TV app's WebView).
+            let id = next_id();
+            bridge::fetch_opts(id, "GET", &url, "", &self.ping_headers, if keepalive { "{\"keepalive\":true}" } else { "{}" });
+            self.fetches.insert(id, Inflight { req: Req::Ping, sent: bridge::now(), what: describe(&Req::Ping, &url) });
+            return;
+        }
         self.get(Req::Ping, &url, if keepalive { "{\"keepalive\":true}" } else { "{}" });
     }
 
@@ -3644,6 +3660,11 @@ impl Own {
             "sb" => ui::SBB,
             _ => ui::CCB,
         }
+    }
+
+    /// Whether playback is paused (the TV remote's OK toggles it).
+    pub fn paused(&self) -> bool {
+        self.paused
     }
 
     /// Keyboard shortcuts (YouTube's): space/k, j/l, ←/→, ↑/↓ (volume), f,

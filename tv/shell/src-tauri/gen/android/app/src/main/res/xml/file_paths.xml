@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shell updates: the downloaded, hash-checked APK handed to Android's installer (Host.installApk). -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <files-path name="updates" path="updates/" />
+</paths>

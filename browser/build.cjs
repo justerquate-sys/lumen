@@ -1,6 +1,7 @@
 // Writes the loadable extension (extension/) from the Rust build and the browser sources.
 //   node browser/build.cjs          public build (what is committed and shipped)
 //   node browser/build.cjs --dev    development build (debug-center delivery, auto-reload)
+//   node browser/build.cjs --target=tv   the TV app's bundle (tv/shell/src-tauri/bundle), public only
 // Run through ./build.sh, which compiles the Rust crate and runs wasm-bindgen first.
 //
 // content.js bundles bridge.js + the wasm-bindgen glue + the embedded Wasm. The Wasm bytes travel
@@ -16,11 +17,17 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
 const root = path.join(__dirname, '..'), src = __dirname, pkg = path.join(root, 'target', 'pkg');
 const args = process.argv.slice(2);
 const DEV = args.includes('--dev');
-// Browser targets. Only Chromium (Chrome, Brave, Edge, Vivaldi, Opera…) for now; another target
-// (e.g. Firefox) adds its manifest template here and writes its own folder.
-const TARGETS = { chromium: { out: path.join(root, 'extension'), manifest: 'manifest.json' } };
+// Targets. Chromium (Chrome, Brave, Edge, Vivaldi, Opera…) is the extension; another browser (e.g.
+// Firefox) adds its manifest template here and writes its own folder. `tv` is the bundle the Google
+// TV / Android TV app (tv/) injects into its WebView: the same content.js, plus the extension's
+// stylesheets and request rules, a bundle sequence and the client version (see tv/README.md).
+const TARGETS = {
+  chromium: { out: path.join(root, 'extension'), manifest: 'manifest.json' },
+  tv: { out: path.join(root, 'tv', 'shell', 'src-tauri', 'bundle'), manifest: 'manifest.json', bundle: true },
+};
 const target = TARGETS[(args.find(a => a.startsWith('--target=')) || '--target=chromium').slice(9)];
 assert.ok(target, 'unknown --target');
+assert.ok(!(DEV && target.bundle), 'the TV bundle is always a public build (no --dev)');
 const DEV_HOST = 'http://127.0.0.1:47321/*';
 
 // Keeps (dev) or drops (public) the @dev blocks.
@@ -96,6 +103,24 @@ if (DEV) {
 }
 
 const dir = target.out;
+if (target.bundle) {
+  // The TV bundle: content.js as built here; the stylesheets and rules are the extension's own files.
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'content.js'), out);
+  const hash = require('node:crypto').createHash('sha256').update(out);
+  for (const f of ['client.css', 'native.css', 'rules.json']) {
+    const b = fs.readFileSync(path.join(root, 'extension', f));
+    fs.writeFileSync(path.join(dir, f), b);
+    hash.update(b);
+  }
+  // seq orders bundles (the app installs a newer one); client names it in the app's About.
+  const seq = process.env.SEQ || String(Math.floor(Date.now() / 1000));
+  assert.ok(/^\d+$/.test(seq), 'SEQ must be a number');
+  fs.writeFileSync(path.join(dir, 'seq'), seq + '\n');
+  fs.writeFileSync(path.join(dir, 'client'), `${manifest.version} (${hash.digest('hex').slice(0, 16)})\n`);
+  console.log(`tv bundle: ${dir} (content.js ${out.length} bytes, seq ${seq})`);
+  process.exit(0);
+}
 fs.writeFileSync(path.join(dir, 'content.js'), out);
 fs.writeFileSync(path.join(dir, 'background.js'), background);
 const idFile = path.join(dir, 'build-id.txt');

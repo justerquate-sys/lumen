@@ -1182,12 +1182,12 @@ impl App {
     }
 
     fn fx_wl_send(&mut self, v: &str, edit: Option<Edit>) {
-        self.auth = crate::config::Auth::from_cookies(&bridge::cookie());
+        self.auth = crate::tv::auth();
         let (ep, body) = match edit {
             Some(e) => (wl::EDIT, wl::edit_body(&self.cfg, v, e)),
             None => (wl::MEMBERSHIP, wl::membership_body(&self.cfg, v)),
         };
-        let headers = crate::api::headers(&self.cfg, &self.auth, (bridge::epoch() / 1000.0) as u64);
+        let (body, headers) = crate::tv::finish(&self.cfg, &self.auth, body, (bridge::epoch() / 1000.0) as u64);
         let id = next_id();
         bridge::fetch_opts(id, "POST", &wl::url(ep), &body, &headers, if edit.is_some() { "{}" } else { "{\"priority\":\"low\"}" });
         self.fx.reqs.insert(id, Req::Wl { v: v.to_string(), edit });
@@ -1676,11 +1676,11 @@ impl App {
         self.after_paint();
         self.fx.enter = !self.fx.kbd;
         bridge::focus(&features::control_id("fx-nchip", key));
-        self.auth = crate::config::Auth::from_cookies(&bridge::cookie());
+        self.auth = crate::tv::auth();
         let req = crate::api::Req::Cont { ep: "browse", token };
-        let headers = crate::api::headers(&self.cfg, &self.auth, (bridge::epoch() / 1000.0) as u64);
+        let (body, headers) = crate::tv::finish(&self.cfg, &self.auth, req.body(&self.cfg, &self.hl, &self.url), (bridge::epoch() / 1000.0) as u64);
         let id = next_id();
-        bridge::fetch_opts(id, "POST", &req.url(), &req.body(&self.cfg, &self.hl, &self.url), &headers, "{}");
+        bridge::fetch_opts(id, "POST", &req.url(), &body, &headers, "{}");
         self.fx.reqs.insert(id, Req::Chip { seq: self.fx.ngen });
     }
 

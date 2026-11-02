@@ -108,6 +108,27 @@ extern "C" {
     /// Scrolls the box `id` (not the window) so its first `sel` child is centered.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn scroll_in(id: &str, sel: &str);
+    // ---- app shell (the TV app, `tv/`); see bridge.js.
+    /// The platform an app shell declared (`"tv"`), else "".
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn platform() -> String;
+    /// A call into the app shell; answered by `on_shell(seq, ok, json)`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shell(seq: u32, cmd: &str, json: &str);
+    /// The shell's Back button calls `on_back()` from now on.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn back_hook();
+    /// Spatial navigation: `[x, y, w, h]*n, focused index (-1 none)` of the visible `sel` elements
+    /// (minus `skip`) inside the innermost open `scope` around the focus (else the last open one,
+    /// else the document). The list is kept for `spatial_focus`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn spatial_rects(scope: &str, sel: &str, skip: &str) -> Vec<f64>;
+    /// Focuses item `i` of the last `spatial_rects` list and scrolls it into view.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn spatial_focus(i: u32);
+    /// Empties this tab's sessionStorage.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn session_clear();
     /// True when some element in the document matches `sel`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn any(sel: &str) -> bool;

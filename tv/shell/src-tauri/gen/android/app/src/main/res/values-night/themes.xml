@@ -1,0 +1,12 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- The background of the client (its bg colour), so the app never flashes white while YouTube loads. -->
+    <style name="Theme.lumen_tv" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/ytc_bg</item>
+        <item name="colorPrimary">@color/ytc_ac</item>
+        <item name="colorOnPrimary">@color/ytc_bg</item>
+        <item name="colorSecondaryContainer">@color/ytc_on</item>
+        <item name="android:alertDialogTheme">@style/ThemeOverlay.Material3.Dialog.Alert</item>
+        <item name="android:statusBarColor">@color/ytc_bg</item>
+        <item name="android:navigationBarColor">@color/ytc_bg</item>
+    </style>
+</resources>

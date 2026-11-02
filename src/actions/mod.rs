@@ -245,7 +245,7 @@ pub struct Actions {
 }
 
 fn signed_in() -> bool {
-    Auth::from_cookies(&bridge::cookie()).signed_in()
+    crate::tv::auth().signed_in()
 }
 
 impl Actions {
@@ -259,9 +259,13 @@ impl Actions {
 
     fn post(&mut self, net: &Net, (ep, body): req::Body, job: Job) -> u32 {
         let id = next_id();
-        let auth = Auth::from_cookies(&bridge::cookie());
-        let headers = crate::api::headers(net.cfg, &auth, (bridge::epoch() / 1000.0) as u64);
-        bridge::fetch(id, "POST", &req::url(ep), &req::with_context(body, net.cfg, net.hl, net.url), &headers);
+        let mut auth = crate::tv::auth();
+        // TV: comment pages continue the anonymous WEB `next` (their tokens are WEB tokens).
+        if auth.bearer.is_some() && matches!(job, Job::Comments { .. } | Job::Replies { .. }) {
+            auth = Auth::default();
+        }
+        let (body, headers) = crate::tv::finish(net.cfg, &auth, req::with_context(body, net.cfg, net.hl, net.url), (bridge::epoch() / 1000.0) as u64);
+        bridge::fetch(id, "POST", &req::url(ep), &body, &headers);
         self.jobs.insert(id, job);
         id
     }
@@ -311,7 +315,9 @@ impl Actions {
 
     /// Shell is in the DOM: show the bell and avatar when signed in.
     pub fn boot(&mut self) {
-        if signed_in() {
+        // TV: the top-bar slot is the TV account control (app/tvglue.rs); no bell (its WEB endpoints
+        // do not take the TV token).
+        if signed_in() && !crate::tv::on() {
             self.slot_on = true;
             self.render_slot();
         }

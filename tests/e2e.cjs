@@ -5437,6 +5437,180 @@ chrome.runtime.onMessage.addListener(m => {
     } finally { await sw.evaluate(() => chrome.storage.local.remove('ytcTelemetryV1')); }
   });
 
+  await step('TV mode (the TV app\'s platform flag, here without its shell): D-pad walks the grid, OK opens our player, ↓ enters the control bar, no autofocus on Home', async () => {
+    // The TV app sets YTC_PLATFORM; localStorage ytc:platform is the development switch for the same mode.
+    const tv = await ctx.newPage();
+    const tvErrors = [];
+    tv.on('pageerror', e => tvErrors.push(String(e)));
+    try {
+      await tv.addInitScript(() => { try { localStorage.setItem('ytc:platform', 'tv'); } catch {} });
+      await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await tv.waitForSelector('.hero');
+      assert.equal(await tv.getAttribute('html', 'data-ytc-tv'), '1');
+      assert.equal(await tv.locator('.hero input[autofocus]').count(), 0, 'no autofocus: the TV keyboard would take the arrows');
+      assert.equal(await tv.locator('.hero [data-act=tv-signin]').count(), 1, 'device sign-in instead of the Google page');
+      await tv.goto('https://www.youtube.com/results?search_query=lofi', { waitUntil: 'commit' });
+      await tv.waitForSelector('#ytc-list .c a.t');
+      const focused = () => tv.evaluate(() => { const a = document.activeElement, r = a.getBoundingClientRect(); return { href: a.getAttribute('href'), cls: a.className, x: Math.round(r.left), y: Math.round(r.top) }; });
+      await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+      const a = await focused();
+      await tv.keyboard.press('ArrowRight');
+      const b = await focused();
+      assert.ok(b.href !== a.href && b.x > a.x && Math.abs(b.y - a.y) < 4, `→ moves along the row: ${JSON.stringify([a, b])}`);
+      await tv.keyboard.press('ArrowDown');
+      const c = await focused();
+      assert.ok(c.y > b.y + 40 && Math.abs(c.x - b.x) < 4, `↓ lands on the card below: ${JSON.stringify([b, c])}`);
+      await tv.keyboard.press('ArrowUp');
+      assert.equal((await focused()).href, b.href, '↑ comes back');
+      await tv.keyboard.press('Enter');
+      await tv.waitForFunction(() => location.pathname === '/watch', null, { timeout: 8000 }).catch(async e => { throw new Error(e.message + ' at ' + tv.url() + ' focus ' + JSON.stringify(await focused())); });
+      assert.equal(new URL(tv.url()).pathname + new URL(tv.url()).search, b.href.replace(/&amp;/g, '&'));
+      await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-player', null, { timeout: 8000 });
+      await tv.waitForSelector('#ytc-player video');
+      await tv.keyboard.press('ArrowDown');
+      assert.ok(await tv.evaluate(() => !!document.activeElement.closest('#ytc-player .pctl')), '↓ from the player enters the control bar');
+      await tv.keyboard.press('ArrowUp');
+      assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-player', '↑ from the bar returns to the player');
+      assert.deepEqual(tvErrors, []);
+    } finally {
+      await tv.evaluate(() => localStorage.removeItem('ytc:platform')).catch(() => {});
+      await tv.close();
+    }
+  });
+  await step('TV panels fit the screen at 960×540 and 1920×1080 inside the overscan-safe area: Home\'s sign-in nudge, the sign-in panel (code + a long status, no code, signed in), the control bar, the player menus (and the remote walks the bar after one closed), skip button, captions', async () => {
+    // The TV mode with a stand-in for the TV app's shell (localStorage ytc:platform and ytc:shell, the
+    // development switches for what tv/shim/shim.js provides). localStorage e2e:tv picks its answers: 'code' = a sign-in code whose polls fail with a long unbroken reason, 'nocode' =
+    // the code request fails, 'signed' = a signed-in account.
+    const tv = await ctx.newPage();
+    const tvErrors = [];
+    tv.on('pageerror', e => tvErrors.push(String(e)));
+    try {
+      await tv.addInitScript(() => {
+        const mode = localStorage.getItem('e2e:tv') || 'code';
+        const why = 'https://oauth2.googleapis.com/device/token?' + 'x'.repeat(80);
+        localStorage.setItem('ytc:platform', 'tv');
+        localStorage.setItem('ytc:shell', JSON.stringify({
+          auth_token: mode === 'signed' ? JSON.stringify({ token: 'ya29.' + 'a'.repeat(60), exp: Date.now() + 3600e3 }) : '{"token":null}',
+          auth_start: mode === 'nocode' ? null : JSON.stringify({ user_code: 'WWW-WWW-WWW', verification_url: 'https://www.google.com/device', interval: 1, expires_in: 1800 }),
+          auth_poll: JSON.stringify({ state: 'error', error: why }),
+          auth_signout: '{}',
+          error: 'HTTP 503 ' + why,
+        }));
+      });
+      // Every box (elements and text lines) of `sel` inside its own content box (horizontally: a tall state
+      // scrolls inside the panel), the focused control with its ring inside the panel's padding, the box
+      // itself inside the overscan-safe area (5 % per side: 48 × 27 px at 960 × 540), nothing clipped.
+      const fit = (sel, inner) => tv.evaluate(([sel, inner]) => {
+        const el = document.querySelector(sel), W = innerWidth, H = innerHeight, cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect(), bad = [], e = 0.5, sx = W * 0.05, sy = H * 0.05;
+        const px = v => Math.round(v);
+        // A full-bleed bar (inner = 'bleed') keeps its content box in the safe area, a panel its whole box.
+        const sr = inner === 'bleed' ? { left: r.left + parseFloat(cs.paddingLeft), top: r.top + parseFloat(cs.paddingTop), right: r.right - parseFloat(cs.paddingRight), bottom: r.bottom - parseFloat(cs.paddingBottom) } : r;
+        if (sr.left < sx - e || sr.top < sy - e || sr.right > W - sx + e || sr.bottom > H - sy + e) bad.push(`${sel} ${[sr.left, sr.top, sr.right, sr.bottom].map(px)} outside the safe area of ${W}×${H}`);
+        if (el.scrollWidth > el.clientWidth + 1 && cs.overflowX !== 'visible') bad.push(`${sel} scrolls sideways (${el.scrollWidth} > ${el.clientWidth})`);
+        const pad = inner ? [parseFloat(cs.paddingLeft), parseFloat(cs.paddingRight)] : [0, 0];
+        const out = (q, what, ring) => {
+          // (In a full-bleed bar everything, rings included, stays inside the safe area.)
+          const l = inner === 'bleed' ? sx : ring ? r.left : r.left + pad[0], rt = inner === 'bleed' ? W - sx : ring ? r.right : r.right - pad[1];
+          if (q.width && q.height && (q.left < l - e || q.right > rt + e)) bad.push(`${what} ${[q.left, q.right].map(px)} outside ${[l, rt].map(px)}`);
+        };
+        const seen = { checkOpacity: true, checkVisibilityCSS: true }; // (opacity 0 anywhere up the tree = not shown)
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          if (n.nodeType === 3) {
+            if (!n.data.trim() || !n.parentElement.checkVisibility(seen)) continue;
+            const rg = document.createRange(); rg.selectNodeContents(n);
+            for (const q of rg.getClientRects()) out(q, JSON.stringify(n.data.slice(0, 30)));
+            continue;
+          }
+          if (!n.checkVisibility(seen)) continue;
+          const ns = getComputedStyle(n), q = n.getBoundingClientRect(), what = n.tagName.toLowerCase() + '.' + n.className;
+          if (n === document.activeElement && ns.outlineStyle !== 'none') {
+            const o = parseFloat(ns.outlineWidth) + parseFloat(ns.outlineOffset);
+            out({ left: q.left - o, right: q.right + o, width: q.width, height: q.height }, what + ' (focus ring)', true);
+            // …and no ancestor that clips (overflow other than visible) cuts the ring.
+            for (let p = n.parentElement; p && p !== el.parentElement; p = p.parentElement) {
+              const ps = getComputedStyle(p), pr = p.getBoundingClientRect();
+              if (ps.overflowX === 'visible' && ps.overflowY === 'visible') continue;
+              if (q.left - o < pr.left - e || q.right + o > pr.right + e || q.top - o < pr.top - e || q.bottom + o > pr.bottom + e) bad.push(`${what}'s focus ring is cut by ${p.tagName.toLowerCase()}.${p.className}`);
+            }
+          } else out(q, what);
+          if (n.scrollWidth > n.clientWidth + 1 && ns.overflowX !== 'visible') bad.push(`${what} clips its text (${n.scrollWidth} > ${n.clientWidth})`);
+          if (n.scrollHeight > n.clientHeight + 1 && /hidden|clip/.test(ns.overflowY)) bad.push(`${what} cuts its content off (${n.scrollHeight} > ${n.clientHeight})`);
+        }
+        return bad;
+      }, [sel, inner]);
+      const shots = process.env.YTC_SHOTS;
+      for (const [W, H] of [[960, 540], [1920, 1080]]) {
+        await tv.setViewportSize({ width: W, height: H });
+        for (const mode of ['signed', 'nocode', 'code']) {
+          await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+          await tv.evaluate(m => { localStorage.setItem('e2e:tv', m); sessionStorage.clear(); }, mode);
+          await tv.reload({ waitUntil: 'commit' });
+          await tv.waitForSelector('#ytc-acct .tva');
+          if (mode !== 'signed') {
+            // Home's sign-in nudge (signed out): the text and the focused button with its ring.
+            await tv.waitForSelector('.hero [data-act=tv-signin]');
+            await tv.focus('.hero [data-act=tv-signin]');
+            await tv.waitForTimeout(250);
+            if (shots && mode === 'code') await tv.screenshot({ path: path.join(shots, `tv-home-${W}.png`) });
+            assert.deepEqual(await fit('#ytc .hero', false), [], `Home nudge at ${W}×${H}`);
+          }
+          await tv.focus('#ytc-acct .tva');
+          await tv.keyboard.press('Enter');
+          await tv.waitForSelector('#ytc-tvsign.on');
+          if (mode === 'code') await tv.waitForSelector('#ytc-tvsign .tvc + .m ~ .tvst', { timeout: 5000 });
+          if (mode === 'nocode') await tv.waitForSelector('#ytc-tvsign [data-act=tv-newcode]');
+          if (mode === 'signed') await tv.waitForSelector('#ytc-tvsign [data-act=tv-signout]');
+          await tv.waitForTimeout(400); // the panel's scale-in
+          if (shots) await tv.screenshot({ path: path.join(shots, `tv-signin-${mode}-${W}.png`) });
+          assert.deepEqual(await fit('#ytc-tvsign .tvp', true), [], `${mode} at ${W}×${H}`);
+          assert.ok(await tv.evaluate(() => document.activeElement.closest('#ytc-tvsign') !== null), 'the focus is in the panel');
+          await tv.focus('#ytc-tvsign [data-act=tv-close]');
+          await tv.keyboard.press('Enter');
+          await tv.waitForSelector('#ytc-tvsign:not(.on)', { state: 'attached' });
+        }
+        // The player's menus from the control bar (OK on a menu button), signed out (the last panel's shell said so).
+        await tv.evaluate(() => localStorage.setItem('e2e:tv', 'code'));
+        await tv.goto('https://www.youtube.com/results?search_query=lofi', { waitUntil: 'commit' });
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+        await tv.focus('#ytc-list a.t[href^="/watch"]');
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-player', null, { timeout: 8000 });
+        await tv.waitForSelector('#ytc-player video');
+        await tv.keyboard.press('ArrowDown');
+        if (shots) await tv.screenshot({ path: path.join(shots, `tv-controls-${W}.png`) });
+        assert.deepEqual(await fit('#ytc-player .pctl', 'bleed'), [], `control bar at ${W}×${H}`);
+        for (const b of ['#ytc-speed', '#ytc-qual']) {
+          await tv.focus(b);
+          await tv.keyboard.press('Enter');
+          await tv.waitForSelector('#ytc-player.menu #ytc-menu');
+          await tv.waitForTimeout(300);
+          if (shots) await tv.screenshot({ path: path.join(shots, `tv-menu-${b.slice(5)}-${W}.png`) });
+          assert.deepEqual(await fit('#ytc-menu', false), [], `${b} menu at ${W}×${H}`);
+          await tv.keyboard.press('Escape');
+          await tv.waitForSelector('#ytc-player.menu', { state: 'detached', timeout: 3000 });
+          // Closed (its content stays for the fade-out): the remote walks the bar again, ← leaves the shortcut.
+          assert.equal(await tv.evaluate(() => document.activeElement.id), b.slice(1));
+          const x0 = await tv.evaluate(() => document.activeElement.getBoundingClientRect().left);
+          await tv.keyboard.press('ArrowLeft');
+          assert.ok(await tv.evaluate(x0 => { const a = document.activeElement; return !!a.closest('.pctl') && a.getBoundingClientRect().left < x0; }, x0), `← moves along the bar after the ${b} menu closed`);
+        }
+        // The skip-sponsor button (shown here at rest: the fixture's segment passes in a moment) and the caption window.
+        // (Captions may be off from earlier steps: c turns them on.)
+        if (!(await tv.locator('#ytc-player.cctext').count())) { await tv.focus('#ytc-player'); await tv.keyboard.press('c'); }
+        await tv.waitForSelector('#ytc-player.cctext .pcw', { timeout: 5000 });
+        await tv.evaluate(() => document.querySelector('#ytc-player .psbt').classList.add('on'));
+        await tv.waitForTimeout(500);
+        if (shots) await tv.screenshot({ path: path.join(shots, `tv-skip-${W}.png`) });
+        for (const sel of ['#ytc-player .psbt', '#ytc-player .pcw']) assert.deepEqual(await fit(sel, false), [], `${sel} at ${W}×${H}`);
+      }
+      assert.deepEqual(tvErrors, []);
+    } finally {
+      await tv.evaluate(() => { for (const k of ['e2e:tv', 'ytc:platform', 'ytc:shell']) localStorage.removeItem(k); }).catch(() => {});
+      await tv.close();
+    }
+  });
   await step('no live network traffic; no YouTube player JS or embed ever requested', async () => {
     assert.ok(log.external.every(u => /ytimg\.com|ggpht\.com|googleusercontent\.com/.test(new URL(u).hostname)), log.external.filter(u => !/ytimg|ggpht|googleusercontent/.test(u)).join(','));
     // (The DNR step fetches /s/player/abc/…/base.js itself to prove it is not blocked.)

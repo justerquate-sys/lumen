@@ -9,8 +9,8 @@ only a small generated loader and a generic bridge.
 > **Status: experimental.** It relies on unofficial YouTube interfaces that can change at any time. When
 > something breaks, the player offers a way to YouTube's own page for that video (see "Escape hatch").
 
-Works in Chromium browsers (Chrome, Brave, Edge, Vivaldi, Opera, Chromium) on macOS, Windows and Linux.
-A Firefox version is planned.
+Works in Chromium browsers (Chrome, Brave, Edge, Vivaldi, Opera, Chromium) on macOS, Windows and Linux,
+and as an app on **Google TV / Android TV** (see below). A Firefox version is planned.
 
 ## Screenshots
 
@@ -79,6 +79,55 @@ Right-click the mic in the search box (or focus it and press the context
 menu key), paste the key, **Save**. The browser asks once for microphone access on youtube.com. Without a key
 the mic only offers this panel; nothing is sent anywhere.
 
+## Google TV / Android TV
+
+The same client runs on a TV as the app **Lumen**, driven by the remote: arrows move a mint focus ring,
+OK selects, Back closes what is open and goes back. On a video ←/→ seek 10 s, OK plays/pauses and ↓ opens the
+control bar. It is a small app around an Android WebView that opens youtube.com with the client injected,
+the way the extension does (details in [tv/README.md](tv/README.md)).
+
+### Install
+
+The newest app is always at **`SHORT-LINK`** <!-- curator: the short link to the address below -->
+(the short form of <https://github.com/justerquate-sys/lumen/releases/latest/download/lumen-tv.apk>, which every release keeps pointing at the newest APK; each release on
+the [Releases](https://github.com/justerquate-sys/lumen/releases) page also carries it as
+`lumen-tv-<version>.apk`). You install it once; after that it updates itself.
+
+**With the Downloader app (no computer):**
+
+1. On the TV: *Settings → System → About* → select *Android TV OS build* (or *Build*) seven times until it
+   says you are a developer.
+2. Install **Downloader** (by AFTVnews) from the Play Store on the TV.
+3. Allow it to install apps: *Settings → Apps → Security & restrictions → Unknown sources* (on Google TV:
+   *Settings → Apps → Install unknown apps*) → **Downloader**.
+4. In the Downloader app, enter: **`SHORT-LINK`**, let it download and choose **Install**.
+5. **Lumen** appears in *Apps* with its banner; add it to your favourites if you like.
+
+**With ADB over Wi-Fi (from a computer with Android's
+[platform-tools](https://developer.android.com/tools/releases/platform-tools)):**
+
+1. Turn on developer options (step 1 above), then *Developer options → USB debugging* (newer Google TV
+   models: *Wireless debugging*).
+2. Find the TV's IP address in *Settings → Network*.
+3. `adb connect <tv-ip>:5555` and accept the prompt on the TV. With *Wireless debugging*:
+   `adb pair <tv-ip>:<pairing-port>` with the code the TV shows, then `adb connect <tv-ip>:<port>`.
+4. Download the APK (the link above) and `adb install lumen-tv.apk`
+
+### Sign in with a code
+
+Open the app and choose **Sign in** (top right) or **Sign in with your phone** on Home. The TV shows a code:
+on your phone or computer go to **youtube.com/activate**, enter the code and choose your Google account. The
+TV continues by itself. This is YouTube's own TV sign-in, so your history, subscriptions, Watch later and
+playlists are the same as on your other devices. **Account → Sign out** on the TV signs it out again.
+
+### Automatic updates
+
+At launch and every 6 hours the app checks this repository's GitHub Releases. A new client (everything you
+see) is downloaded, checked against the release key built into the app (an ed25519 signature over a manifest
+of SHA-256 hashes) and used from the next page you open, never in the middle of a video; a download that
+does not verify is ignored and offline the app keeps what it has. A new version of the app itself, which is
+rare, is offered on screen: **Install** downloads it, checks it the same way and opens Android's installer.
+
 ## Escape hatch
 
 - The player's failure panel has **Open on YouTube**, which opens YouTube's own page for that video
@@ -100,6 +149,8 @@ Every outside service it talks to, and when:
 | **YouTube** (`www.youtube.com`, `*.googlevideo.com`, `i.ytimg.com`, `yt3.ggpht.com`) | Whenever you use it, like youtube.com itself | The same kind of requests YouTube's own site makes, with your YouTube session if you are signed in. Video streams come from googlevideo. YouTube's own logging/ad endpoints (`log_event`, `/pagead/`, `csi_204`, doubleclick) are blocked. |
 | **SponsorBlock** (`sponsor.ajay.app`) | When a video starts, unless you switch SponsorBlock off in the player | Only the first 4 hex characters of the SHA-256 hash of the video id (k-anonymity: the answer covers ~150 videos and yours is picked locally). No cookies, no referrer, nothing reported back. Switched off, nothing is sent. |
 | **Deepgram** (`api.deepgram.com`) | Only while you are dictating a voice search, and only if you saved a key | Your microphone audio (16 kHz mono) for that dictation and your key. The key never enters the YouTube page; the extension's background worker adds it. |
+| **Google sign-in** (`oauth2.googleapis.com`), TV app only | While the sign-in code is shown, and to refresh or revoke the TV's access | YouTube's TV device sign-in: the request for a code, polls until you approved it, then token refreshes. The tokens stay on the TV, sealed with the Android Keystore. |
+| **GitHub** (`api.github.com`, release downloads), TV app only | At launch and every 6 hours | A request for this repository's releases and, when there is a newer one, its files. Nothing about you or your viewing. |
 
 The extension's permissions: `storage`, `declarativeNetRequest` (the static rules in `extension/rules.json`)
 and host access to exactly the sites above. The public build contains no telemetry and sends nothing
@@ -116,7 +167,8 @@ computer only.
 - Not built: writing comments, rating comments, the subscription bell levels, channel tabs other than Videos,
   live chat and live captions, Shorts-style looping.
 - Age-restricted and members-only videos show the panel; **Open on YouTube** plays them there.
-- Chromium browsers only for now.
+- Chromium browsers and Google TV / Android TV only for now. On TV, account surfaces depend on YouTube
+  honouring its TV client's sign-in for each call (see [tv/README.md](tv/README.md), "Risks and limits").
 
 More: [docs/architecture.md](docs/architecture.md) ("Known gaps").
 
@@ -164,7 +216,8 @@ Run `./build.sh` again before committing; `npm run check:public` fails on a deve
 | `extension/` | The unpacked extension, ready to load: `manifest.json`, `content.js` (generated), `background.js` (generated), `client.css`, `native.css`, `rules.json`. |
 | `src/` | The Rust crate (`ytc-client`): routing, InnerTube requests and parsing, rendering, the player, features. |
 | `browser/` | Browser-side sources: `bridge.js` (generic DOM/media primitives for Rust), `background.js` (service worker template), `manifest.json` (manifest template), `build.cjs` (bundler). |
-| `build.sh` | Builds `extension/` from `src/` and `browser/`. |
+| `build.sh` | Builds `extension/` from `src/` and `browser/` (`--tv`: the TV app's client bundle instead). |
+| `tv/` | The Google TV / Android TV app: the Tauri shell (Rust, with the Kotlin Android requires), its tested core (updates, sign-in, request rules), the page shim, build and release scripts. See [tv/README.md](tv/README.md). |
 | `tests/` | `e2e.cjs` (Playwright, all traffic stubbed), recorded InnerTube fixtures, media generators, a few `live-*.cjs` scripts that hit real services (run by hand). |
 | `tools/debug-center/` | Optional local collector and speed dashboard for development builds. |
 | `docs/` | [architecture.md](docs/architecture.md) (how everything works), [motion.md](docs/motion.md) (the motion law), [debug-center.md](docs/debug-center.md). |

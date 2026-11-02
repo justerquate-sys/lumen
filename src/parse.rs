@@ -330,6 +330,10 @@ const CONTAINERS: &[&str] = &[
     "twoColumnSearchResultsRenderer",
     "horizontalCardListRenderer",
     "secondarySearchContainerRenderer",
+    // TV client (the TV app's signed-in feeds, `crate::tv`).
+    "tvBrowseRenderer",
+    "tvSurfaceContentRenderer",
+    "twoColumnRenderer",
 ];
 
 /// Renderers that are known UI chrome rather than feed items.
@@ -354,6 +358,11 @@ const IGNORED: &[&str] = &[
     "showingResultsForRenderer",
     "didYouMeanRenderer",
     "includingResultsForRenderer",
+    // TV client chrome.
+    "searchBarRenderer",
+    "entityMetadataRenderer",
+    "channelHeaderRenderer",
+    "shelfHeaderRenderer",
 ];
 
 const ADS: &[&str] = &[
@@ -435,7 +444,7 @@ impl Walker<'_> {
     }
 
     fn descend(&mut self, x: &Value) {
-        for k in ["contents", "items", "content", "primaryContents", "results"] {
+        for k in ["contents", "items", "content", "primaryContents", "results", "rightColumn"] {
             if let Some(c) = x.get(k) {
                 self.walk(c);
             }
@@ -476,6 +485,19 @@ impl Walker<'_> {
             "lockupViewModel" => {
                 let r = lockup(x, &mut self.feed.stats);
                 self.push(r, k)
+            }
+            "tileRenderer" => {
+                let r = tile(x, &mut self.feed.stats);
+                self.push(r, k)
+            }
+            // TV Subscriptions / Library: a side list of tabs; only the selected one (else the first
+            // with content) is the page.
+            "tvSecondaryNavRenderer" => {
+                let tabs: Vec<&Value> = arr(x, &["sections"]).iter().flat_map(|s| arr(s, &["tvSecondaryNavSectionRenderer", "tabs"]).iter()).filter_map(|t| t.get("tabRenderer")).collect();
+                let tab = tabs.iter().find(|t| t.get("selected").and_then(Value::as_bool) == Some(true) && t.get("content").is_some()).or_else(|| tabs.iter().find(|t| t.get("content").is_some()));
+                if let Some(c) = tab.and_then(|t| t.get("content")) {
+                    self.walk(c);
+                }
             }
             "channelRenderer" | "gridChannelRenderer" => {
                 let r = channel_renderer(x);
@@ -781,6 +803,118 @@ fn lockup(x: &Value, stats: &mut Stats) -> Res {
         }
         other => {
             stats.bump(&format!("lockupViewModel:{}", other.trim_start_matches("LOCKUP_CONTENT_TYPE_")));
+            Res::Counted
+        }
+    }
+}
+
+/// TV client tile (`tileRenderer`: TV feeds, playlists, channel shelves).
+fn tile(x: &Value, stats: &mut Stats) -> Res {
+    let ctype = st(x, &["contentType"]).unwrap_or("");
+    let id = st(x, &["contentId"]).unwrap_or("");
+    let md = at(x, &["metadata", "tileMetadataRenderer"]).unwrap_or(&Value::Null);
+    let hdr = at(x, &["header", "tileHeaderRenderer"]).unwrap_or(&Value::Null);
+    let cmd = x.get("onSelectCommand").unwrap_or(&Value::Null);
+    // Shorts tiles carry their title on the thumbnail (`thumbnailOverlays[].tileMetadataRenderer`).
+    let title = text_at(md, &["title"])
+        .or_else(|| arr(hdr, &["thumbnailOverlays"]).iter().find_map(|o| text_at(o, &["tileMetadataRenderer", "title"])))
+        .unwrap_or_default();
+    // Lines: the first linked browse (else the first part of the first of several lines) is the channel.
+    let lines: Vec<Vec<(String, Option<(String, Option<String>)>)>> = arr(md, &["lines"])
+        .iter()
+        .map(|l| {
+            arr(l, &["lineRenderer", "items"])
+                .iter()
+                .filter_map(|it| {
+                    let li = it.get("lineItemRenderer")?;
+                    let t = text_at(li, &["text"])?;
+                    Some((t, at(li, &["text", "runs", "0", "navigationEndpoint"]).and_then(browse_ref)))
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut channel = String::new();
+    let mut channel_ref = None;
+    let mut rest = Vec::new();
+    for (li, line) in lines.iter().enumerate() {
+        for (pi, (t, br)) in line.iter().enumerate() {
+            if channel.is_empty() && (br.is_some() || (li == 0 && pi == 0 && lines.len() > 1)) {
+                channel = t.clone();
+                channel_ref = br.clone();
+            } else {
+                rest.push(t.clone());
+            }
+        }
+    }
+    let mut duration = String::new();
+    let mut live = false;
+    let mut short = ctype == "TILE_CONTENT_TYPE_SHORTS";
+    let mut progress = 0u8;
+    for o in arr(hdr, &["thumbnailOverlays"]) {
+        if let Some(ts) = o.get("thumbnailOverlayTimeStatusRenderer") {
+            match st(ts, &["style"]).unwrap_or("") {
+                "LIVE" => live = true,
+                "SHORTS" => short = true,
+                _ => {
+                    if duration.is_empty() {
+                        duration = text_at(ts, &["text"]).unwrap_or_default();
+                    }
+                }
+            }
+        }
+        if let Some(p) = at(o, &["thumbnailOverlayResumePlaybackRenderer", "percentDurationWatched"]).and_then(Value::as_u64) {
+            progress = p.min(100) as u8;
+        }
+    }
+    match ctype {
+        "TILE_CONTENT_TYPE_VIDEO" | "TILE_CONTENT_TYPE_SHORTS" => {
+            let vid = Some(id).filter(|v| is_video_id(v)).or_else(|| st(cmd, &["watchEndpoint", "videoId"]).filter(|v| is_video_id(v))).or_else(|| short_cmd_id(cmd));
+            let Some(vid) = vid else { return Res::Bad };
+            if short {
+                return Res::Item(Item::Video(short_video(vid, title, join(&rest))));
+            }
+            // 16:9 files (the TV lists 4:3 `sddefault` with bars): the 320 px webp, and hq720 when listed.
+            let listed = arr(hdr, &["thumbnail", "thumbnails"]).iter().filter_map(|t| t.get("url").and_then(Value::as_str)).find(|u| u.contains("/hq720")).and_then(safe_img);
+            let (channel_href, channel_bid) = match channel_ref {
+                Some((h, b)) => (Some(h), b),
+                None => (None, None),
+            };
+            let music = arr(md, &["lines"]).iter().flat_map(|l| arr(l, &["lineRenderer", "items"]).iter()).any(|it| st(it, &["lineItemRenderer", "badge", "metadataBadgeRenderer", "label"]).is_some_and(music_label));
+            Res::Item(Item::Video(Video {
+                id: vid.into(),
+                title,
+                channel,
+                channel_href,
+                channel_bid,
+                meta: join(&rest),
+                duration,
+                live,
+                progress,
+                thumb: Some(format!("https://i.ytimg.com/vi_webp/{vid}/mqdefault.webp")),
+                thumb_w: 320,
+                thumb2x_w: if listed.is_some() { 1280 } else { 0 },
+                thumb2x: listed,
+                anim: None,
+                music,
+                short: false,
+            }))
+        }
+        "TILE_CONTENT_TYPE_PLAYLIST" => {
+            let pid = st(cmd, &["browseEndpoint", "browseId"]).and_then(|b| b.strip_prefix("VL")).or_else(|| st(cmd, &["watchEndpoint", "playlistId"])).or(Some(id)).filter(|p| !p.is_empty() && is_safe_id(p));
+            let Some(pid) = pid else { return Res::Bad };
+            let (thumb, _) = thumbs(arr(hdr, &["thumbnail", "thumbnails"]));
+            let count = arr(hdr, &["thumbnailOverlays"]).iter().find_map(|o| text_at(o, &["thumbnailOverlayTimeStatusRenderer", "text"])).unwrap_or_default();
+            let first_video = st(cmd, &["watchEndpoint", "videoId"]).filter(|v| is_video_id(v)).map(String::from);
+            Res::Item(Item::Playlist(PlaylistCard { id: pid.into(), title, channel, channel_href: channel_ref.map(|r| r.0), count, thumb, first_video }))
+        }
+        "TILE_CONTENT_TYPE_CHANNEL" => {
+            let Some((href, bid)) = browse_ref(cmd) else { return Res::Bad };
+            let avatar = small_avatar(arr(hdr, &["thumbnail", "thumbnails"]));
+            Res::Item(Item::Channel(ChannelCard { href, bid, title, meta: join(&rest), avatar }))
+        }
+        other => {
+            stats.bump(&format!("tileRenderer:{}", other.trim_start_matches("TILE_CONTENT_TYPE_")));
             Res::Counted
         }
     }
@@ -1276,6 +1410,57 @@ mod tests {
         let f = continuation(&fixture("next_cont.json"));
         assert!(videos(&f).len() >= 15);
         assert!(f.cont.is_some());
+    }
+
+    #[test]
+    fn tv_client_shapes() {
+        // Real TVHTML5 responses (anonymous, 2 Nov 2026): a playlist page (tvBrowseRenderer →
+        // twoColumnRenderer → playlistVideoListRenderer of tileRenderer) and shelves of tiles
+        // (sectionListRenderer → shelfRenderer → horizontalListRenderer), as signed-in TV Home is built.
+        let f = browse(&fixture("tv_playlist.json"));
+        let vs = videos(&f);
+        assert!(vs.len() == 15, "{} videos", vs.len());
+        let v = vs[0];
+        assert_eq!(v.id, "fOT0BUpITw8");
+        assert_eq!(v.title, "BELLAKEO (Video Oficial) - Peso Pluma, Anitta");
+        assert_eq!(v.channel, "Peso Pluma");
+        assert_eq!(v.channel_bid.as_deref(), Some("UCzrM_068Odho89mTRrrxqbA"));
+        assert_eq!(v.duration, "3:55");
+        assert!(v.meta.contains("views"), "{}", v.meta);
+        assert_eq!(v.thumb.as_deref(), Some("https://i.ytimg.com/vi_webp/fOT0BUpITw8/mqdefault.webp"));
+        assert!(f.cont.is_some(), "playlist continuation");
+        assert_eq!(f.stats.unknown_total(), 0, "{:?}", f.stats);
+        let f = browse(&fixture("tv_shelves.json"));
+        let vs = videos(&f);
+        assert!(vs.len() >= 20, "{} videos", vs.len());
+        assert!(vs.iter().all(|v| crate::util::is_video_id(&v.id) && !v.title.is_empty()));
+        assert!(vs.iter().any(|v| v.short), "Shorts tiles become Shorts");
+        assert_eq!(f.cont.as_deref(), Some("TVSECTIONCONT"), "the page continuation, not a row's");
+        assert_eq!(f.stats.unknown_total(), 0, "{:?}", f.stats);
+        // A TV continuation answer.
+        let c = json::parse_str(r#"{"continuationContents":{"sectionListContinuation":{"contents":[{"shelfRenderer":{"content":{"horizontalListRenderer":{"items":[
+            {"tileRenderer":{"contentType":"TILE_CONTENT_TYPE_VIDEO","contentId":"aqz-KE-bpKQ","header":{"tileHeaderRenderer":{"thumbnail":{"thumbnails":[{"url":"https://i.ytimg.com/vi/aqz-KE-bpKQ/hq720.jpg","width":1280,"height":720}]},
+              "thumbnailOverlays":[{"thumbnailOverlayTimeStatusRenderer":{"text":{"simpleText":"10:35"},"style":"DEFAULT"}},{"thumbnailOverlayResumePlaybackRenderer":{"percentDurationWatched":42}}]}},
+              "metadata":{"tileMetadataRenderer":{"title":{"simpleText":"Big Buck Bunny"},"lines":[{"lineRenderer":{"items":[{"lineItemRenderer":{"text":{"runs":[{"text":"Blender","navigationEndpoint":{"browseEndpoint":{"browseId":"UCSMOQeBJ2RAnuFungnQOxLg"}}}]}}}]}},{"lineRenderer":{"items":[{"lineItemRenderer":{"text":{"simpleText":"16M views"}}},{"lineItemRenderer":{"text":{"simpleText":"16 years ago"}}}]}}]}},
+              "onSelectCommand":{"watchEndpoint":{"videoId":"aqz-KE-bpKQ"}}}},
+            {"tileRenderer":{"contentType":"TILE_CONTENT_TYPE_PLAYLIST","contentId":"PLx","metadata":{"tileMetadataRenderer":{"title":{"simpleText":"Mix"}}},"onSelectCommand":{"browseEndpoint":{"browseId":"VLPLabcdefghij"}}}},
+            {"tileRenderer":{"contentType":"TILE_CONTENT_TYPE_CHANNEL","metadata":{"tileMetadataRenderer":{"title":{"simpleText":"Blender"}}},"onSelectCommand":{"browseEndpoint":{"browseId":"UCSMOQeBJ2RAnuFungnQOxLg"}}}}
+          ]}}}}],"continuations":[{"nextContinuationData":{"continuation":"NEXT2"}}]}}}"#).unwrap();
+        let f = continuation(&c);
+        assert_eq!(f.cont.as_deref(), Some("NEXT2"));
+        let v = videos(&f)[0];
+        assert_eq!((v.progress, v.duration.as_str(), v.channel.as_str(), v.meta.as_str()), (42, "10:35", "Blender", "16M views · 16 years ago"));
+        assert_eq!(v.thumb2x.as_deref(), Some("https://i.ytimg.com/vi/aqz-KE-bpKQ/hq720.jpg"));
+        assert!(matches!(&f.items[1], Item::Playlist(p) if p.id == "PLabcdefghij"));
+        assert!(matches!(&f.items[2], Item::Channel(c) if c.bid.as_deref() == Some("UCSMOQeBJ2RAnuFungnQOxLg")));
+        // TV Subscriptions: only the selected side tab is the page.
+        let subs = json::parse_str(r#"{"contents":{"tvBrowseRenderer":{"content":{"tvSecondaryNavRenderer":{"sections":[{"tvSecondaryNavSectionRenderer":{"tabs":[
+            {"tabRenderer":{"title":"All","selected":true,"content":{"tvSurfaceContentRenderer":{"content":{"gridRenderer":{"items":[{"tileRenderer":{"contentType":"TILE_CONTENT_TYPE_VIDEO","contentId":"aqz-KE-bpKQ","metadata":{"tileMetadataRenderer":{"title":{"simpleText":"A"}}}}}],"continuations":[{"nextContinuationData":{"continuation":"SUBS2"}}]}}}}}},
+            {"tabRenderer":{"title":"Channel","content":{"tvSurfaceContentRenderer":{"content":{"gridRenderer":{"items":[{"tileRenderer":{"contentType":"TILE_CONTENT_TYPE_VIDEO","contentId":"-Bxc4gJluC0","metadata":{"tileMetadataRenderer":{"title":{"simpleText":"B"}}}}}]}}}}}}
+          ]}}]}}}}}"#).unwrap();
+        let f = browse(&subs);
+        assert_eq!(videos(&f).iter().map(|v| v.id.as_str()).collect::<Vec<_>>(), ["aqz-KE-bpKQ"]);
+        assert_eq!(f.cont.as_deref(), Some("SUBS2"));
     }
 
     #[test]

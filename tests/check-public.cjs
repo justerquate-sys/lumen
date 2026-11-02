@@ -17,5 +17,11 @@ for (const f of ['content.js', 'background.js']) {
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 const cargo = /^version = "([^"]+)"/m.exec(fs.readFileSync(path.join(__dirname, '..', 'Cargo.toml'), 'utf8'))[1];
 if (manifest.version !== pkg.version || manifest.version !== cargo) problems.push(`versions differ: manifest ${manifest.version}, package.json ${pkg.version}, Cargo.toml ${cargo}`);
+// Nothing secret or machine-specific is tracked: signing keys and keystores (the TV app's live in
+// ~/.config/lumen-tv/), or node_modules (once committed as a symlink to a personal path).
+try {
+  const tracked = require('node:child_process').execFileSync('git', ['ls-files', '-z'], { cwd: path.join(__dirname, '..'), encoding: 'utf8' }).split('\0').filter(Boolean);
+  for (const f of tracked) if (/(^|\/)(node_modules|keystore\.properties)$|\.(jks|keystore|pem|p12)$/.test(f)) problems.push(`${f} is tracked (keys, keystores and node_modules never are)`);
+} catch {} // (not a git checkout: nothing to check)
 if (problems.length) { console.error('extension/ is not a clean public build:\n- ' + problems.join('\n- ') + '\nRun ./build.sh (without --dev).'); process.exit(1); }
 console.log('extension/ is the public build (' + manifest.version + ').');
