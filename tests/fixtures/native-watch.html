@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<!-- YouTube's own watch page (native mode), assembled from the old extension's verified DOM fixtures:
+     tests/fixture.html (masthead, guide, feed cards, Shorts, Playables), tests/watch-page.test.cjs
+     (metadata, actions, description sections, related chips), tests/promotions.test.cjs (offer
+     surfaces, dialogs, account notice), tests/rendered/clean-view-fixture.cjs (fullscreen overlays,
+     cinematics, gradients) and tests/rendered/caption-notice.test.cjs (caption windows, gear notice).
+     A tiny stand-in "YouTube" script records what reaches the page (keys, presses, clicks). -->
+<html lang="en" style="font-size:10px" dark system-icons><head>
+<meta charset="utf-8"><title>Native watch fixture - YouTube</title>
+<style>
+  body{margin:0;background:#0f0f0f;color:#fff;font:14px Roboto,Arial,sans-serif}
+  ytd-app,ytd-app *:not(span):not(a):not(button):not(svg):not(path):not(input):not(yt-formatted-string){display:block}
+  ytd-masthead{height:56px;display:flex!important;gap:12px;align-items:center}
+  ytd-masthead > *{display:inline-flex!important}
+  #movie_player{position:relative;width:960px;height:540px;background:#222;overflow:hidden}
+  .html5-video-container{position:absolute;inset:0;background:linear-gradient(110deg,#63352f,#243a54)}
+  .ytp-caption-window-container{position:absolute;inset:0;pointer-events:none}
+  .caption-window{position:absolute;line-height:normal;z-index:41;pointer-events:auto;cursor:grab}
+  .caption-window svg{width:1em;height:1em}
+  .ytp-chrome-bottom{position:absolute;left:0;right:0;bottom:0;height:48px;z-index:50}
+  .ytp-gradient-top,.ytp-gradient-bottom{position:absolute;left:0;right:0;height:110px;z-index:24;background:linear-gradient(#1c273f,#9b2d3350);pointer-events:none}
+  .ytp-gradient-top{top:0}.ytp-gradient-bottom{bottom:0}
+  .iv-branding{position:absolute;bottom:150px;right:24px;width:40px;height:40px;z-index:30}
+  .ytp-fullscreen-quick-actions,.ytp-fullscreen-metadata,.ytp-fullscreen-grid,.ytp-more-videos-button{position:absolute;z-index:60}
+  #cinematics-container{position:absolute;inset:0;pointer-events:none}
+  tp-yt-paper-dialog{position:fixed;left:40%;top:40%;z-index:3000;background:#222}
+  #secondary{width:400px}
+</style>
+<script nonce="n1">
+  window.__ytAppRan = true;
+  window.__keys = []; window.__playerClicks = 0; window.__nativeCaptionDrag = 0; window.__dismissed = 0; window.__trial = 0; window.__notice = 0;
+  document.addEventListener('keydown', e => window.__keys.push(e.key));
+  document.addEventListener('DOMContentLoaded', () => {
+    const $ = s => document.querySelector(s);
+    $('#movie_player').addEventListener('click', () => window.__playerClicks++);
+    $('.ytp-caption-window-container').addEventListener('mousedown', () => window.__nativeCaptionDrag++);
+    $('.ytp-caption-window-container').addEventListener('pointerdown', () => window.__nativeCaptionDrag++);
+    const cc = $('.ytp-subtitles-button');
+    cc.addEventListener('click', () => cc.setAttribute('aria-pressed', cc.getAttribute('aria-pressed') === 'true' ? 'false' : 'true'));
+    for (const b of document.querySelectorAll('[data-fx-dismiss]')) b.addEventListener('click', () => { window.__dismissed++; b.closest('tp-yt-paper-dialog').style.display = 'none'; });
+    for (const b of document.querySelectorAll('[data-fx-trial]')) b.addEventListener('click', () => window.__trial++);
+    $('#notice-dismiss').addEventListener('click', () => window.__notice++);
+  });
+</script>
+</head><body>
+<ytd-app>
+  <ytd-masthead>
+    <div id="start"><button id="guide-button" aria-label="Guide">Menu</button>
+      <ytd-topbar-logo-renderer><a id="logo" href="/" aria-label="YouTube Premium Home"><yt-icon id="logo-icon">Premium</yt-icon></a><span id="country-code">DE</span></ytd-topbar-logo-renderer></div>
+    <div id="center"><ytd-searchbox><div id="container"><input id="search" name="search_query"></div></ytd-searchbox><div id="voice-search-button">Voice</div></div>
+    <div id="end"><div id="buttons">
+      <ytd-button-renderer id="create"><button aria-label="Create">Create</button></ytd-button-renderer>
+      <button id="notifications" aria-label="Notifications">Notifications</button>
+      <button id="account" aria-label="Account">Account</button>
+    </div></div>
+  </ytd-masthead>
+  <ytd-guide-renderer><div id="sections">
+    <ytd-guide-section-renderer id="navigation">
+      <ytd-guide-entry-renderer id="home"><a id="endpoint" href="/">Home</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="shorts-nav"><a id="endpoint" href="/shorts/">Shorts</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="subscriptions-nav"><a id="endpoint" href="/feed/subscriptions">Subscriptions</a></ytd-guide-entry-renderer>
+    </ytd-guide-section-renderer>
+    <ytd-guide-section-renderer id="library">
+      <div id="guide-section-title">You</div>
+      <ytd-guide-entry-renderer id="your-channel"><a id="endpoint" href="/@me">Your channel</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="history"><a id="endpoint" href="/feed/history">History</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="playlists"><a id="endpoint" href="/feed/playlists">Playlists</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="your-videos"><a id="endpoint" href="https://studio.youtube.com/">Your videos</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="watch-later"><a id="endpoint" href="/playlist?list=WL">Watch later</a></ytd-guide-entry-renderer>
+      <ytd-guide-entry-renderer id="downloads"><a id="endpoint" href="/feed/downloads">Downloads</a></ytd-guide-entry-renderer>
+      <ytd-guide-collapsible-entry-renderer id="library-expander">
+        <button id="expander-item">Show more</button><button id="collapser-item">Show less</button>
+        <div id="expandable-items" hidden>
+          <ytd-guide-entry-renderer id="liked-videos"><a id="endpoint" href="/playlist?list=LL">Liked videos</a></ytd-guide-entry-renderer>
+          <ytd-guide-entry-renderer id="podcasts"><a id="endpoint" href="/feed/podcasts">Podcasts</a></ytd-guide-entry-renderer>
+          <ytd-guide-entry-renderer id="courses"><a id="endpoint" href="/feed/courses">Courses</a></ytd-guide-entry-renderer>
+        </div>
+      </ytd-guide-collapsible-entry-renderer>
+    </ytd-guide-section-renderer>
+    <ytd-guide-section-renderer id="subscriptions">
+      <div id="guide-section-title">Subscriptions</div>
+      <ytd-guide-entry-renderer id="subscribed-channel"><a id="endpoint" href="/@a-channel">Channel</a></ytd-guide-entry-renderer>
+    </ytd-guide-section-renderer>
+    <ytd-guide-section-renderer id="explore"><ytd-guide-entry-renderer><a id="endpoint" href="/feed/trending">Explore</a></ytd-guide-entry-renderer></ytd-guide-section-renderer>
+    <ytd-guide-section-renderer id="more-youtube"><ytd-guide-entry-renderer><a id="endpoint" href="https://music.youtube.com/">More from YouTube</a></ytd-guide-entry-renderer></ytd-guide-section-renderer>
+    <ytd-guide-section-renderer id="report-history"><ytd-guide-entry-renderer><a id="endpoint" href="/reporthistory">Report history</a></ytd-guide-entry-renderer></ytd-guide-section-renderer>
+  </div><div id="footer">About · Terms · Copyright</div></ytd-guide-renderer>
+  <ytd-mini-guide-renderer>
+    <ytd-mini-guide-entry-renderer id="mini-home"><a href="/">Home</a></ytd-mini-guide-entry-renderer>
+    <ytd-mini-guide-entry-renderer id="mini-shorts"><a href="/shorts/">Shorts</a></ytd-mini-guide-entry-renderer>
+    <ytd-mini-guide-entry-renderer id="mini-subscriptions"><a href="/feed/subscriptions">Subscriptions</a></ytd-mini-guide-entry-renderer>
+  </ytd-mini-guide-renderer>
+  <ytd-page-manager>
+    <ytd-watch-flexy video-id="ntvfixture1"><div id="columns">
+      <div id="primary">
+        <div id="cinematics-container"><div id="cinematics">ambient</div></div>
+        <ytd-player><div id="movie_player" class="html5-video-player ytp-delhi-modern">
+          <div class="html5-video-container"><video class="html5-main-video"></video></div>
+          <div class="ytp-caption-window-container" id="ytp-caption-window-container">
+            <div id="caption-window-1" class="caption-window ytp-caption-window-bottom" style="left:50%;bottom:2%;margin-left:-150px;width:300px;text-align:center"><span class="captions-text"><span class="caption-visual-line"><span class="ytp-caption-segment" style="font-size:24px;background:rgba(8,8,8,.75);color:#fff">Native caption words</span></span></span></div>
+            <div id="caption-window-_notice" class="caption-window ytp-caption-window-top" style="left:5%;top:5%"><span class="captions-text"><span class="caption-visual-line"><span class="ytp-caption-segment">English (auto-generated) Click <svg height="100%" version="1.1" viewBox="0 0 36 36" width="100%"><path d="m 23.94,18.78 c .03,-0.25 .05,-0.51 .05,-0.78 0,-0.27 -0.02,-0.52 -0.05,-0.78" fill="#fff"></path></svg> for settings</span></span></span></div>
+          </div>
+          <div class="ytp-gradient-top"></div><div class="ytp-gradient-bottom"></div>
+          <div class="ytp-chrome-top">Video title</div><div class="ytp-fullscreen-metadata">Channel details</div>
+          <div class="iv-branding"><button class="branding-img-container ytp-button" aria-label="Channel watermark">CH</button></div>
+          <div class="ytp-fullscreen-quick-actions"><button>Like</button><button>Share</button></div>
+          <div class="ytp-fullscreen-grid"><button class="ytp-fullscreen-grid-expand-button" aria-keyshortcuts="v">More</button></div>
+          <div class="ytp-more-videos-button" role="button" tabindex="0">More videos</div>
+          <div class="ytp-chrome-bottom"><div class="ytp-progress-bar"><div class="ytp-play-progress" style="width:30%;height:3px;background:#f00"></div></div>
+            <div class="ytp-chrome-controls"><button class="ytp-play-button ytp-button" aria-label="Play (k)">Play</button>
+            <button class="ytp-subtitles-button ytp-button" aria-label="Subtitles/closed captions (c)" aria-pressed="true">CC</button></div></div>
+        </div></ytd-player>
+        <ytd-watch-metadata>
+          <div id="super-title"><a href="/hashtag/rust">#rust</a></div>
+          <div id="title"><h1>Native fixture video</h1><yt-badge-view-model id="dubbed"><span>Auto-dubbed</span></yt-badge-view-model><yt-badge-view-model id="quality-badge"><span>4K</span></yt-badge-view-model></div>
+          <div id="owner"><ytd-video-owner-renderer id="owner-renderer"><a href="/@creator">Creator</a></ytd-video-owner-renderer>
+            <div id="sponsor-button"><ytd-button-renderer id="join-host"><button aria-label="Join this channel">Join</button></ytd-button-renderer></div>
+            <div id="subscribe-button"><ytd-subscribe-button-renderer><yt-button-shape><button id="subscribe" aria-label="Subscribe to Creator">Subscribe</button></yt-button-shape></ytd-subscribe-button-renderer></div>
+          </div>
+          <div id="actions"><ytd-menu-renderer>
+            <div id="top-level-buttons-computed">
+              <yt-button-view-model id="like-host"><button id="like" aria-label="like this video along with 7,200 other people" aria-pressed="false">7.2K</button></yt-button-view-model>
+              <yt-button-view-model id="dislike-host"><button id="dislike" aria-label="Dislike this video" aria-pressed="false">Dislike</button></yt-button-view-model>
+              <yt-button-view-model id="share-host"><button id="share" aria-label="Share">Share</button></yt-button-view-model>
+            </div>
+            <div id="flexible-item-buttons">
+              <yt-button-view-model id="save-host"><button id="save" aria-label="Save to playlist">Save</button></yt-button-view-model>
+              <yt-button-view-model id="thanks-host"><button aria-label="Thanks">Thanks</button></yt-button-view-model>
+            </div>
+            <yt-button-shape id="button-shape"><button id="overflow" aria-label="More actions">...</button></yt-button-shape>
+          </ytd-menu-renderer>
+          <button id="full-transcript" aria-label="Full Transcript">Full Transcript</button></div>
+          <div id="description">
+            <ytd-text-inline-expander id="description-inline-expander"><yt-attributed-string id="attributed-description">Summary: Games and Transcript are words in my description. <a href="https://example.test/creator">Creator link</a></yt-attributed-string></ytd-text-inline-expander>
+            <ytd-structured-description-content-renderer><div id="items">
+              <yt-video-description-summary-view-model id="summary"><h2>Summary</h2><p>Generated summary</p></yt-video-description-summary-view-model>
+              <ytd-video-description-game-section-renderer id="games"><h2>Games</h2></ytd-video-description-game-section-renderer>
+              <ytd-rich-metadata-renderer id="gaming"><span>Gaming</span></ytd-rich-metadata-renderer>
+              <ytd-video-description-transcript-section-renderer id="native-transcript"><h2>Transcript</h2><button>Show transcript</button></ytd-video-description-transcript-section-renderer>
+              <ytd-video-description-channel-section-renderer id="repeat-channel"><ytd-video-owner-renderer><a href="/@creator">Creator</a></ytd-video-owner-renderer></ytd-video-description-channel-section-renderer>
+              <ytd-video-description-video-details-renderer id="video-details"><h2>Video details</h2></ytd-video-description-video-details-renderer>
+            </div></ytd-structured-description-content-renderer>
+          </div>
+        </ytd-watch-metadata>
+      </div>
+      <div id="secondary"><div id="related"><ytd-watch-next-secondary-results-renderer>
+        <yt-related-chip-cloud-renderer id="related-filters"><yt-chip-cloud-renderer>
+          <yt-chip-cloud-chip-renderer id="all-chip" selected><button role="tab" aria-selected="true">All</button></yt-chip-cloud-chip-renderer>
+          <yt-chip-cloud-chip-renderer>From Creator</yt-chip-cloud-chip-renderer>
+        </yt-chip-cloud-renderer></yt-related-chip-cloud-renderer>
+        <div id="items">
+          <yt-lockup-view-model id="normal-video"><a id="related-link" href="/watch?v=-Bxc4gJluC0">Normal related video</a></yt-lockup-view-model>
+          <yt-lockup-view-model id="short-video"><a href="/shorts/abc">Short video</a></yt-lockup-view-model>
+          <yt-lockup-view-model id="absolute-short"><a href="https://www.youtube.com/shorts/def">Absolute Short</a></yt-lockup-view-model>
+          <ytd-reel-shelf-renderer id="short-shelf"><ytd-reel-item-renderer><a href="/shorts/xyz">Shorts shelf</a></ytd-reel-item-renderer></ytd-reel-shelf-renderer>
+          <yt-lockup-view-model id="channel-link"><a href="/@channel/shorts">Channel Shorts tab</a><a href="/@channel">Channel</a></yt-lockup-view-model>
+          <yt-lockup-view-model id="playable-card"><a href="/playables/game">Game</a></yt-lockup-view-model>
+          <ytd-rich-section-renderer id="membership-section"><div id="content"><yt-sponsorships-channel-upsell-view-model id="membership"><span>Join</span><button>Learn more</button></yt-sponsorships-channel-upsell-view-model></div></ytd-rich-section-renderer>
+          <ytd-rich-section-renderer id="premium-section"><div id="content"><yt-premium-spotlight-banner-renderer id="premium"><h2>Try YouTube Premium</h2><button>Try it free</button></yt-premium-spotlight-banner-renderer></div></ytd-rich-section-renderer>
+        </div>
+      </ytd-watch-next-secondary-results-renderer></div></div>
+    </div></ytd-watch-flexy>
+  </ytd-page-manager>
+  <ytd-popup-container>
+    <tp-yt-paper-dialog id="promo-dialog" role="dialog"><yt-upsell-dialog-renderer><h2>Discover members-only content</h2><button id="trial-cta" data-fx-trial>Try 1 month for €0</button><yt-button-renderer id="dismiss-button"><button aria-label="Dismiss" data-fx-dismiss>No thanks</button></yt-button-renderer></yt-upsell-dialog-renderer></tp-yt-paper-dialog>
+    <tp-yt-paper-dialog id="notice-dialog" style="top:70%"><yt-mealbar-promo-renderer id="notice"><h2>Important account notice</h2><button id="notice-action">Learn more</button><yt-button-renderer id="dismiss-button"><button id="notice-dismiss" aria-label="Dismiss">Dismiss</button></yt-button-renderer></yt-mealbar-promo-renderer></tp-yt-paper-dialog>
+  </ytd-popup-container>
+</ytd-app>
+</body></html>

@@ -1,0 +1,226 @@
+[
+  {
+    "id": 10,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "yt-native=1",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 11,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/embed/",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 12,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/live_chat",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 13,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/account",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 14,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/premium",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 15,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/paid_memberships",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 16,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/signin",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 17,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/logout",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 18,
+    "priority": 2,
+    "action": {
+      "type": "allowAllRequests"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/redirect",
+      "requestDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "main_frame",
+        "sub_frame"
+      ]
+    }
+  },
+  {
+    "id": 30,
+    "priority": 3,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "||www.youtube.com/youtubei/v1/log_event"
+    }
+  },
+  {
+    "id": 31,
+    "priority": 3,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "||www.youtube.com/pagead/"
+    }
+  },
+  {
+    "id": 32,
+    "priority": 3,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "||www.youtube.com/csi_204"
+    }
+  },
+  {
+    "id": 40,
+    "priority": 3,
+    "action": {
+      "type": "block"
+    },
+    "condition": {
+      "urlFilter": "||doubleclick.net^",
+      "initiatorDomains": [
+        "www.youtube.com",
+        "youtube.com"
+      ]
+    }
+  },
+  {
+    "id": 50,
+    "priority": 3,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "access-control-allow-origin",
+          "operation": "set",
+          "value": "*"
+        }
+      ]
+    },
+    "condition": {
+      "requestDomains": [
+        "googlevideo.com"
+      ],
+      "initiatorDomains": [
+        "www.youtube.com"
+      ],
+      "resourceTypes": [
+        "xmlhttprequest",
+        "media",
+        "other"
+      ]
+    }
+  }
+]

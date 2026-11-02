@@ -1,0 +1,28 @@
+[package]
+name = "ytc-client"
+version = "0.8.6"
+edition = "2024"
+description = "YourTube: your own YouTube front-end at youtube.com, written in Rust (Wasm) as a browser extension"
+license = "MIT"
+publish = false
+
+[features]
+# Development build (./build.sh --dev): speed telemetry for the local debug center.
+dev = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.130"
+serde_json = { version = "1", default-features = false, features = ["std"] }
+sha1_smol = "1"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+debug = false
+incremental = false

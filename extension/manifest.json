@@ -1,0 +1,89 @@
+{
+  "manifest_version": 3,
+  "name": "YourTube Client",
+  "version": "0.8.6",
+  "description": "Your own YouTube front-end at youtube.com: Rust-rendered, fast, no bloat. Experimental.",
+  "permissions": [
+    "storage",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://*.googlevideo.com/*",
+    "https://sponsor.ajay.app/*",
+    "https://api.deepgram.com/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "exclude_matches": [
+        "https://www.youtube.com/embed/*",
+        "https://www.youtube.com/live_chat*",
+        "https://www.youtube.com/account*",
+        "https://www.youtube.com/premium*",
+        "https://www.youtube.com/paid_memberships*",
+        "https://www.youtube.com/signin*",
+        "https://www.youtube.com/logout*",
+        "https://www.youtube.com/redirect*",
+        "https://www.youtube.com/s/*",
+        "https://www.youtube.com/youtubei/*",
+        "https://www.youtube.com/api/*"
+      ],
+      "exclude_globs": [
+        "*yt-native=1*"
+      ],
+      "css": [
+        "client.css"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "include_globs": [
+        "*yt-native=1*"
+      ],
+      "exclude_matches": [
+        "https://www.youtube.com/embed/*",
+        "https://www.youtube.com/live_chat*",
+        "https://www.youtube.com/account*",
+        "https://www.youtube.com/premium*",
+        "https://www.youtube.com/paid_memberships*",
+        "https://www.youtube.com/signin*",
+        "https://www.youtube.com/logout*",
+        "https://www.youtube.com/redirect*",
+        "https://www.youtube.com/s/*",
+        "https://www.youtube.com/youtubei/*",
+        "https://www.youtube.com/api/*"
+      ],
+      "css": [
+        "native.css"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ytc_rules",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "yourtube",
+  "version": "0.8.6",
+  "private": true,
+  "description": "YourTube: your own YouTube front-end at youtube.com, a Rust (Wasm) browser extension.",
+  "license": "MIT",
+  "author": "justerquate-sys",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "./build.sh",
+    "build:dev": "./build.sh --dev",
+    "test": "npm run test:rust && npm run test:e2e",
+    "test:rust": "cargo test --locked",
+    "test:e2e": "node tests/e2e.cjs",
+    "check:public": "node tests/check-public.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

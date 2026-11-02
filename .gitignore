@@ -1,0 +1,16 @@
+# Build output
+target/
+pkg/
+tools/debug-center/target/
+node_modules/
+
+# Written by the browser into unpacked extensions; written by ./build.sh --dev
+extension/_metadata/
+extension/build-id.txt
+
+# Debug-center data and logs (they belong in your user data folder, never here)
+*.ndjson
+incidents*
+*.log
+
+.DS_Store
