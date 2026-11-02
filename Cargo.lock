@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "ytc-client"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "serde_json",
  "sha1_smol",

@@ -107,6 +107,8 @@ const PLAYER_LOG_MAX: usize = 10;
 const VISION_BLOCK_MS: f64 = 10.0 * 60.0 * 1000.0;
 /// VISIONOS responses kept in memory (their URLs live 6 h; we reuse 30 min).
 const VISION_CACHE: usize = 40;
+/// How often a failed player re-checks a dropped connection.
+const NET_PROBE_MS: u32 = 3000;
 const VISION_MAX_AGE_MS: f64 = 30.0 * 60.0 * 1000.0;
 /// Fetch the next video's `next` + VISIONOS this close to the end (seconds).
 const UP_PREFETCH_S: f64 = 45.0;
@@ -126,6 +128,8 @@ const BG_ACTIVE_MS: f64 = 5.0 * 60_000.0;
 const CONT_CACHE: usize = 4;
 
 enum Purpose {
+    /// Is the network there at all? (`generate_204`; a player failure that looked like a dropped connection)
+    NetProbe,
     Page { nav: u32 },
     Resolve { nav: u32, path: String },
     Cont { nav: u32, generation: u32 },
@@ -168,6 +172,8 @@ enum Timer {
     Still { nav: u32 },
     /// The pointer rested on the logo for `logo::DWELL_MS` (dwell generation).
     Logo { generation: u32 },
+    /// Probe the network again while a failed player waits for the connection to come back.
+    NetProbe,
 }
 
 #[derive(PartialEq)]
@@ -255,6 +261,8 @@ pub struct App {
     player: Option<Own>,
     /// The player failed on this page: the panel shows in its box (Try again / Open on YouTube).
     player_failed: Option<PlayerFailed>,
+    /// The failed player is waiting for the connection: probing until it answers, then Try again by itself.
+    offline: bool,
     /// The next player start asks VISIONOS itself (Try again: no cached or prefetched response).
     vision_fresh: bool,
     /// Waiting for config/visitor data before the player's requests.
@@ -409,6 +417,7 @@ pub fn boot() {
         title: String::new(),
         player: None,
         player_failed: None,
+        offline: false,
         vision_fresh: false,
         player_wait: false,
         prefs_dirty: false,
@@ -1030,6 +1039,11 @@ impl App {
                 if nav == self.nav {
                     self.spec_pass();
                     self.bg_check();
+                }
+            }
+            Some(Timer::NetProbe) => {
+                if self.offline && self.player_failed.is_some() {
+                    self.net_probe();
                 }
             }
             Some(Timer::Bg) => {
@@ -1724,6 +1738,7 @@ impl App {
                 }
                 self.kick_player();
             }
+            Purpose::NetProbe => self.on_net_probe(status),
             Purpose::VisionPrefetch { v, route, .. } => {
                 self.vision_prefetching.remove(&v);
                 let ms = bridge::now() - p.sent;
@@ -2329,6 +2344,12 @@ impl App {
                     }
                     self.bw = p.bw;
                     self.show_failed(&p.v, t, p.list.clone(), &reason);
+                    // Everything failing at once (HTTP 0 / no answer) is usually the connection or
+                    // DNS (live 2 Nov 2026): check; if it's down, wait for it and continue by itself.
+                    self.offline = false;
+                    if player::fail::network_like(&reason) {
+                        self.net_probe();
+                    }
                     if self.debug {
                         self.show_debug();
                     }
@@ -2357,6 +2378,34 @@ impl App {
         bridge::attr(player::ui::BOX, "class", "player failed");
         self.player_wait = false;
         self.player_failed = Some(PlayerFailed { v: v.to_string(), t, list });
+    }
+
+    /// One connectivity probe (same origin, tiny, never cached).
+    fn net_probe(&mut self) {
+        let id = next_id();
+        bridge::fetch_opts(id, "GET", "https://www.youtube.com/generate_204", "", "{}", "{\"cache\":\"no-store\",\"credentials\":\"omit\"}");
+        self.pending.insert(id, Pending { purpose: Purpose::NetProbe, sent: bridge::now(), ep: "net-probe" });
+    }
+
+    /// A probe answered (or failed): back → continue the failed video by itself; still down →
+    /// say so in the panel and probe again in a few seconds.
+    fn on_net_probe(&mut self, status: u32) {
+        let Some(f) = self.player_failed.as_ref() else {
+            self.offline = false;
+            return;
+        };
+        if status == 204 || status == 200 {
+            if std::mem::take(&mut self.offline) {
+                self.player_panel_act(true);
+            }
+            return;
+        }
+        if !self.offline {
+            self.offline = true;
+            bridge::html(player::ui::BOX, &player::fail::panel(&f.v, player::fail::OFFLINE_REASON));
+        }
+        let id = self.timer(Timer::NetProbe);
+        bridge::timer(id, NET_PROBE_MS);
     }
 
     /// The panel's (or the stuck status') buttons. Try again: the same video and time in a new

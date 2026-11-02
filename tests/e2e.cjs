@@ -99,6 +99,7 @@ const PNG = (() => {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.concat(Array(9).fill(row)))), chunk('IEND', Buffer.alloc(0))]);
 })();
 const IMG = { delay: 0, search: 0 }; // motion step: late thumbnails / a slow search (skeleton geometry)
+const NET = { down: false, probes: 0 };
 const FX = { bot: null, homeChips: false, wlMock: false, wl: new Set(), wlFail: false, linked: new Set(), checkDelay: 0, checksInFlight: 0, checksMax: 0, homeLabels: false, homeShorts: false };
 // ---- SponsorBlock (sponsor.ajay.app): the k-anonymity API answers a whole sha256-prefix bucket. Our fixture video
 // sits in the real bucket 671e (its other entries, 2 Nov 2026, are the decoys; aqz-KE-bpKQ hashes there too).
@@ -297,6 +298,8 @@ function googlevideo(route, url) {
   // A stuck node: never answers on its own host, only on the mirror YouTube lists in mn.
   if (v === 'gvnodehang1' && url.hostname === 'rr1---sn-fixture.googlevideo.com') return new Promise(() => {});
   if (v === 'gvhangfirst' && gen === 1) return new Promise(() => {});
+  // A dropped connection: every request to the video server fails at once (HTTP 0).
+  if (v === 'netdown0001' && NET.down) return route.abort('internetdisconnected');
   if (v === 'gvhangcach1' && gen === 1) return new Promise(() => {});
   // A momentary 503 from one node on the starting format's index: asked again, no fallback.
   if (v === 'flaky503vid' && itag === '243' && a === 0 && !failures.flaky503) { failures.flaky503 = true; return route.fulfill({ status: 503, headers: cors, body: '' }); }
@@ -460,6 +463,7 @@ async function handle(route) {
   const req = route.request(), url = new URL(req.url());
   if (url.hostname.endsWith('.googlevideo.com')) return googlevideo(route, url);
   if (url.hostname === '127.0.0.1') return route.continue(); // the test debug-center collector
+  if (url.hostname === 'www.youtube.com' && url.pathname === '/generate_204') { NET.probes++; return NET.down ? route.abort('internetdisconnected') : route.fulfill({ status: 204, body: '' }); }
   if (url.hostname === 'sponsor.ajay.app') return sponsorBlock(route, req, url);
   if (url.hostname !== 'www.youtube.com') {
     log.external.push(req.url());
@@ -2416,6 +2420,19 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(!page.url().includes('yt-native'), 'stays in our player');
     const hosts = [...new Set(log.gv.filter(g => g.v === 'gvnodehang1').map(g => g.host))];
     assert.ok(hosts.includes('rr1---sn-fixture2.googlevideo.com'), 'asked the mirror: ' + hosts);
+  });
+
+  await step('own player: a dropped connection → "No connection — continuing when it is back", then it plays by itself', async () => {
+    NET.down = true; NET.probes = 0;
+    try {
+      await page.goto('https://www.youtube.com/watch?v=netdown0001', { waitUntil: 'commit' });
+      await page.waitForFunction(() => /No connection/.test(document.querySelector('#ytc-player .pfm')?.textContent || ''), null, { timeout: 30000 });
+      assert.ok(!page.url().includes('yt-native'), 'stays on our page');
+      assert.ok(NET.probes >= 1, 'the network was probed');
+      NET.down = false;
+      await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 15000);
+      assert.equal(await page.locator('#ytc-player .pfail').count(), 0, 'the panel is gone: it continued by itself');
+    } finally { NET.down = false; }
   });
 
   await step('own player: a momentary 503 on the starting format is asked again (no fallback)', async () => {

@@ -15,9 +15,20 @@ pub const STUCK: &str = "ytc-pstuck";
 /// The panel's Try again button (focused when the panel replaces a focused control).
 pub const RETRY_BTN: &str = "ytc-pfretry";
 
+/// The panel's reason while the connection is down (the app probes and continues by itself).
+pub const OFFLINE_REASON: &str = "offline: youtube.com isn't answering (connection or DNS); continuing when it's back";
+
+/// A failure that may just be a dropped connection: requests that never got an answer.
+pub fn network_like(reason: &str) -> bool {
+    reason.contains("HTTP 0") || reason.contains("no answer")
+}
+
 /// The human headline for a failure reason (the technical reason is shown under it).
 pub fn message(reason: &str) -> String {
     let r = reason;
+    if r == OFFLINE_REASON {
+        return "No connection — continuing when it's back".into();
+    }
     let yt = |prefix: &str| r.strip_prefix(prefix).map(|s| s.split(" · ").next().unwrap_or("").trim().to_string());
     if let Some(rest) = r.strip_prefix(super::own::UPCOMING_REASON) {
         // YouTube's own words ("Premieres in 2 hours", "This live event will begin in a few moments.").
@@ -155,6 +166,10 @@ mod tests {
         assert_eq!(message("media error 3 PIPELINE_ERROR_DECODE"), "The browser couldn't play this video");
         assert_eq!(message("live master playlist: no variants (0 bytes)"), "This live stream isn't loading");
         assert_eq!(message("googlevideo HTTP 403 after a player refresh"), "This video isn't loading");
+        assert_eq!(message(OFFLINE_REASON), "No connection — continuing when it's back");
+        assert!(network_like("index of itag 139: HTTP 0 (while stuck: no first frame 4 s after the streams were chosen)"));
+        assert!(network_like("VISIONOS player: no answer in 8 s"));
+        assert!(!network_like("googlevideo HTTP 403 after a player refresh"));
         assert_eq!(message("index of itag 243: HTTP 503"), "This video isn't loading");
         assert_eq!(message("no first frame 30 s after the streams were chosen"), "This video isn't loading");
         assert_eq!(message("own player turned off (op: false)"), "The client's own player is turned off");

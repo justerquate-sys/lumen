@@ -1,6 +1,6 @@
 {
   "name": "yourtube",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "private": true,
   "description": "YourTube: your own YouTube front-end at youtube.com, a Rust (Wasm) browser extension.",
   "license": "MIT",
