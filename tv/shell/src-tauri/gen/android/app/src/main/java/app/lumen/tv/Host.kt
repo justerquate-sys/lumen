@@ -1,6 +1,5 @@
 package app.lumen.tv
 
-import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -40,7 +39,7 @@ object Native {
 }
 
 /**
- * What Rust asks of Android: the Keystore, the update dialog and the package installer. Called from
+ * What Rust asks of Android: the Keystore, the bundle swap and the package installer. Called from
  * Rust threads; UI work hops to the main thread.
  */
 class Host(activity: MainActivity) {
@@ -76,19 +75,6 @@ class Host(activity: MainActivity) {
   fun bundleReady() {
     val a = ref.get() ?: return
     a.runOnUiThread { a.swapBundle() }
-  }
-
-  /** A newer shell is offered by the latest release. */
-  fun offerUpdate(version: String) {
-    val a = ref.get() ?: return
-    a.runOnUiThread {
-      AlertDialog.Builder(a)
-        .setTitle("Update Lumen")
-        .setMessage("Version $version is ready. Install it now? When Android has installed it, choose Open.")
-        .setPositiveButton("Install") { _, _ -> Thread { Native.acceptUpdate() }.start() }
-        .setNegativeButton("Later", null)
-        .show()
-    }
   }
 
   /** A downloaded APK waiting for the owner to allow installs from this app. */

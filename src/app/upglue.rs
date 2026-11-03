@@ -57,6 +57,7 @@ impl App {
         }
         let pending = self.countdown.as_ref().filter(|c| c.0 == self.nav).map(|c| (self.up_title(&c.1.v), c.2));
         bridge::html(render::UPNEXT, &upnext::head(self.cfg.autoplay, pending.as_ref().map(|(t, s)| (t.as_str(), *s))));
+        self.tv_countdown(pending.is_some());
     }
 
     /// Near the end: fetch the next video's `next` + VISIONOS once (no other requests).

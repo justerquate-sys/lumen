@@ -74,6 +74,14 @@ pub fn card_actions(out: &mut String, v: &Video) {
     }
 }
 
+/// The Watch later button for video `id` (signed in only; the TV player's Save button).
+pub fn wl_button(out: &mut String, id: &str) {
+    let state = shared(|s| s.signed_in.then(|| s.saves.get(id)));
+    if let Some(st) = state {
+        watch_later::button(out, id, &st);
+    }
+}
+
 /// Block control beside an external description link.
 pub fn link_control(out: &mut String, url: &str) {
     SHARED.with(|c| {

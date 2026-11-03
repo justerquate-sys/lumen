@@ -131,7 +131,8 @@ pub fn dropdown(hist: &[String], sugg: &[String], sel: Option<usize>) -> String 
         esc_into(out, &crate::util::pct_encode(q));
         out.push_str("\" data-act=\"fx-q\" data-arg=\"");
         esc_into(out, q);
-        out.push_str("\" tabindex=\"-1\">");
+        // TV: the rows are focus stops of the search screen (on desktop the field keeps the focus).
+        out.push_str(if crate::tv::on() { "\">" } else { "\" tabindex=\"-1\">" });
         out.push_str(if history { CLOCK } else { GLASS });
         out.push_str("<span>");
         esc_into(out, q);
@@ -141,7 +142,8 @@ pub fn dropdown(hist: &[String], sugg: &[String], sel: Option<usize>) -> String 
             esc_into(out, q);
             out.push_str("\" aria-label=\"Remove ");
             esc_into(out, q);
-            out.push_str(" from search history\" tabindex=\"-1\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m6 6 12 12M18 6 6 18\"/></svg></button>");
+            out.push_str(if crate::tv::on() { " from search history\"><svg" } else { " from search history\" tabindex=\"-1\"><svg" });
+            out.push_str(" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m6 6 12 12M18 6 6 18\"/></svg></button>");
         }
         out.push_str("</li>");
         i += 1;

@@ -15,6 +15,7 @@ pub mod parse;
 pub mod motion;
 pub mod perf;
 pub mod player;
+pub mod qr;
 pub mod render;
 pub mod route;
 pub mod ready;
@@ -103,9 +104,10 @@ pub fn on_shell(seq: u32, ok: bool, json: &str) {
     app::with(|a| a.on_shell(seq, ok, json));
 }
 
-/// The app shell's Back button: true = handled by the client.
+/// The app shell's Back button: 0 = not handled (the shell goes back), 1 = handled by the client,
+/// 2 = leave the app.
 #[wasm_bindgen]
-pub fn on_back() -> bool {
+pub fn on_back() -> u32 {
     app::with_ret(|a| a.on_back())
 }
 

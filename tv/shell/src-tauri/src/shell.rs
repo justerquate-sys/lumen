@@ -9,10 +9,12 @@
 //! | `store_get/set/remove` | chrome.storage.local                                            |
 //! | `shell_info`   | shell version, bundle in use, update state                              |
 //! | `shell_check`  | checks for updates now, then answers like `shell_info`                  |
+//! | `shell_install`| downloads, verifies and installs the offered APK (in the background; `shell_info` reports `downloading` with `got`/`total`, then `installing`) |
 //!
 //! Updates: at launch and every 6 hours the latest GitHub release is checked (`lumen_tv_core::release`);
 //! a newer verified bundle is cached and handed to the WebView (`host::bundle_ready`), a newer APK is
-//! offered (`host::offer_update`).
+//! offered to the page (`shell_info`'s `offer`): the client shows an "Update ready" notice and its About &
+//! updates screen installs it (`shell_install`).
 
 use crate::host;
 use serde_json::{Value, json};
@@ -33,8 +35,6 @@ const REPO: &str = match option_env!("LUMEN_TV_REPO") {
     None => "justerquate-sys/lumen",
 };
 const CHECK_EVERY: Duration = Duration::from_secs(6 * 3600);
-/// Ask about the same shell update again after this long.
-const OFFER_AGAIN_MS: f64 = 3.0 * 24.0 * 3600.0 * 1000.0;
 
 /// The client bundle built into this APK (`./build.sh --tv` writes it).
 fn builtin() -> Bundle {
@@ -184,18 +184,32 @@ impl Shell {
             "shell_info" => {
                 let b = self.bundle.read().unwrap();
                 let (v, code) = version();
-                Ok(json!({"version": v, "version_code": code, "bundle": {"seq": b.0.seq, "client": b.0.client, "source": b.0.source}, "update": *self.status.lock().unwrap(), "repo": REPO}).to_string())
+                let offer = self.offer.lock().unwrap().as_ref().map(|o| json!({"version": o.apk.version, "version_code": o.apk.version_code, "size": o.apk.size}));
+                Ok(json!({"version": v, "version_code": code, "bundle": {"seq": b.0.seq, "client": b.0.client, "source": b.0.source}, "update": *self.status.lock().unwrap(), "offer": offer, "repo": REPO}).to_string())
             }
-            // Checks for updates now (the TV settings' "check for updates"; tests).
+            // Checks for updates now (the client's About & updates screen; tests). No dialog: the screen
+            // shows what it found.
             "shell_check" => {
                 self.check();
+                self.call("shell_info", "null")
+            }
+            // Installs the offered APK (About & updates → Install update): downloads in the background.
+            "shell_install" => {
+                if self.offer.lock().unwrap().is_none() {
+                    return Err("no app update is offered".into());
+                }
+                std::thread::spawn(|| {
+                    if let Some(s) = get() {
+                        s.accept_update();
+                    }
+                });
                 self.call("shell_info", "null")
             }
             _ => Err(format!("unknown command {cmd}")),
         }
     }
 
-    /// One update check (blocking; the update thread).
+    /// One update check (blocking; the update thread, or the About & updates screen).
     pub fn check(&self) {
         let seq = self.bundle.read().unwrap().0.seq;
         let code = version().1;
@@ -212,11 +226,7 @@ impl Shell {
                 }
                 if let Some(o) = out.apk {
                     st["apk"] = json!({"version": o.apk.version, "version_code": o.apk.version_code});
-                    let ask = self.should_offer(&o.apk.version);
                     *self.offer.lock().unwrap() = Some(o.clone());
-                    if ask {
-                        host::offer_update(&o.apk.version);
-                    }
                 }
                 *self.status.lock().unwrap() = st;
             }
@@ -227,21 +237,24 @@ impl Shell {
         }
     }
 
-    fn should_offer(&self, version: &str) -> bool {
-        let p = self.dir.join("offer.json");
-        let last: Value = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-        if last.get("version").and_then(Value::as_str) == Some(version) && now() - last.get("at").and_then(Value::as_f64).unwrap_or(0.0) < OFFER_AGAIN_MS {
-            return false;
-        }
-        let _ = std::fs::write(&p, json!({"version": version, "at": now()}).to_string());
-        true
-    }
-
-    /// The owner accepted the shell update: download, check, hand to the installer.
+    /// The owner accepted the shell update: download (progress in the status), check, hand to the installer.
     pub fn accept_update(&self) {
         let Some(o) = self.offer.lock().unwrap().clone() else { return };
-        match release::download_apk(&self.http, &o, &self.dir.join("updates")) {
-            Ok(p) => host::install_apk(&p.to_string_lossy()),
+        let apk = json!({"version": o.apk.version, "version_code": o.apk.version_code});
+        let mut last = 0u64;
+        let mut on = |got: u64, total: u64| {
+            // (A status write per 1 % at most.)
+            if total == 0 || got == total || (got - last) * 100 >= total {
+                last = got;
+                *self.status.lock().unwrap() = json!({"state": "downloading", "at": now(), "got": got, "total": total, "apk": apk});
+            }
+        };
+        on(0, o.apk.size);
+        match release::download_apk_progress(&self.http, &o, &self.dir.join("updates"), &mut on) {
+            Ok(p) => {
+                *self.status.lock().unwrap() = json!({"state": "installing", "at": now(), "apk": apk});
+                host::install_apk(&p.to_string_lossy());
+            }
             Err(e) => {
                 log::warn!("shell update: {e}");
                 *self.status.lock().unwrap() = json!({"state": "failed", "at": now(), "error": e});

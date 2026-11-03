@@ -95,6 +95,12 @@ const NO_ANSWER_MS: f64 = 2500.0;
 const NO_ANSWER_CACHED_MS: f64 = 800.0;
 const VISION_TIMEOUT_MS: u32 = 8000;
 const IDLE_MS: f64 = 2500.0;
+/// TV: the overlay stays this long after the last key while playing (a remote is slower than a mouse).
+const TV_IDLE_MS: f64 = 4000.0;
+
+fn idle_ms() -> f64 {
+    if crate::tv::on() { TV_IDLE_MS } else { IDLE_MS }
+}
 const MAX_RETRIES: u32 = 3;
 /// The first video of a page waits this long at most for decodingInfo (seen: 4–55 ms).
 const CAPS_WAIT_MS: u32 = 150;
@@ -670,7 +676,7 @@ impl Own {
             audio_sel: String::new(),
             cc_grab: None,
             drag: None,
-            idle_at: now + IDLE_MS,
+            idle_at: now + idle_ms(),
             snap: false,
             away: false,
             cc_text: String::new(),
@@ -3203,7 +3209,13 @@ impl Own {
             bridge::text(ui::TIME, &if edge && self.drag.is_none() { String::new() } else { format!("−{}", ui::clock(e - t)) });
         } else {
             let d = span.map_or(0.0, |s| s.1);
-            bridge::text(ui::TIME, &format!("{} / {}", ui::clock(t), ui::clock(d)));
+            if crate::tv::on() {
+                // TV: elapsed on the bar's left end, remaining on its right.
+                bridge::text(ui::TIME, &ui::clock(t));
+                bridge::text(ui::TREM, &format!("−{}", ui::clock(d - t)));
+            } else {
+                bridge::text(ui::TIME, &format!("{} / {}", ui::clock(t), ui::clock(d)));
+            }
         }
         // Playing VOD: the fill glides (CSS, linear, GLIDE_MS) toward where the video will be one
         // glide later, so it moves at real speed between updates; anything else lands exactly.
@@ -3360,6 +3372,10 @@ impl Own {
         if key {
             self.hold_at = bridge::now();
             bridge::focus_in(ui::MENU, 0);
+            if crate::tv::on() && kind == "quality" {
+                // TV: the focus on the current quality (the codec row is not shown there).
+                bridge::focus_sel(ui::MENU, ".mql button.on");
+            }
         }
     }
 
@@ -3465,7 +3481,7 @@ impl Own {
             self.away = away;
             // Leaving hides at once (eased out); coming back shows at once. Keys still show the
             // controls for IDLE_MS while the pointer is away; pointer moves elsewhere do not.
-            self.idle_at = bridge::now() + if away { -1.0 } else { IDLE_MS };
+            self.idle_at = bridge::now() + if away { -1.0 } else { idle_ms() };
             self.ui();
         }
         let d = self.mc.hover(zone, arg, held);
@@ -3552,7 +3568,7 @@ impl Own {
             return;
         }
         self.last_input = now;
-        self.idle_at = now + IDLE_MS;
+        self.idle_at = now + idle_ms();
         self.kf_until = 0.0;
         // A step overrides the row the pointer happens to rest on.
         self.cancel_dwell();
@@ -3684,7 +3700,7 @@ impl Own {
     /// Clicks on `data-act="p-…"` (`kbd` = Enter/Space); true when handled.
     pub fn on_act(&mut self, act: &str, arg: &str, kbd: bool) -> bool {
         self.last_input = bridge::now();
-        self.idle_at = self.last_input + IDLE_MS;
+        self.idle_at = self.last_input + idle_ms();
         self.kf_until = if kbd { self.last_input + KF_MS } else { 0.0 };
         let mut keep_focus = false;
         match act {
@@ -3816,7 +3832,8 @@ impl Own {
             }
             _ => return false,
         }
-        if !keep_focus {
+        // (TV: the remote's focus stays on the control it pressed.)
+        if !keep_focus && !crate::tv::on() {
             bridge::blur();
         }
         self.ui();
@@ -3851,7 +3868,7 @@ impl Own {
             return false;
         }
         self.last_input = bridge::now();
-        self.idle_at = self.last_input + IDLE_MS;
+        self.idle_at = self.last_input + idle_ms();
         self.kf_until = self.last_input + KF_MS;
         if key == "Escape" && self.ch.open && self.mc.open.is_none() {
             // The chapter panel closes at once; keyboard focus inside goes to its compact row.
@@ -4000,13 +4017,59 @@ impl Own {
         }
     }
 
+    /// TV: a remote key shows the overlay (as a pointer move does on desktop).
+    pub fn wake(&mut self) {
+        self.last_input = bridge::now();
+        self.idle_at = self.last_input + idle_ms();
+        self.ui();
+    }
+
+    /// TV: Back hides the overlay at once.
+    pub fn rest(&mut self) {
+        self.idle_at = bridge::now() - 1.0;
+        self.ui();
+    }
+
+    /// The overlay is hidden (playing and idle).
+    pub fn idle(&self) -> bool {
+        self.classes.contains(" idle")
+    }
+
+    /// TV scrub: moves the pending seek target `secs` from the current one (or the playing position). The
+    /// fill, knob, time and the storyboard frame above the bar follow it at once (shown as a drag);
+    /// `tv_scrub_end` seeks there, once, when the remote rests.
+    pub fn tv_scrub(&mut self, secs: f64) -> bool {
+        let Some((a, b)) = self.span().filter(|(a, b)| b > a) else { return false };
+        if self.live.is_some() {
+            return false;
+        }
+        let cur = self.drag.map_or_else(|| self.time(), |f| a + f * (b - a));
+        let to = (cur + secs).clamp(a, (b - 1.0).max(a));
+        self.drag = Some((to - a) / (b - a));
+        self.wake();
+        self.hover_ui(true);
+        true
+    }
+
+    pub fn tv_scrubbing(&self) -> bool {
+        self.drag.is_some() && crate::tv::on()
+    }
+
+    /// Ends a TV scrub: seeks to its target.
+    pub fn tv_scrub_end(&mut self) {
+        let (Some(f), Some((a, b))) = (self.drag.take(), self.span()) else { return };
+        self.seek_to(a + f * (b - a));
+        self.wake();
+        self.hover_ui(false);
+    }
+
     pub fn on_move(&mut self) {
         if self.away {
             return;
         }
         let now = bridge::now();
         let was_idle = self.classes.contains(" idle");
-        self.idle_at = now + IDLE_MS;
+        self.idle_at = now + idle_ms();
         if was_idle {
             self.ui();
         }

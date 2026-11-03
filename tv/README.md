@@ -36,28 +36,52 @@ marked *latest*). After this first install the app keeps itself up to date (see 
    prompt on the TV.
 4. Download the APK (the link above) and `adb install lumen-tv.apk`
 
-**Sign in:** open the app, choose *Sign in* (top right) or *Sign in with your phone*, then on your
-phone go to **youtube.com/activate** (or google.com/device), enter the code shown on the TV and pick
-your account. That is YouTube's own TV sign-in: your history, subscriptions, Watch later and
-playlists are the same as everywhere else. *Account → Sign out* revokes the TV's access.
+**Sign in:** open the app, choose *Sign in* (the rail's last item) or *Sign in with your phone* on Home, then
+scan the QR code with your phone, or go to the address shown (google.com/device or youtube.com/activate), enter
+the code shown on the TV and pick your account. That is YouTube's own TV sign-in: your history, subscriptions,
+Watch later and playlists are the same as everywhere else. *Account → Sign out* revokes the TV's access.
 
-**Remote:** arrows move the focus (a mint ring), OK selects, Back closes what is open and goes back
-(on Home: first back to the top, then out of the app). On a video: ←/→ seek 10 s, OK plays/pauses,
-↓ opens the control bar, ↑ or Back returns to the video. Media keys (play/pause, rewind,
-fast-forward) work everywhere on the watch page. Text fields open the on-screen keyboard on OK.
+**Remote:** the arrows move the focus (the focused card grows and gets a mint ring), OK selects, Back closes what
+is open, then goes to the rail, then back (on Home it leaves the app). ← from the first column opens the rail
+(Search, Home, Subscriptions, History, Watch later, Playlists, Liked, Account). *Search* opens the search screen:
+OK on the field opens the TV keyboard (its microphone dictates), ↓ walks recent searches and suggestions. A video
+plays full screen at once; any key shows the controls (they hide 4 s after the last key while playing): ←/→ on the
+bar seek 10 s (faster while held, with the storyboard frame), OK plays/pauses, ↓ goes to the buttons (captions,
+speed, quality, like, Watch later, more info) and once more to Up next. Media keys (play/pause, rewind,
+fast-forward) work everywhere on the watch page. The look is documented in [design/](design/README.md).
 
 ## Updates
 
-- **The client** (everything you see) updates without reinstalling. At launch and every 6 hours the
-  app reads the repository's releases, takes the newest one carrying `lumen-tv-manifest.json`, checks its
-  ed25519 signature against the public key compiled into the app (`tv/keys/release.pub`) and the
-  SHA-256 of every file, caches it, and switches to it the next time a page loads (or when you come
-  back to the app; never in the middle of a video). Offline, it runs what it has; a broken or
-  tampered download is ignored.
-- **The app itself** (the shell, rarely) is offered in the app when a release carries a newer APK:
-  *Install* downloads it, checks its hash against the signed manifest and opens Android's installer
-  (the first time Android asks you to allow installs from Lumen; the install continues when
-  you come back). Android only accepts it when it is signed with the same key as the installed app.
+Everything is in the app: **About & updates**, the last item of the rail (under Sign in / Account, so it is there
+signed out too). It shows the app version, the interface version and build, when the last check ran and what it
+found, with one action focused:
+
+- **Check for updates** asks GitHub now (the shell's `shell_check`).
+- **Update now** (a new interface was found): it is already downloaded and verified; the screen restarts with it at
+  once, no relaunch, still signed in.
+- **Install update** (a new app was found): downloads it with its progress, checks its hash against the signed
+  manifest and opens Android's installer (`shell_install`; the first time Android asks to allow installs from
+  Lumen: allow it and press Back, the install goes on). Choose *Update*, then *Open*. Downloader is only ever
+  needed for the very first install.
+- **Retry** after a failed check, with the reason (no connection, GitHub's rate limit, a signature that does not
+  verify).
+
+The automatic checks stay: at launch and every 6 hours the app reads the repository's releases, takes the newest
+one carrying `lumen-tv-manifest.json`, checks its ed25519 signature against the public key compiled into the app
+(`tv/keys/release.pub`) and the SHA-256 of every file, and caches it. When one finds something, a small *Update
+ready* notice appears at the top right of the pages (never over a video; the rail item gets a mint dot) and its
+button opens About & updates. A new interface also goes live by itself the next time the app comes back to the
+foreground (never mid-video). Offline, the app runs what it has; a broken or tampered download is ignored.
+
+An app from before this screen (0.1.0 builds of 2 Nov 2026) cannot install from it: it offers a new app in its own
+dialog once (*Install*); after that update everything is one click here.
+
+Testing the flow on the emulator: a debug build reads `files/dev.json`; `node tv/scripts/release.cjs --dry-run
+--no-build` signs `tv/out/release/` (`LUMEN_TV_KEY=<test key>`, `--apk <file>`, `SEQ`, `APK_VERSION`), `node
+tv/scripts/release.cjs --serve 8775` serves it as a fake GitHub, and
+`echo '{"release_api":"http://10.0.2.2:8775/repos/o/r/releases"}' | adb shell "run-as app.lumen.tv sh -c 'cat > files/dev.json'"`
+points the app at it. (A throwaway key needs a test build with its public key in `tv/keys/release.pub`; never
+commit that.)
 
 ## Build
 
@@ -167,9 +191,11 @@ tv/
 
 In the shared client (`src/`): `tv.rs` (pure TV logic: spatial navigation `pick`,
 remote keys, token and device-code parsing, TVHTML5 request rewriting; unit-tested) and
-`app/tvglue.rs` (wiring: D-pad focus moves, Back, the sign-in panel, the token from the shell,
-focus that is never lost), plus small hooks listed in `PORTING.md`; the TV styles are the block
-`/* ===== TV app` at the end of `extension/client.css` (everything under `html[data-ytc-tv]`).
+`app/tvglue.rs` (wiring: D-pad focus moves with the row anchoring and focus memory, the rail, the search
+screen, the player overlay keys and scrubbing, More info, Back, the sign-in screen, the token from the shell,
+focus that is never lost), `qr.rs` (the sign-in QR code), plus small hooks listed in `PORTING.md`; the TV styles
+are the block `/* ===== TV app` at the end of `extension/client.css` (everything under `html[data-ytc-tv]`; one
+layout at every resolution, rem = 1/60 of the width). Design reference: `tv/design/` (look sheet + tokens).
 
 **What replaces the extension's parts on TV**
 

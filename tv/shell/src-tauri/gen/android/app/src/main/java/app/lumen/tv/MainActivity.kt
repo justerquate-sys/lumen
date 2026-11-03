@@ -89,10 +89,12 @@ class MainActivity : TauriActivity() {
 
   private fun back() {
     val w = web ?: return finish()
-    w.evaluateJavascript("(()=>{try{return !!(globalThis.YTC_BACK&&YTC_BACK())}catch(e){return false}})()") { r ->
-      android.util.Log.i("LumenTV", "back: client handled=$r")
-      if (r == "true") return@evaluateJavascript
-      if (w.canGoBack()) w.goBack() else moveTaskToBack(true)
+    // "h" = the client handled it, "x" = the client asks to leave the app (Back on the rail at Home), "n" = not
+    // handled: the WebView goes back, or the app leaves when there is nothing to go back to.
+    w.evaluateJavascript("(()=>{try{const h=!!(globalThis.YTC_BACK&&YTC_BACK());return h?'h':globalThis.YTC_EXIT?'x':'n'}catch(e){return 'n'}})()") { r ->
+      android.util.Log.i("LumenTV", "back: client answered $r")
+      if (r == "\"h\"") return@evaluateJavascript
+      if (r != "\"x\"" && w.canGoBack()) w.goBack() else moveTaskToBack(true)
     }
   }
 

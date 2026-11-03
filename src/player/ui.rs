@@ -138,6 +138,42 @@ pub fn shell(video_id: &str) -> String {
     )
 }
 
+/// TV: the remaining time (the bar's right end; `TIME` is the elapsed time on its left).
+pub const TREM: &str = "ytc-trem";
+/// TV: the slot the Watch later toggle is written into (the app owns that button, `features::watch_later`).
+pub const TVWL: &str = "ytc-tvwl";
+const I_LIKE: &str = "<svg class=\"o\" viewBox=\"0 0 24 24\"><path d=\"M7.5 10.5V20H4v-9.5zm0 0 3.8-6.5c1.4 0 2.4 1 2.1 2.5l-.7 3.5H19a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5\"/></svg>";
+const I_INFO: &str = "<svg class=\"o\" viewBox=\"0 0 24 24\"><path d=\"M20.5 12a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0zM12 11v5.5M12 7.6v.1\"/></svg>";
+
+/// The TV player (10-foot overlay): the same ids as `shell` where the glue updates them, laid out for the
+/// remote. Over the picture: the time row (elapsed · chapter · remaining), the thick seek bar (a focus stop:
+/// ←/→ scrub it), and one row of large round buttons (play/pause, captions, speed, quality, like, Watch later,
+/// more info). No volume, theater, fullscreen, hover tooltips or caption sizing (pointer-only on desktop).
+pub fn shell_tv(video_id: &str) -> String {
+    format!(
+        "<video id=\"{VIDEO}\" playsinline preload=\"auto\" poster=\"https://i.ytimg.com/vi_webp/{video_id}/mqdefault.webp\"></video>\
+<div class=\"pov\" data-act=\"p-toggle\" data-arg=\"v\"></div>\
+<div id=\"{CCW}\" class=\"pcw\"><div id=\"{CC}\" class=\"pcc\" aria-live=\"off\"></div></div>\
+<div class=\"pbig\" data-act=\"p-toggle\" data-arg=\"v\">{PLAY}</div>\
+<div id=\"{PFX}\" class=\"pfx\" aria-hidden=\"true\">{PLAY}{PAUSE}</div>\
+<div id=\"{TOAST}\" class=\"ptoast\"></div>\
+<div id=\"{SBT}\" class=\"psbt\" role=\"status\"><span id=\"{SBTL}\"></span><button type=\"button\" id=\"{SBTB}\" data-act=\"p-sb\" data-arg=\"undo\">Undo</button></div>\
+<div class=\"pctl\">\
+<div class=\"ptr\"><span id=\"{TIME}\" class=\"ptime\">0:00</span><span id=\"{CHB}\" class=\"pchap\" data-n=\"0\"><span id=\"{CHL}\" class=\"pchl\"></span></span><button type=\"button\" class=\"plive\" data-act=\"p-live\" aria-label=\"Jump to live\">LIVE</button><span id=\"{TREM}\" class=\"prem\"></span></div>\
+<div id=\"{SEEK}\" class=\"pseek\" tabindex=\"0\" role=\"slider\" aria-label=\"Seek: ← and → move 10 s, OK plays or pauses\" data-drag=\"seek\"><div id=\"{SEGS}\" class=\"psegs\">{BAR}</div><i id=\"{RIP}\" class=\"prip\"></i><b class=\"pknob\"></b>\
+<div id=\"{TIP}\" class=\"ptip\" aria-hidden=\"true\"><div id=\"{TIPI}\" class=\"pti\"><i class=\"sbf ptf\"><i id=\"{TIPF}\"></i></i><em id=\"{TIPK}\" class=\"ptk\"></em><b id=\"{TIPC}\"></b><span id=\"{TIPT}\"></span></div></div></div>\
+<div class=\"prow\">\
+<button type=\"button\" class=\"pb\" data-act=\"p-toggle\" aria-label=\"Play/pause\">{PLAYPAUSE}</button>\
+<button type=\"button\" class=\"pb\" id=\"{CCB}\" data-act=\"p-menu\" data-arg=\"cc\" aria-haspopup=\"true\" aria-label=\"Captions\">{CC_OFF}{CC_ON}</button>\
+<button type=\"button\" class=\"pb pw\" id=\"{SPEED}\" data-act=\"p-menu\" data-arg=\"speed\" aria-haspopup=\"true\" aria-label=\"Speed\"><span id=\"{RATEB}\" class=\"plbl\">1×</span></button>\
+<button type=\"button\" class=\"pb pw\" id=\"{QUAL}\" data-act=\"p-menu\" data-arg=\"quality\" aria-haspopup=\"true\" aria-label=\"Quality\"><span id=\"{QLBL}\" class=\"plbl pq\">Auto</span></button>\
+<button type=\"button\" class=\"pb tvlk\" data-act=\"a-like\" aria-label=\"I like this\">{I_LIKE}</button>\
+<span id=\"{TVWL}\" class=\"pslot\"></span>\
+<button type=\"button\" class=\"pb\" data-act=\"tv-info\" aria-label=\"More info\">{I_INFO}</button>\
+</div></div><div id=\"{MENU}\" class=\"pmenu\" role=\"dialog\"><div id=\"{MENUI}\" class=\"pmi\"></div></div>"
+    )
+}
+
 /// One seek-bar segment: track, buffered, hover and progress fills. Without
 /// `--s`/`--e` it spans the whole bar.
 const BAR: &str = "<div class=\"pbar\"><i class=\"pbuf\"></i><i class=\"phv\"></i><i class=\"ppos\"></i></div>";

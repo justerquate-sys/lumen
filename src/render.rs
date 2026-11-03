@@ -130,12 +130,61 @@ pub const SIDE_PILL: &str = "ytc-sdi";
 
 /// Position of a page's link in the sidebar (None: the page has no link there).
 pub fn side_index(nav: &str) -> Option<usize> {
+    if crate::tv::on() {
+        return TV_RAIL.iter().position(|s| s.0 == nav);
+    }
     SIDE.iter().position(|s| s.1 == nav)
 }
 
-/// The indicator's clip insets (top, bottom) for link `i`: a full-height strip clipped to one row.
+/// The indicator's clip insets (top, bottom) for link `i`: a full-height strip clipped to one row
+/// (TV: rows of `--tvrow`, client.css).
 pub fn side_insets(i: usize) -> (String, String) {
+    if crate::tv::on() {
+        return (format!("calc({i} * var(--tvrow))"), format!("calc({} * var(--tvrow))", TV_RAIL.len() - 1 - i));
+    }
     (format!("{}px", i * SIDE_ROW), format!("{}px", (SIDE.len() - 1 - i) * SIDE_ROW))
+}
+
+/// The Lumen mark (also the TV launcher icon, tv/scripts/banner.cjs): a mint squircle, a charcoal L and its
+/// light point.
+pub const MARK: &str = "<svg class=\"lmk\" viewBox=\"0 0 48 48\" aria-hidden=\"true\"><rect width=\"48\" height=\"48\" rx=\"14\"/><path d=\"M17.5 12.5v21h14\"/><circle cx=\"32\" cy=\"15.5\" r=\"4\"/></svg>";
+const GLASS: &str = "M15.5 15.5 21 21M17 10.5a6.5 6.5 0 1 1-13 0 6.5 6.5 0 0 1 13 0z";
+/// About & updates: two arrows turning round (an update).
+const UPDATE: &str = "M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5";
+const PERSON: &str = "M15.5 8.5a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0zM5 19.5c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5";
+
+/// The TV rail, top to bottom (nav key, label, icon, href; Search opens its screen instead of a page).
+const TV_RAIL: [(&str, &str, &str, &str); 7] = [
+    ("search", "Search", GLASS, ""),
+    ("home", "Home", SIDE[0].3, "/"),
+    ("subs", "Subscriptions", SIDE[3].3, "/feed/subscriptions"),
+    ("history", "History", SIDE[1].3, "/feed/history"),
+    ("wl", "Watch later", SIDE[2].3, "/playlist?list=WL"),
+    ("playlists", "Playlists", SIDE[4].3, "/feed/playlists"),
+    ("liked", "Liked videos", SIDE[5].3, "/playlist?list=LL"),
+];
+
+/// One rail item: an icon (the collapsed rail) and its label (shown while the rail is open).
+pub fn tv_rail_item(out: &mut String, nav: &str, label: &str, icon: &str, href: &str, act: &str) {
+    if href.is_empty() {
+        out.push_str(&format!("<button type=\"button\" class=\"rl\" data-nav=\"{nav}\" data-act=\"{act}\">"));
+    } else {
+        out.push_str(&format!("<a class=\"rl\" href=\"{href}\" data-nav=\"{nav}\">"));
+    }
+    out.push_str(&format!("<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"{icon}\"/></svg><span>{label}</span>"));
+    out.push_str(if href.is_empty() { "</button>" } else { "</a>" });
+}
+
+/// TV: the rail (Lumen mark, Search, the pages, the account at the bottom) instead of the sidebar.
+fn tv_rail(out: &mut String, at: usize) {
+    let (t, b) = side_insets(at);
+    out.push_str(&format!("<nav id=\"ytc-side\" class=\"tvr\" aria-label=\"Browse\"><span class=\"rmk\">{MARK}<b>Lumen</b></span><div class=\"rls\"><i id=\"{SIDE_PILL}\" class=\"sdi\" aria-hidden=\"true\" style=\"--st:{t};--sb:{b}\"></i>"));
+    for (nav, label, icon, href) in TV_RAIL {
+        tv_rail_item(out, nav, label, icon, href, "tv-search");
+    }
+    out.push_str("</div><div class=\"rla\"><div id=\"ytc-acct\"></div>");
+    tv_rail_item(out, "about", "About & updates", UPDATE, "", "tv-about");
+    out.push_str("</div></nav>");
 }
 
 fn sidebar(out: &mut String, at: usize) {
@@ -153,18 +202,25 @@ fn sidebar(out: &mut String, at: usize) {
 /// at document_start, before the first InnerTube response.
 pub fn shell(route: &Route, _url: &str, main: Option<&str>) -> String {
     let q = if let Route::Search { q, .. } = route { esc(q) } else { String::new() };
+    let tv = crate::tv::on();
     let mut side = String::with_capacity(1600);
-    sidebar(&mut side, side_index(route.nav_key()).unwrap_or(0));
+    if tv {
+        tv_rail(&mut side, side_index(route.nav_key()).unwrap_or(1));
+    } else {
+        sidebar(&mut side, side_index(route.nav_key()).unwrap_or(0));
+    }
     format!(
         "<head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Lumen</title>\
 <link rel=\"preconnect\" href=\"https://i.ytimg.com\"><link rel=\"preconnect\" href=\"https://yt3.ggpht.com\"></head>\
 <body id=\"ytc\" data-nav=\"{nav}\"><header id=\"ytc-top\">\
 <a id=\"{LOGO_ID}\" class=\"logo\" href=\"/\" aria-label=\"YouTube home\" data-hov=\"logo\">{LOGO}<span>YouTube</span></a>\
 <form id=\"ytc-search\" role=\"search\" action=\"/results\"><i class=\"qf\" aria-hidden=\"true\"></i><input id=\"ytc-q\" name=\"search_query\" type=\"search\" placeholder=\"Search\" aria-label=\"Search\" autocomplete=\"off\" spellcheck=\"false\" role=\"combobox\" aria-autocomplete=\"list\" aria-controls=\"ytc-sug\" aria-expanded=\"false\" data-input=\"q\" data-focus=\"q\" value=\"{q}\"><button type=\"button\" class=\"qx\" data-act=\"fx-qx\" data-keep-focus aria-label=\"Clear search\" tabindex=\"-1\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m7 7 10 10M17 7 7 17\"/></svg></button><span id=\"ytc-qv\" class=\"qv\" aria-hidden=\"true\"></span><button type=\"button\" id=\"ytc-mic\" class=\"qm\" data-hov=\"mic\" data-act=\"vk-mic\" data-ctx=\"vk\" data-pop=\"vk\" data-keep-focus aria-label=\"Voice search\" aria-pressed=\"false\" aria-keyshortcuts=\"Alt\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"9\" y=\"3\" width=\"6\" height=\"11.5\" rx=\"3\"/><path d=\"M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21\"/></svg><i class=\"wv\" aria-hidden=\"true\"><b></b><b></b><b></b><b></b><b></b></i></button><ul id=\"ytc-sug\" class=\"sug\" role=\"listbox\" aria-label=\"Search history and suggestions\" data-keep-focus></ul><button type=\"submit\" class=\"qs\" aria-label=\"Search\"><svg viewBox=\"0.5 0.5 24 24\" aria-hidden=\"true\"><circle cx=\"10.5\" cy=\"10.5\" r=\"6.5\"/><path d=\"M15.5 15.5 21 21\"/></svg></button></form><div id=\"ytc-vk\" class=\"vk\" data-pop=\"vk\" role=\"dialog\" aria-label=\"Voice search\"></div>\
-<div class=\"tr\"><div id=\"ytc-hfx\"></div><div id=\"ytc-acct\"></div></div>\
+<div class=\"tr\"><div id=\"ytc-hfx\"></div>{acct}</div>\
 </header>{side}<div id=\"{PILL}\"></div><main id=\"{MAIN}\">{main}</main><div id=\"{KEYS}\" role=\"dialog\" aria-label=\"Keyboard shortcuts\"></div><div id=\"ytc-imp\" class=\"imp\"></div><div id=\"{DEBUG}\" hidden></div></body>",
         nav = route.nav_key(),
         main = main.map(String::from).unwrap_or_else(|| skeleton(route)),
+        // TV: the account control is the rail's last item.
+        acct = if tv { "" } else { "<div id=\"ytc-acct\"></div>" },
     )
 }
 
@@ -217,6 +273,12 @@ pub enum Lay {
 
 impl Lay {
     fn sizes(self) -> &'static str {
+        if crate::tv::on() {
+            return match self {
+                Lay::Grid => "18.4vw",
+                Lay::Rel => "14.2vw",
+            };
+        }
         match self {
             Lay::Grid => "(max-width:560px) calc(100vw - 64px),(max-width:950px) calc(50vw - 40px),460px",
             Lay::Rel => "(max-width:1640px) 168px,204px",
@@ -526,7 +588,34 @@ pub fn playlist_head(p: &PlaylistPage, wl: bool) -> Head {
     Head::Playlist { title: if wl && p.title.is_empty() { "Watch later".into() } else { p.title.clone() }, meta: p.meta.clone() }
 }
 
+/// TV: a calm card in the middle of the content (a heading, a line, its buttons; the first is focused).
+pub fn tv_prompt(title: &str, text: &str, buttons: &[(&str, &str, bool)]) -> String {
+    let mut out = format!("<section class=\"tvpc\"><div class=\"tvcd\">{MARK}<h2>");
+    esc_into(&mut out, title);
+    out.push_str("</h2><p>");
+    esc_into(&mut out, text);
+    out.push_str("</p><div class=\"tvbs\">");
+    for (act, label, primary) in buttons {
+        out.push_str(&format!("<button type=\"button\" class=\"{}\" data-act=\"{act}\">", if *primary { "tvb" } else { "tvb tvx" }));
+        if *act == "tv-search" {
+            out.push_str(&format!("<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"{GLASS}\"/></svg>"));
+        }
+        esc_into(&mut out, label);
+        out.push_str("</button>");
+    }
+    out.push_str("</div></div></section>");
+    out
+}
+
 pub fn home_nudge(nudge: &str, signed_in: bool) -> String {
+    if crate::tv::on() {
+        return if signed_in {
+            // YouTube's own reason (e.g. history off), as a calm card with a way on.
+            tv_prompt("Nothing on Home yet", nudge, &[("tv-search", "Search", true)])
+        } else {
+            tv_prompt("Make Lumen yours", "Sign in with your phone to see your recommendations, subscriptions, history and Watch later here. Search works without an account.", &[("tv-signin", "Sign in with your phone", true), ("tv-search", "Search", false)])
+        };
+    }
     // TV: no autofocus (a focused field opens the on-screen keyboard, which takes the remote's arrows).
     let autofocus = if crate::tv::on() { "" } else { " autofocus" };
     let mut out = format!("<section class=\"hero\"><h1>What do you want to watch?</h1><form id=\"ytc-search2\" role=\"search\" action=\"/results\"><input name=\"search_query\" type=\"search\" placeholder=\"Search YouTube\" autocomplete=\"off\"{autofocus}></form><p class=\"m\">");
@@ -543,49 +632,149 @@ pub fn home_nudge(nudge: &str, signed_in: bool) -> String {
     out
 }
 
-/// TV top-bar account control: Sign in (device code) or the account panel.
+/// TV: the rail's account item (Sign in with the device code, or the account screen).
 pub fn tv_slot(signed_in: bool) -> String {
+    let mut out = String::new();
     if signed_in {
-        "<button type=\"button\" class=\"tva on\" data-act=\"tv-account\" aria-label=\"Account\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"8.5\" r=\"3.5\"/><path d=\"M5 19.5c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5\"/></svg><span>Account</span></button>".into()
+        tv_rail_item(&mut out, "acct", "Account", PERSON, "", "tv-account");
     } else {
-        "<button type=\"button\" class=\"tva\" data-act=\"tv-signin\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><circle cx=\"12\" cy=\"8.5\" r=\"3.5\"/><path d=\"M5 19.5c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5\"/></svg><span>Sign in</span></button>".into()
+        tv_rail_item(&mut out, "acct", "Sign in", PERSON, "", "tv-signin");
     }
+    out
 }
 
-/// TV sign-in / account panel. `code`: (user code, verification URL) while a device sign-in runs.
+/// The QR code of `url` as an inline SVG (dark modules on the light tile), or "" when it does not fit.
+pub fn qr_svg(url: &str) -> String {
+    let Some(q) = crate::qr::Qr::encode(url.as_bytes()) else { return String::new() };
+    let n = q.size + 8;
+    format!("<svg class=\"tvq\" viewBox=\"-4 -4 {n} {n}\" shape-rendering=\"crispEdges\" role=\"img\" aria-label=\"QR code of the sign-in page\"><path d=\"{}\"/></svg>", q.svg_path())
+}
+
+/// TV sign-in / account screen (full screen over the app). `code`: (user code, verification URL) while a
+/// device sign-in runs; `status`: a line under the code.
 pub fn tv_panel(code: Option<(&str, &str)>, signed_in: bool, status: &str) -> String {
-    let mut out = String::from("<div class=\"tvp\">");
+    let mut out = format!("<div class=\"tvp\"><span class=\"rmk\">{MARK}<b>Lumen</b></span><div class=\"tvl\">");
+    let mut new_code = false;
     match code {
         Some((c, url)) => {
             // youtube.com/activate and Google's answer (google.com/device) open the same page
-            // (accounts.google.com/device, checked 2 Nov 2026); YouTube's TV app names the first.
+            // (accounts.google.com/device, checked 2 Nov 2026); the URL shown is the one Google returned, and the
+            // QR code opens it.
             let shown = url.trim_start_matches("https://").trim_start_matches("www.");
-            out.push_str("<h2>Sign in to YouTube</h2><ol><li>On your phone or computer, go to <b class=\"tvu\">youtube.com/activate</b>");
-            if shown != "youtube.com/activate" {
-                out.push_str(" <span class=\"tvo\">(or ");
-                esc_into(&mut out, shown);
-                out.push_str(")</span>");
-            }
-            out.push_str("</li><li>Enter this code</li></ol><p class=\"tvc\" aria-live=\"polite\">");
+            out.push_str("<h2>Sign in with your phone</h2><ol><li>Scan the code, or go to<b class=\"tvu\">");
+            esc_into(&mut out, shown);
+            out.push_str("</b></li><li>Enter this code</li></ol><p class=\"tvc\" aria-live=\"polite\">");
             esc_into(&mut out, c);
-            out.push_str("</p><p class=\"m\">Then choose your Google account. This screen continues by itself. Your history, subscriptions, Watch later and playlists stay in sync with YouTube on every device.</p>");
+            out.push_str("</p><p class=\"tvst\">Then pick your Google account. This screen continues by itself.</p>");
+            if !status.is_empty() {
+                out.push_str("<p class=\"tvst\" role=\"status\">");
+                esc_into(&mut out, status);
+                out.push_str("</p>");
+            }
+            out.push_str("</div><figure class=\"tvqr\">");
+            out.push_str(&qr_svg(url));
+            out.push_str("<figcaption>Scan with your phone's camera</figcaption></figure>");
+            new_code = true;
         }
         None if signed_in => {
-            out.push_str("<h2>Signed in</h2><p class=\"m\">This TV uses your YouTube account: history, subscriptions, Watch later and playlists are the same as on your other devices.</p><button type=\"button\" class=\"tvb\" data-act=\"tv-signout\">Sign out</button>");
+            out.push_str(&format!("<span class=\"tva\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"{PERSON}\"/></svg></span><h2>Signed in</h2><p class=\"tvst\">This TV uses your YouTube account: history, subscriptions, Watch later and playlists are the same as on your other devices.</p></div>"));
         }
         None => {
-            out.push_str("<h2>Sign in to YouTube</h2>");
-            if !status.is_empty() && !status.ends_with('…') {
-                out.push_str("<button type=\"button\" class=\"tvb\" data-act=\"tv-newcode\">Get a new code</button>");
+            out.push_str("<h2>Sign in with your phone</h2>");
+            if !status.is_empty() {
+                out.push_str("<p class=\"tvst\" role=\"status\">");
+                esc_into(&mut out, status);
+                out.push_str("</p>");
             }
+            out.push_str("</div>");
+            new_code = !status.is_empty() && !status.ends_with('…');
         }
     }
-    if !status.is_empty() {
-        out.push_str("<p class=\"tvst\" role=\"status\">");
-        esc_into(&mut out, status);
+    // Back is first (and focused): OK pressed by mistake never throws away a code being typed on the phone.
+    out.push_str("<div class=\"tvbs\"><button type=\"button\" class=\"tvb tvx\" data-act=\"tv-close\">Back</button>");
+    if new_code {
+        out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-newcode\">Get a new code</button>");
+    }
+    if signed_in && code.is_none() {
+        out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-signout\">Sign out</button>");
+    }
+    out.push_str("</div></div>");
+    out
+}
+
+/// TV: the About & updates screen. `info` = the shell's last answer (None: not answered yet), `running` =
+/// the interface build this page runs, `note` = a line about the last action (e.g. an install that failed).
+pub fn tv_about(info: Option<&crate::tv::ShellInfo>, running: u64, running_client: &str, now: f64, note: &str) -> String {
+    use crate::tv::UpdateView as V;
+    let mut out = format!("<div class=\"tvp\"><span class=\"rmk\">{MARK}<b>Lumen</b></span><div class=\"tvl tvab\"><h2>About &amp; updates</h2><dl class=\"tvv\">");
+    let row = |out: &mut String, k: &str, v: &str| {
+        out.push_str("<dt>");
+        esc_into(out, k);
+        out.push_str("</dt><dd>");
+        esc_into(out, v);
+        out.push_str("</dd>");
+    };
+    let view = info.map(|i| crate::tv::update_view(i, running));
+    match info {
+        Some(i) => {
+            row(&mut out, "App", &format!("Lumen for TV {}", i.version));
+            // (The interface this screen runs; a newer one in the shell is the update.)
+            let (client, build) = if running > 0 && !running_client.is_empty() { (running_client, running) } else { (i.client.as_str(), i.seq) };
+            // (The build id in brackets is for bug reports: the version and the build number say enough here.)
+            let client = client.split(" (").next().unwrap_or(client);
+            row(&mut out, "Interface", &format!("{client} · build {build}"));
+            let when = if i.at > 0.0 { crate::tv::ago(i.at, now) } else { "not yet".to_string() };
+            let result = match &view {
+                Some(V::Failed(_)) => " · failed",
+                Some(V::UpToDate) => " · up to date",
+                Some(V::Ready | V::App(_) | V::NeedsApp) => " · update found",
+                _ => "",
+            };
+            row(&mut out, "Last check", &format!("{when}{result}"));
+        }
+        None => row(&mut out, "App", "Asking the app…"),
+    }
+    out.push_str("</dl>");
+    // The state, and the buttons it offers (the first is focused).
+    let (cls, head, detail, buttons): (&str, String, String, Vec<(&str, &str, bool)>) = match &view {
+        None | Some(V::NotChecked) => ("", "Check for a new version".into(), "Lumen also checks by itself when it starts and every 6 hours.".into(), vec![("tv-check", "Check for updates", true)]),
+        Some(V::Checking) => ("busy", "Checking for updates…".into(), "Asking GitHub for the latest release.".into(), vec![("tv-check", "Check for updates", true)]),
+        Some(V::UpToDate) => ("ok", "Lumen is up to date".into(), info.map(|i| format!("App {} · interface {} (build {}).", i.version, i.client.split(" (").next().unwrap_or(&i.client), i.seq)).unwrap_or_default(), vec![("tv-check", "Check again", true)]),
+        Some(V::Ready) => (
+            "new",
+            "Update ready".into(),
+            info.map(|i| format!("A new interface ({}, build {}) is downloaded and verified. Update now restarts the screen with it; you stay signed in.", i.client.split(" (").next().unwrap_or(&i.client), i.seq)).unwrap_or_default(),
+            if info.and_then(|i| i.apk.as_ref()).is_some() { vec![("tv-apply", "Update now", true), ("tv-install", "Install app update", false)] } else { vec![("tv-apply", "Update now", true)] },
+        ),
+        Some(V::App(v)) => ("new", format!("Lumen {v} is available"), "Install update downloads it, checks its signature and opens Android's installer. When Android has installed it, choose Open.".into(), vec![("tv-install", "Install update", true)]),
+        Some(V::Downloading(p)) => ("busy", match p { Some(p) => format!("Downloading the update… {p} %"), None => "Downloading the update…".into() }, "Android's installer opens when it is complete.".into(), vec![]),
+        Some(V::Installing) => ("busy", "Opening Android's installer…".into(), "Choose Install, then Open. (The first time, Android asks to allow installs from Lumen: allow it, then come back.)".into(), vec![("tv-install", "Install again", true)]),
+        Some(V::NeedsApp) => ("", "A new version needs a newer app".into(), "It will be offered here as soon as it is published.".into(), vec![("tv-check", "Check again", true)]),
+        Some(V::Failed(e)) => ("err", crate::tv::update_error(e).into(), e.clone(), vec![("tv-check", "Retry", true)]),
+    };
+    out.push_str(&format!("<div class=\"tvus {cls}\" role=\"status\" aria-live=\"polite\"><b>"));
+    esc_into(&mut out, &head);
+    out.push_str("</b>");
+    if let Some(V::Downloading(Some(p))) = &view {
+        out.push_str(&format!("<i class=\"tvpg\" style=\"--pg:{}\"><i></i></i>", *p as f64 / 100.0));
+    }
+    if !detail.is_empty() {
+        out.push_str("<p>");
+        esc_into(&mut out, &detail);
         out.push_str("</p>");
     }
-    out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-close\">Close</button></div>");
+    if !note.is_empty() {
+        out.push_str("<p class=\"tvun\">");
+        esc_into(&mut out, note);
+        out.push_str("</p>");
+    }
+    out.push_str("</div></div><div class=\"tvbs\">");
+    for (act, label, primary) in &buttons {
+        out.push_str(&format!("<button type=\"button\" class=\"{}\" data-act=\"{act}\">", if *primary { "tvb" } else { "tvb tvx" }));
+        esc_into(&mut out, label);
+        out.push_str("</button>");
+    }
+    out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-about-close\">Back</button></div></div>");
     out
 }
 
@@ -728,11 +917,49 @@ fn description(out: &mut String, w: &Watch, video_id: &str) {
     out.push_str("</section>");
 }
 
+/// TV: the watch page's "More info" panel (title, channel, views and date, the whole description as text;
+/// ↑/↓ scroll it).
+pub fn tv_info(w: &Watch, _video_id: &str) -> String {
+    let mut out = String::with_capacity(2048);
+    out.push_str("<h2>");
+    esc_into(&mut out, &w.title);
+    out.push_str("</h2><p class=\"m\">");
+    let meta: Vec<&str> = [w.channel.as_str(), w.views.as_str(), w.date.as_str()].into_iter().map(str::trim).filter(|s| !s.is_empty()).collect();
+    esc_into(&mut out, &meta.join(" · "));
+    out.push_str("</p><div class=\"tvd\" tabindex=\"0\" aria-label=\"Description\">");
+    let mut any = false;
+    for r in &w.desc {
+        any |= !r.text.trim().is_empty();
+        esc_into(&mut out, &r.text);
+    }
+    if !any {
+        out.push_str("<span class=\"m\">No description.</span>");
+    }
+    out.push_str("</div>");
+    out
+}
+
 pub fn related(out: &mut String, items: &[Item]) {
     cards(out, items, ImgPlan::first(Lay::Rel, 1));
 }
 
 pub fn message(title: &str, detail: &str, retry_href: Option<&str>, native: &str) -> String {
+    if crate::tv::on() {
+        return match retry_href {
+            Some(r) => {
+                // A failed page: the reason and Try again (a link, so OK reloads the page).
+                let mut out = format!("<section class=\"tvpc\"><div class=\"tvcd\">{MARK}<h2>");
+                esc_into(&mut out, title);
+                out.push_str("</h2><p>");
+                esc_into(&mut out, detail);
+                out.push_str("</p><div class=\"tvbs\"><a class=\"tvb\" href=\"");
+                esc_into(&mut out, r);
+                out.push_str("\" data-act=\"retry\">Try again</a></div></div></section>");
+                out
+            }
+            None => tv_prompt(title, "Subscriptions, History, Watch later and your playlists need your YouTube account. Sign in with your phone: it takes a minute.", &[("tv-signin", "Sign in with your phone", true)]),
+        };
+    }
     let mut out = String::from("<section class=\"msg\"><h1>");
     esc_into(&mut out, title);
     out.push_str("</h1><p class=\"m\">");

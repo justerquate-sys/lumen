@@ -1282,6 +1282,13 @@ impl App {
                 }
             }
             "q" => {
+                if crate::tv::on() {
+                    self.tv_search_focus(on);
+                    // TV: the list is part of the search screen; the focus moving into it keeps it.
+                    if !on && self.tv_search_on() {
+                        return;
+                    }
+                }
                 self.fx.sug.focused = on;
                 let kb = self.keyed();
                 self.fx_form_now(kb);
@@ -1347,7 +1354,13 @@ impl App {
         }
     }
 
-    fn fx_sug_close(&mut self, exit: bool) {
+    /// TV: the search screen closed (the list goes with it).
+    pub(super) fn fx_sug_end(&mut self) {
+        self.fx.sug.focused = false;
+        self.fx_sug_close(false);
+    }
+
+    pub(super) fn fx_sug_close(&mut self, exit: bool) {
         self.fx.sug.sel = None;
         bridge::attr(SUGGEST, "class", "sug");
         if !exit {

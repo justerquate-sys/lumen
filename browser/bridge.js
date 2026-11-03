@@ -22,8 +22,13 @@ const YTC = (() => {
       el.innerHTML = policy.createHTML(html);
     }
   };
+  // `late` (set by back_hook, the app shells): a focus change the client itself made while Rust runs reports its
+  // focus/intent callbacks right after that call returns (the app takes one call at a time; they would be lost).
+  let depth = 0, late = false;
   const call = (name, ...args) => {
-    try { return wasm_bindgen[name](...args); } catch (e) { console.error('[Lumen]', name, e); }
+    if (depth && late && (name === 'on_focus' || name === 'on_intent')) { queueMicrotask(() => call(name, ...args)); return; }
+    depth++;
+    try { return wasm_bindgen[name](...args); } catch (e) { console.error('[Lumen]', name, e); } finally { depth--; }
   };
   let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null;
   const insert = (el, html) => {
@@ -522,11 +527,22 @@ const YTC = (() => {
       Promise.resolve().then(() => s.call(cmd, json)).then(r => call('on_shell', seq, true, String(r == null ? 'null' : r)), e => call('on_shell', seq, false, JSON.stringify(String((e && e.message) || e))));
     },
     // The platform Back button: the shell calls YTC_BACK() → true = the page handled it.
-    back_hook() { globalThis.YTC_BACK = () => !!call('on_back'); },
+    // on_back answers 0 = not handled (the shell goes back), 1 = handled, 2 = leave the app: YTC_EXIT tells a
+    // shell that knows it (older shells read only the boolean and go back as before).
+    // The same from any script world (a test, a shell that cannot reach this one): a `ytc-back` event on the
+    // document, answered in <html data-ytc-back>.
+    back_hook() {
+      late = true;
+      const back = () => { const r = call('on_back'); globalThis.YTC_EXIT = r === 2; return r; };
+      globalThis.YTC_BACK = () => back() === 1;
+      d.addEventListener('ytc-back', () => { d.documentElement.dataset.ytcBack = String(back()); });
+    },
     // Spatial navigation (the decision is Rust's, tv::pick): rects of the visible `sel` elements (minus `skip`)
     // inside the innermost open `scope` element around the focus (else the last open one, else the document),
-    // as [x, y, w, h]*n followed by the focused element's index (-1: none). The list is kept for spatial_focus.
-    spatial_rects(scope, sel, skip) {
+    // as [x, y, w, h, m]*n (m = 1 + the index of the first `|`-separated selector of `mark` it matches, 0 none)
+    // followed by the focused element's index (-1: none). The list is kept for spatial_focus.
+    spatial_rects(scope, sel, skip, mark) {
+      const marks = mark ? mark.split('|') : [];
       const a = d.activeElement, vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (!el.checkVisibility || el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })); };
       let root = d;
       if (scope) {
@@ -537,16 +553,29 @@ const YTC = (() => {
       for (const el of root.querySelectorAll(sel)) {
         if ((skip && el.matches(skip)) || el.closest('[inert],[aria-hidden="true"],[hidden]') || !vis(el)) continue;
         const r = el.getBoundingClientRect();
-        els.push(el); out.push(r.left, r.top, r.width, r.height);
+        els.push(el); out.push(r.left, r.top, r.width, r.height, marks.findIndex(m => el.matches(m)) + 1);
       }
       YTC._sp = els;
       out.push(els.indexOf(a));
       return new Float64Array(out);
     },
-    spatial_focus(i) {
+    // Focuses item `i` of the last spatial_rects list. y ≥ 0: the window scrolls to y first (instant), then only
+    // the scrolling boxes around the item bring it into view; y < 0: it is scrolled into view the nearest way.
+    spatial_focus(i, y) {
       const el = (YTC._sp || [])[i]; if (!el) return;
+      if (y >= 0) scrollTo(0, y);
       el.focus({ preventScroll: true, focusVisible: true });
       el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    },
+    // Scrolls the box `id` by `frac` of its own height (instant: it answers a key).
+    scroll_box(id, frac) { const el = byId(id); if (el) el.scrollTop += el.clientHeight * frac; },
+    // Focus memory: remembers the focused element under `name`; focus_load refocuses it (if it is still in the
+    // document and shown) without scrolling and answers whether it did.
+    focus_save(name) { (YTC._fm || (YTC._fm = {}))[name] = d.activeElement; },
+    focus_load(name) {
+      const el = (YTC._fm || {})[name];
+      if (!el || !el.isConnected || !el.getClientRects().length) return false;
+      el.focus({ preventScroll: true, focusVisible: true }); return d.activeElement === el;
     },
     session_clear() { try { sessionStorage.clear(); } catch {} },
     hidden: () => d.hidden,

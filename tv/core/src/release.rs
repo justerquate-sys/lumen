@@ -239,7 +239,13 @@ pub fn check(http: &Http, api: &str, key: &[u8; 32], cache: &Path, current_seq: 
 
 /// Downloads an offered APK to `dir` and checks its hash; returns its path.
 pub fn download_apk(http: &Http, offer: &ApkOffer, dir: &Path) -> Result<PathBuf, String> {
-    let a = http.get(&offer.url, &[])?;
+    download_apk_progress(http, offer, dir, &mut |_, _| {})
+}
+
+/// `download_apk` reporting `on(got, total)` while it downloads (total from the signed manifest).
+pub fn download_apk_progress(http: &Http, offer: &ApkOffer, dir: &Path, on: &mut dyn FnMut(u64, u64)) -> Result<PathBuf, String> {
+    let size = offer.apk.size;
+    let a = http.get_progress(&offer.url, &mut |got, total| on(got, if size > 0 { size } else { total }))?;
     if a.status != 200 {
         return Err(format!("APK: HTTP {}", a.status));
     }

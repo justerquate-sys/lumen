@@ -81,9 +81,11 @@ the mic only offers this panel; nothing is sent anywhere.
 
 ## Google TV / Android TV
 
-The same client runs on a TV as the app **Lumen**, driven by the remote: arrows move a mint focus ring,
-OK selects, Back closes what is open and goes back. On a video ←/→ seek 10 s, OK plays/pauses and ↓ opens the
-control bar. It is a small app around an Android WebView that opens youtube.com with the client injected,
+The same client runs on a TV as the app **Lumen**, with its own 10-foot interface driven by the remote: a rail
+on the left (Search, Home, Subscriptions, History, Watch later, Playlists, Liked, Account), big cards that grow
+under a mint focus ring, a search screen for the TV keyboard, and a full-screen player whose controls appear on
+any key (←/→ seek 10 s with a preview frame, OK plays/pauses, ↓ to the buttons and Up next). Back closes what is
+open, then goes to the rail, then back. It is a small app around an Android WebView that opens youtube.com with the client injected,
 the way the extension does (details in [tv/README.md](tv/README.md)).
 
 ### Install
@@ -115,8 +117,9 @@ the [Releases](https://github.com/justerquate-sys/lumen/releases) page also carr
 
 ### Sign in with a code
 
-Open the app and choose **Sign in** (top right) or **Sign in with your phone** on Home. The TV shows a code:
-on your phone or computer go to **youtube.com/activate**, enter the code and choose your Google account. The
+Open the app and choose **Sign in** (the rail's last item) or **Sign in with your phone** on Home. The TV shows
+a code and a QR code: scan it with your phone, or go to the address shown (google.com/device or
+youtube.com/activate) on your phone or computer, enter the code and choose your Google account. The
 TV continues by itself. This is YouTube's own TV sign-in, so your history, subscriptions, Watch later and
 playlists are the same as on your other devices. **Account → Sign out** on the TV signs it out again.
 
