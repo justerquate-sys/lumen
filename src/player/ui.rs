@@ -105,12 +105,12 @@ const SKIP: &str = "<svg class=\"o i-sb\" viewBox=\"0 0 24 24\"><path class=\"tr
 
 /// The player's inner markup (inside the 16:9 `#ytc-player` box, so there is
 /// no layout shift between loading, playing and errors).
-/// No loading indicator (1 Nov 2026): the video's own thumbnail (the
-/// card's file, usually already in the HTTP cache) is the poster at the
-/// final geometry until the first frame replaces it.
-pub fn shell(video_id: &str) -> String {
+/// No loading indicator (1 Nov 2026) and no poster (3 Nov 2026): the box is the dark player surface
+/// until the first frame, or shows the warm first frame (`own/warm.rs`) from the start; never the
+/// 320 px thumbnail scaled up to the player.
+pub fn shell() -> String {
     format!(
-        "<video id=\"{VIDEO}\" playsinline preload=\"auto\" poster=\"https://i.ytimg.com/vi_webp/{video_id}/mqdefault.webp\"></video>\
+        "<video id=\"{VIDEO}\" playsinline preload=\"auto\"></video>\
 <div class=\"pov\" data-act=\"p-toggle\" data-arg=\"v\" data-dbl=\"p-fs\"></div>\
 <div id=\"{CCW}\" class=\"pcw\"><div id=\"{CC}\" class=\"pcc\" data-drag=\"cc\" data-drag-box=\"{BOX}\" aria-live=\"off\"></div>\
 <div class=\"pct\"><input id=\"{CCS}\" class=\"pcs\" type=\"range\" min=\"0.5\" max=\"2\" step=\"0.05\" value=\"1\" data-input=\"ccs\" aria-label=\"Caption size\"><output id=\"{CCV}\" class=\"pcv\">100%</output></div></div>\
@@ -149,9 +149,9 @@ const I_INFO: &str = "<svg class=\"o\" viewBox=\"0 0 24 24\"><path d=\"M20.5 12a
 /// remote. Over the picture: the time row (elapsed · chapter · remaining), the thick seek bar (a focus stop:
 /// ←/→ scrub it), and one row of large round buttons (play/pause, captions, speed, quality, like, Watch later,
 /// more info). No volume, theater, fullscreen, hover tooltips or caption sizing (pointer-only on desktop).
-pub fn shell_tv(video_id: &str) -> String {
+pub fn shell_tv() -> String {
     format!(
-        "<video id=\"{VIDEO}\" playsinline preload=\"auto\" poster=\"https://i.ytimg.com/vi_webp/{video_id}/mqdefault.webp\"></video>\
+        "<video id=\"{VIDEO}\" playsinline preload=\"auto\"></video>\
 <div class=\"pov\" data-act=\"p-toggle\" data-arg=\"v\"></div>\
 <div id=\"{CCW}\" class=\"pcw\"><div id=\"{CC}\" class=\"pcc\" aria-live=\"off\"></div></div>\
 <div class=\"pbig\" data-act=\"p-toggle\" data-arg=\"v\">{PLAY}</div>\
@@ -717,8 +717,8 @@ mod tests {
         assert_eq!(super::quality_short(4320), "8K");
         assert_eq!(super::rate_label(1.0), "1×");
         assert_eq!(super::rate_label(1.25), "1.25×");
-        let sh = super::shell("aqz-KE-bpKQ");
-        assert!(sh.contains("poster=\"https://i.ytimg.com/vi_webp/aqz-KE-bpKQ/mqdefault.webp\""));
+        let sh = super::shell();
+        assert!(!sh.contains("poster") && !super::shell_tv().contains("poster"), "no thumbnail poster (never scaled up)");
         assert!(!sh.contains("pspin"), "no loading indicator");
         assert!(sh.contains("id=\"ytc-rateb\" class=\"plbl\">1×") && sh.contains("id=\"ytc-qlbl\""));
     }
@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(clock(3723.0), "1:02:03");
         assert_eq!(clock(f64::NAN), "0:00");
         assert_eq!(rate_label(1.25), "1.25×");
-        let s = shell("aqz-KE-bpKQ");
+        let s = shell();
         assert!(s.contains("id=\"ytc-video\"") && s.contains("data-hov=\"menu\""));
         for id in [CCB, SPEED, QUAL] {
             assert!(s.contains(&format!("id=\"{id}\" data-act=\"p-menu\"")), "{id}");
@@ -746,7 +746,7 @@ mod tests {
         assert!((progress(50.0, 0.0, 100.0, 2.0, true) - 0.505).abs() < 1e-9);
         assert_eq!(progress(99.9, 0.0, 100.0, 2.0, true), 1.0, "clamped");
         assert_eq!(progress(10.0, 0.0, 100.0, f64::NAN, true), 0.1);
-        let s = shell("aqz-KE-bpKQ");
+        let s = shell();
         assert!(s.contains("id=\"ytc-seek\" class=\"pseek\""));
         assert!(cc_menu(false, &[], None, true, &[], "").contains("id=\"ytc-msw\""));
     }
@@ -764,7 +764,7 @@ mod tests {
         assert!(h.contains("id=\"ytc-sg1\" class=\"pbar\" style=\"--s:0.500000;--e:0.750000\""));
         assert!(h.contains("id=\"ytc-sg2\" class=\"pbar\" style=\"--s:0.750000;--e:1.000000\""));
         assert_eq!(bars_html(&[]), BAR);
-        assert!(shell("aqz-KE-bpKQ").contains(&format!("id=\"ytc-segs\" class=\"psegs\">{BAR}</div>")));
+        assert!(shell().contains(&format!("id=\"ytc-segs\" class=\"psegs\">{BAR}</div>")));
     }
 
     #[test]
@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn speed_list_is_vertical_1x_at_the_bottom() {
         assert_eq!(rows(&speed_menu(1.0), MPRE), ["2.5×", "2×", "1.75×", "1.5×", "1.25×", "1×"]);
-        let s = shell("aqz-KE-bpKQ");
+        let s = shell();
         assert!(s.contains("id=\"ytc-speed\" data-act=\"p-menu\" data-arg=\"speed\" data-hov=\"tb\" data-wheel=\"speed\""));
         assert!(s.contains("data-arg=\"quality\" data-hov=\"tb\" data-wheel=\"quality\""));
     }

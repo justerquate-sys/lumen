@@ -526,7 +526,7 @@ mod tests {
     #[test]
     fn player_markup_has_the_shortcut_toast_and_bar_marks() {
         use crate::player::ui;
-        let sh = ui::shell("aqz-KE-bpKQ");
+        let sh = ui::shell();
         assert!(sh.contains("id=\"ytc-sbb\" data-act=\"p-menu\" data-arg=\"sb\" data-hov=\"tb\""), "shortcut opens like the others");
         assert!(sh.find("id=\"ytc-sbb\"") < sh.find("id=\"ytc-ccb\""), "left of CC");
         assert!(sh.contains("id=\"ytc-sbt\" class=\"psbt\" role=\"status\"") && sh.contains("data-act=\"p-sb\" data-arg=\"undo\" tabindex=\"-1\""));

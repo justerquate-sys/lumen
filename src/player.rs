@@ -30,7 +30,7 @@ pub fn html(video_id: &str) -> String {
     if !is_video_id(video_id) {
         return String::new();
     }
-    (if crate::tv::on() { ui::shell_tv(video_id) } else { ui::shell(video_id) }) + &fail::stuck_html()
+    (if crate::tv::on() { ui::shell_tv() } else { ui::shell() }) + &fail::stuck_html()
 }
 
 /// The native watch page at `t` seconds (`yt-native=1` = no client, YouTube's

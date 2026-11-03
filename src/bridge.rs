@@ -376,6 +376,22 @@ extern "C" {
     /// Binds `<video id>` to handle `h`; each listed event calls `on_media(h, type)`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn media_video(h: u32, id: &str, events: &str) -> bool;
+    /// A new `<video>` (muted, inline) as handle `h`, outside the document; each listed event calls `on_media(h, type)`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn media_video_new(h: u32, events: &str);
+    /// Draws video `h`'s current frame into a new `<canvas id class>` (its size, at most `max_w` px wide),
+    /// held outside the document until `held_put`; false when there is no frame.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn media_grab(h: u32, id: &str, cls: &str, max_w: f64) -> bool;
+    /// `on_timer(id)` once video `h` has presented a frame (requestVideoFrameCallback).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn media_frame(h: u32, id: u32);
+    /// Places held element `id` right after element `after`; false when either is missing.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn held_put(id: &str, after: &str) -> bool;
+    /// Forgets held element `id` and removes it from the document.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn held_drop(id: &str);
     /// New MediaSource `h` attached to video handle `vh`; `sourceopen` is reported.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn media_source(h: u32, vh: u32);

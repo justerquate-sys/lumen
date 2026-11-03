@@ -18,6 +18,8 @@ struct Pre {
     v: String,
     itag: u32,
     kind: usize,
+    /// The format (the warm first frame, `warm.rs`, reads its init and index ranges).
+    f: Format,
     end: u64,
     id: u32,
     sent: f64,
@@ -114,7 +116,7 @@ pub fn prefetch_media(v: &str, body: &[u8], prefs: &Prefs, bw: Option<f64>, star
             let id = next_id();
             let url = format!("{}&range=0-{end}", f.url);
             bridge::fetch_opts(id, "GET", &url, "", "{}", "{\"progress\":1}");
-            p.push(Pre { v: v.to_string(), itag: f.itag, kind, end, id, sent: now, url: f.url.clone(), ttfb: None, got: 0.0, body: None });
+            p.push(Pre { v: v.to_string(), itag: f.itag, kind, f: f.clone(), end, id, sent: now, url: f.url.clone(), ttfb: None, got: 0.0, body: None });
         }
     });
     true
@@ -143,18 +145,29 @@ pub fn pre_progress(id: u32, bytes: f64) {
     });
 }
 
-/// A prefetch answered. True when `id` was one.
-pub fn pre_answer(id: u32, status: u32, body: &[u8]) -> bool {
+/// A prefetch answered: its video's id when `id` was one.
+pub fn pre_answer(id: u32, status: u32, body: &[u8]) -> Option<String> {
     PRE.with(|p| {
         let mut p = p.borrow_mut();
-        let Some(i) = p.iter().position(|e| e.id == id) else { return false };
+        let i = p.iter().position(|e| e.id == id)?;
+        let v = p[i].v.clone();
         if (200..300).contains(&status) && body.len() as u64 > p[i].end.min(1) {
             let ms = bridge::now() - p[i].sent;
             p[i].body = Some((status, body.to_vec(), ms));
         } else {
             p.remove(i);
         }
-        true
+        Some(v)
+    })
+}
+
+/// `v`'s finished video prefetch (its format and body), lent to `f`.
+pub(super) fn with_video<R>(v: &str, f: impl FnOnce(&Format, &[u8]) -> R) -> Option<R> {
+    PRE.with(|p| {
+        let p = p.borrow();
+        let e = p.iter().rev().find(|e| e.v == v && e.kind == V && e.body.is_some())?;
+        let (_, body, _) = e.body.as_ref()?;
+        Some(f(&e.f, body))
     })
 }
 
