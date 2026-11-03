@@ -17,6 +17,7 @@ pub mod sponsor;
 pub mod sched;
 pub mod stats;
 pub mod storyboard;
+pub mod throttle;
 pub mod ui;
 
 use crate::util::{is_safe_id, is_video_id};

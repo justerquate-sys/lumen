@@ -119,6 +119,9 @@ const VISION_CACHE: usize = 40;
 /// How often a failed player re-checks a dropped connection.
 const NET_PROBE_MS: u32 = 3000;
 const VISION_MAX_AGE_MS: f64 = 30.0 * 60.0 * 1000.0;
+/// The pointer rests this long on a video link (after its VISIONOS answer) before its first media
+/// is prefetched; also enough for the warmed decodingInfo answers (4–55 ms) to be in.
+const MEDIA_PRE_MS: u32 = 150;
 /// Fetch the next video's `next` + VISIONOS this close to the end (seconds).
 const UP_PREFETCH_S: f64 = 45.0;
 /// Speculative prefetch: this many cards in view, two at a time, after idle.
@@ -173,6 +176,8 @@ enum Timer {
     Bg,
     PageHover(String),
     Preview(String),
+    /// The pointer still rests on this video's link (try `n`): prefetch its first media.
+    MediaPre(String, u8),
     Pump { nav: u32, generation: u32 },
     Suggest(String),
     /// Typing paused: fetch the results for the query so Enter shows them at once.
@@ -308,6 +313,8 @@ pub struct App {
     api_incident_nav: u32,
     vision_cache: Vec<(String, f64, Rc<Vec<u8>>)>,
     vision_prefetching: HashSet<String>,
+    /// The video link last focused or pressed (`on_intent`): resting there counts like hover.
+    intent_v: String,
     /// Watch later, filters, blocked websites, topics, search history, resume (features/*).
     fx: fxglue::Fx,
     /// Watch-page actions, comments, notifications and account menu.
@@ -467,6 +474,7 @@ pub fn boot() {
         api_incident_nav: u32::MAX,
         vision_cache: Vec::new(),
         vision_prefetching: HashSet::new(),
+        intent_v: String::new(),
         fx: fxglue::Fx::new(crate::tv::auth().signed_in()),
         acts: Actions::default(),
         up_prefetched: 0,
@@ -1221,6 +1229,7 @@ impl App {
                     self.prefetch_page(&url);
                 }
             }
+            Some(Timer::MediaPre(v, n)) => self.media_pre(&v, n),
             Some(Timer::Preview(v)) => {
                 if self.preview_v == v {
                     if let Some(a) = self.known.get(&v).and_then(|k| k.anim.clone()) {
@@ -1304,11 +1313,51 @@ impl App {
         true
     }
 
+    /// The pointer rests on a link to `v`.
+    fn hovering(&self, v: &str) -> bool {
+        self.hover.strip_prefix("w:").and_then(|k| k.split('|').next()) == Some(v) || self.intent_v == v
+    }
+
+    /// Its VISIONOS response is already here (an earlier hover, the cards-in-view prefetch): the
+    /// media prefetch's dwell starts now (otherwise it starts when that response arrives).
+    fn media_pre_soon(&mut self, v: &str) {
+        if self.vision_cached(v).is_some() {
+            let id = self.timer(Timer::MediaPre(v.to_string(), 0));
+            bridge::timer(id, MEDIA_PRE_MS);
+        }
+    }
+
+    /// Still on the link after `MEDIA_PRE_MS`: the first media of the formats the player would
+    /// start with (`player::own::prefetch_media`; decodingInfo may still be on its way: two more tries).
+    fn media_pre(&mut self, v: &str, n: u8) {
+        if !self.hovering(v) || matches!(&self.route, Route::Watch { v: w, .. } if w == v) || self.player.as_ref().is_some_and(|p| p.v == v) {
+            return;
+        }
+        let Some(body) = self.vision_cached(v) else { return };
+        let start = self.fx_resume(v).or_else(|| self.resume.get(v).copied()).unwrap_or(0.0);
+        if !player::own::prefetch_media(v, &body, &self.cfg.prefs, self.bw.bps, start) && n < 2 {
+            let id = self.timer(Timer::MediaPre(v.to_string(), n + 1));
+            bridge::timer(id, MEDIA_PRE_MS);
+        }
+    }
+
     /// Pointer press or keyboard focus on a link: the same prefetch as hover, now.
     pub fn on_intent(&mut self, href: &str) {
         self.last_input = bridge::now();
+        // Focus (TV remote, keyboard) rests on a link like a pointer does: the media prefetch
+        // follows it, and what was loading for the link focus left is cancelled.
+        let v = match route::parse(href) {
+            Some(Route::Watch { v, .. }) => v,
+            _ => String::new(),
+        };
+        let here = if let Route::Watch { v, .. } = &self.route { v.clone() } else { String::new() };
+        player::own::pre_cancel(&[&v, &here]);
+        self.intent_v = v;
         match route::parse(href) {
-            Some(Route::Watch { v, list, .. }) => self.prefetch(&v, list.as_deref()),
+            Some(Route::Watch { v, list, .. }) => {
+                self.prefetch(&v, list.as_deref());
+                self.media_pre_soon(&v);
+            }
             Some(r @ (Route::Channel { .. } | Route::Playlist { .. } | Route::Home | Route::Subs | Route::History | Route::Playlists | Route::Search { .. })) => {
                 let url = r.url();
                 if self.page_req(&r).is_some() {
@@ -1335,7 +1384,7 @@ impl App {
                 return;
             }
         }
-        if !self.cfg.own_player || self.cfg.visitor.is_none() || self.vision_hold || self.vision_block_until > bridge::now() || self.vision_prefetching.contains(v) || self.vision_cached(v).is_some() || self.vision_prefetching.len() >= MAX_PREFETCH {
+        if !self.cfg.own_player || self.cfg.visitor.is_none() || self.vision_hold || self.vision_block_until > bridge::now() || self.vision_prefetching.contains(v) || self.vision_cached(v).is_some() || self.vision_prefetching.len() >= if spec { MAX_PREFETCH } else { MAX_PREFETCH + 3 } {
             return;
         }
         let route = self.vroute();
@@ -1407,6 +1456,18 @@ impl App {
     }
 
     pub fn on_hover(&mut self, href: &str, class: &str) {
+        // Media prefetches still loading for a link the pointer left are cancelled.
+        let next = match route::parse(href) {
+            Some(Route::Watch { v, .. }) => v,
+            _ => String::new(),
+        };
+        let here = if let Route::Watch { v, .. } = &self.route { v.clone() } else { String::new() };
+        // Only the pointer on another video link ends a focus rest (the browser also reports
+        // pointer changes when focus scrolls the page under a still pointer).
+        if !next.is_empty() {
+            self.intent_v.clear();
+        }
+        player::own::pre_cancel(&[&next, &here, &self.intent_v]);
         self.hover.clear();
         if self.preview_on {
             bridge::remove_all(".pv");
@@ -1424,6 +1485,7 @@ impl App {
                 }
                 // No delay for videos: the related list must be there on click.
                 self.prefetch(&v, list.as_deref());
+                self.media_pre_soon(&v);
             }
             Some(r @ (Route::Channel { .. } | Route::Playlist { .. } | Route::Home | Route::Subs | Route::History | Route::Playlists | Route::Search { .. })) => {
                 let url = r.url();
@@ -1872,7 +1934,19 @@ impl App {
 
     // ------------------------------------------------------------ responses
 
+    /// Body progress of a streaming fetch (only the player asks for it).
+    pub fn on_fetch_progress(&mut self, id: u32, status: u32, bytes: f64) {
+        if self.player.as_mut().is_some_and(|p| p.on_fetch_progress(id, status, bytes)) {
+            self.after_player();
+            return;
+        }
+        player::own::pre_progress(id, bytes);
+    }
+
     pub fn on_fetch(&mut self, id: u32, status: u32, body: &[u8]) {
+        if player::own::pre_answer(id, status, body) {
+            return;
+        }
         // Hedged reads: the first good answer of the two copies is handled as the original.
         let pending = &self.pending;
         let id = match self.hedge.answer(id, status == 200, |p| pending.contains_key(&p)) {
@@ -1969,9 +2043,15 @@ impl App {
                     // Warm the video server's connection now (a slow DNS/handshake to a new googlevideo
                     // host cost ~4 s live on 2 Nov 2026), so a click finds it ready.
                     for o in player::own::googlevideo_origins(body).iter().take(2) {
-                        bridge::preconnect(o);
+                        player::own::warm_origin(o);
                     }
+                    // decodingInfo for its formats now too: the click then chooses at once.
+                    player::own::warm_caps(body);
                     self.cache_vision(&v, Rc::new(body.to_vec()));
+                    if self.hovering(&v) {
+                        let id = self.timer(Timer::MediaPre(v.clone(), 0));
+                        bridge::timer(id, MEDIA_PRE_MS);
+                    }
                 }
                 let stale = bot && route != self.vroute();
                 if let Some(pl) = self.player.as_mut().filter(|pl| pl.v == v) {
@@ -2683,6 +2763,9 @@ impl App {
     }
 
     pub fn on_caps(&mut self, json: &str) {
+        if player::own::warm_answer(json) {
+            return;
+        }
         if let Some(p) = self.player.as_mut() {
             p.on_caps(json);
             self.after_player();

@@ -188,7 +188,7 @@ function actFixture(ep, body) {
 const searchStr = JSON.stringify(search), evilSearchStr = JSON.stringify(evilSearch), nextStr = JSON.stringify(next), evilNextStr = JSON.stringify(evilNext);
 const cache = new Map();
 const fx = name => { if (!cache.has(name)) cache.set(name, fixture(name)); return cache.get(name); };
-const log = { suggest: [], api: [], docs: [], assets: [], external: [], embeds: [], gv: [], stats: [], timedtext: [], live: [], sb: [] };
+const log = { warm: [], suggest: [], api: [], docs: [], assets: [], external: [], embeds: [], gv: [], stats: [], timedtext: [], live: [], sb: [] };
 
 // ---- own player fixtures: VISIONOS streams (synthetic local WebM), WEB metadata, captions.
 let media = null;
@@ -288,6 +288,8 @@ const mediaFiles = new Map();
 function googlevideo(route, url) {
   if (url.hostname === 'manifest.googlevideo.com') return liveManifest(route, url);
   if (url.searchParams.get('live') === '1') return liveSegment(route, url);
+  // The TV app's connection warm-up (through its shell): a tiny request, answered 204.
+  if (url.pathname === '/generate_204') { log.warm.push(url.hostname); return route.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*' }, body: '' }); }
   const itag = url.searchParams.get('itag'), v = url.searchParams.get('v'), gen = +url.searchParams.get('gen');
   const [a, b] = (url.searchParams.get('range') || '').split('-').map(Number);
   log.gv.push({ itag, v, gen, a, b, host: url.hostname, t: Date.now() });
@@ -300,6 +302,11 @@ function googlevideo(route, url) {
   // A stuck node: never answers on its own host, only on the mirror YouTube lists in mn.
   if (v === 'gvnodehang1' && url.hostname === 'rr1---sn-fixture.googlevideo.com') return new Promise(() => {});
   if (v === 'gvhangfirst' && gen === 1) return new Promise(() => {});
+  // A slow node (throttled, not dead): its own host answers only after 4 s; the mirror at once.
+  if (v === 'gvslowfirst' && url.hostname === 'rr1---sn-fixture.googlevideo.com') {
+    const file = fs.readFileSync(path.join(media.dir, `itag-${itag}.webm`));
+    return new Promise(r => setTimeout(r, 4000)).then(() => route.fulfill({ status: 200, headers: cors, body: file.subarray(a, Math.min(b, file.length - 1) + 1) })).catch(() => {});
+  }
   // A dropped connection: every request to the video server fails at once (HTTP 0).
   if (v === 'netdown0001' && NET.down) return route.abort('internetdisconnected');
   if (v === 'gvhangcach1' && gen === 1) return new Promise(() => {});
@@ -508,6 +515,8 @@ async function handle(route) {
     }
     if (ep === 'search' && IMG.search) await new Promise(r => setTimeout(r, IMG.search));
     if (ep === 'visitor_id') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ responseContext: { visitorData: FRESH_VD, serviceTrackingParams: [] } }) });
+    // A hung player request: the first VISIONOS request for this video never answers (the hedge must).
+    if (ep === 'player' && body.videoId === 'vishang0001' && body.context?.client?.clientName === 'VISIONOS' && !FX.visHung) { FX.visHung = true; return new Promise(() => {}); }
     if (ep === 'player' && FX.bot) log.api.at(-1).done = Date.now(); // answered now (the recovery tests order calls by it)
     if (ep === 'player' && FX.bot && body.context?.client?.clientName === 'VISIONOS' && botChecked(body, req.headers())) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(BOT) });
     let out = apiFixture(ep, body);
@@ -2528,8 +2537,10 @@ chrome.runtime.onMessage.addListener(m => {
       await page.waitForSelector('#ytc-player.stuck', { timeout: 9000 });
       await page.waitForTimeout(300);
       await stuckShot('player-stuck-2560');
-      for (let i = 0; i < 60 && !log.gv.some(g => g.v === 'stalldata01' && g.gen >= 2 && g.a > 0); i++) await page.waitForTimeout(100);
-      assert.ok(log.gv.some(g => g.v === 'stalldata01' && g.gen >= 2 && g.a > 0), 'chunks asked again with fresh URLs');
+      // gen 2: the throttle ladder (no headers on the URL's host, nor on its mirror → fresh URLs at ~1.9 s);
+      // gen 3: the stuck retry at 6 s, which also rebuilds the MediaSource.
+      for (let i = 0; i < 80 && !log.gv.some(g => g.v === 'stalldata01' && g.gen >= 3 && g.a > 0); i++) await page.waitForTimeout(100);
+      assert.ok(log.gv.some(g => g.v === 'stalldata01' && g.gen >= 3 && g.a > 0), 'chunks asked again with fresh URLs');
       unstall('stalldata01');
       await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 8000);
       await waitT(() => { const v = document.getElementById('ytc-video'); return v && v.currentTime >= 10 && !document.getElementById('ytc-player').classList.contains('stuck'); }, null, 6000);
@@ -2564,13 +2575,15 @@ chrome.runtime.onMessage.addListener(m => {
     await page.waitForTimeout(700); // hover prefetch (VISIONOS cached)
     // The prefetch warms the video server's connection before the click (slow DNS/handshake, live 2 Nov 2026).
     assert.ok(await page.evaluate(() => !!document.querySelector('link[rel=preconnect][href="https://rr1---sn-fixture.googlevideo.com"][crossorigin]')), 'googlevideo preconnected on hover');
+    const tc = Date.now();
     await page.click('#ytc-list a.t[href="/watch?v=gvhangcach1"]');
     await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 12000);
     assert.ok(!page.url().includes('yt-native'), 'stays in our player');
     const g = log.gv.filter(x => x.v === 'gvhangcach1');
     assert.deepEqual([...new Set(g.map(x => x.gen))], [1, 2], 'cached URLs, then fresh ones');
     assert.ok(g.every(x => x.host === 'rr1---sn-fixture.googlevideo.com'), 'no mirror switch for a stale cache');
-    const t1 = Math.min(...g.filter(x => x.gen === 1).map(x => x.t)), t2 = Math.min(...g.filter(x => x.gen === 2).map(x => x.t));
+    // From the click: the hover media prefetch may already have asked the cached URLs before it.
+    const t1 = Math.max(tc, Math.min(...g.filter(x => x.gen === 1).map(x => x.t))), t2 = Math.min(...g.filter(x => x.gen === 2).map(x => x.t));
     assert.ok(t2 - t1 < 1600, `fresh URLs soon after the cached ones hung: ${t2 - t1} ms`);
   });
 
@@ -2580,6 +2593,69 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(!page.url().includes('yt-native'), 'stays in our player');
     const hosts = [...new Set(log.gv.filter(g => g.v === 'gvnodehang1').map(g => g.host))];
     assert.ok(hosts.includes('rr1---sn-fixture2.googlevideo.com'), 'asked the mirror: ' + hosts);
+  });
+
+  await step('own player: a slow googlevideo node (first answers 4 s late) → the same ranges on the mirror after 0.7 s → plays at once, no refresh', async () => {
+    await page.goto('https://www.youtube.com/watch?v=gvslowfirst', { waitUntil: 'commit' });
+    await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 9000);
+    const ff = await page.evaluate(() => +document.documentElement.dataset.ytcFirstFrame);
+    const g = log.gv.filter(x => x.v === 'gvslowfirst');
+    assert.ok(!page.url().includes('yt-native'), 'stays in our player');
+    assert.ok(g.some(x => x.host === 'rr1---sn-fixture2.googlevideo.com'), 'asked the mirror: ' + [...new Set(g.map(x => x.host))]);
+    assert.deepEqual([...new Set(g.map(x => x.gen))], [1], 'no player refresh needed');
+    assert.ok(ff < 2500, `first frame ${ff.toFixed(0)} ms after navigation (the slow node alone: > 4000)`);
+    // Later requests go to the host that answered.
+    await page.waitForTimeout(1500);
+    const later = log.gv.filter(x => x.v === 'gvslowfirst' && x.t > Date.now() - 1200);
+    assert.ok(later.every(x => x.host === 'rr1---sn-fixture2.googlevideo.com'), 'later requests on the mirror: ' + later.map(x => x.host));
+  });
+
+  await step('own player: a hung VISIONOS request → asked again after 0.4 s → plays (no 8 s timeout)', async () => {
+    const n0 = visCalls('vishang0001').length;
+    await page.goto('https://www.youtube.com/watch?v=vishang0001', { waitUntil: 'commit' });
+    await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 6000);
+    const ff = await page.evaluate(() => +document.documentElement.dataset.ytcFirstFrame);
+    const calls = visCalls('vishang0001').slice(n0);
+    assert.equal(calls.length, 2, 'two VISIONOS requests');
+    assert.ok(calls[1].t - calls[0].t >= 350 && calls[1].t - calls[0].t < 1000, `the second after ~0.4 s: ${calls[1].t - calls[0].t} ms`);
+    assert.ok(ff < 2000, `first frame ${ff.toFixed(0)} ms after navigation`);
+    assert.equal(await page.locator('#ytc-player .pfail').count(), 0, 'no failure panel');
+  });
+
+  await step('own player: resting on a video link prefetches its first media (index + first segment); the click uses it, with no second request', async () => {
+    await page.goto('https://www.youtube.com/results?search_query=media+prefetch', { waitUntil: 'commit' });
+    await page.waitForSelector('#ytc-list .c');
+    await page.evaluate(() => { const a = document.querySelector('#ytc-list a.t[href^="/watch"]'); a.setAttribute('href', '/watch?v=mediapre001'); });
+    await page.hover('#ytc-list a.t[href="/watch?v=mediapre001"]');
+    for (let i = 0; i < 40 && log.gv.filter(g => g.v === 'mediapre001').length < 2; i++) await page.waitForTimeout(50);
+    const pre = log.gv.filter(g => g.v === 'mediapre001');
+    assert.equal(pre.length, 2, 'video and audio first requests while hovering: ' + JSON.stringify(pre));
+    assert.ok(pre.every(g => g.a === 0 && g.b > 0), 'index + first segment ranges');
+    await page.waitForTimeout(300);
+    await page.click('#ytc-list a.t[href="/watch?v=mediapre001"]');
+    await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 8000);
+    const after = log.gv.filter(g => g.v === 'mediapre001').slice(2);
+    assert.ok(!after.some(g => g.a === 0), 'the prefetched first requests were used, not asked again: ' + JSON.stringify(after));
+  });
+
+  await step('own player: a media prefetch still loading is cancelled when the pointer leaves the link (no stray requests)', async () => {
+    STALL.hold.set('mediapre002', 'all');
+    const aborted = [];
+    const onFail = r => { if (r.url().includes('v=mediapre002')) aborted.push(r.failure()?.errorText || ''); };
+    page.on('requestfailed', onFail);
+    try {
+      await page.goto('https://www.youtube.com/results?search_query=media+prefetch+leave', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      await page.evaluate(() => { const a = document.querySelector('#ytc-list a.t[href^="/watch"]'); a.setAttribute('href', '/watch?v=mediapre002'); });
+      await page.hover('#ytc-list a.t[href="/watch?v=mediapre002"]');
+      for (let i = 0; i < 40 && log.gv.filter(g => g.v === 'mediapre002').length < 2; i++) await page.waitForTimeout(50);
+      assert.equal(log.gv.filter(g => g.v === 'mediapre002').length, 2, 'prefetch started');
+      await page.hover('#ytc-top');
+      for (let i = 0; i < 40 && aborted.length < 2; i++) await page.waitForTimeout(50);
+      assert.equal(aborted.length, 2, 'both requests cancelled: ' + aborted);
+      await page.waitForTimeout(800);
+      assert.equal(log.gv.filter(g => g.v === 'mediapre002').length, 2, 'nothing asked again');
+    } finally { page.off('requestfailed', onFail); STALL.parked.length = 0; STALL.hold.delete('mediapre002'); }
   });
 
   await step('own player: a dropped connection → "No connection — continuing when it is back", then it plays by itself', async () => {
@@ -4258,7 +4334,9 @@ chrome.runtime.onMessage.addListener(m => {
       await page.waitForFunction(() => document.getElementById('ytc-nt-n').textContent === '2');
       b = await bell();
       const op = await page.$eval('#ytc-nt-n', e => [getComputedStyle(e).opacity, getComputedStyle(e).transform]);
-      assert.ok(b.n === 'yac-n' && /^yac-b r[12]$/.test(b.bell) && b.anims.includes('transform') && b.anims.includes('opacity') && +op[0] < 1, 'grows back in: ' + JSON.stringify(b) + JSON.stringify(op));
+      // Growing = the transform is mid-way from its small start (the faster opacity fade may already be done).
+      const sc = /^matrix\(([\d.]+)/.exec(op[1]);
+      assert.ok(b.n === 'yac-n' && /^yac-b r[12]$/.test(b.bell) && b.anims.includes('transform') && sc && +sc[1] < 1, 'grows back in: ' + JSON.stringify(b) + JSON.stringify(op));
     } finally { tb.notificationCount = 3; HOME.rich = false; await slowAnims(1).catch(() => {}); }
   });
 
@@ -5630,6 +5708,9 @@ chrome.runtime.onMessage.addListener(m => {
       assert.ok(start && start.v > 0 && start.v < 8000 && start.input === 'navigation', 'video.start ' + JSON.stringify(start));
       assert.ok(start.gv.length > 0 && start.gv.every(r => [200, 206].includes(r.status) && r.itag > 0 && r.bytes > 0), 'googlevideo requests in the start breakdown');
       assert.ok(['cache', 'prefetch', 'fetch'].includes(start.vision.src) && (start.watch_ms == null || start.watch_ms <= start.v) && start.mse_open_ms >= 0, 'start breakdown ' + JSON.stringify(start));
+      // Straight to the target rung; the slow-YouTube breakdown is there (nothing fired on local media).
+      assert.ok(start.start_p === start.target_p, 'no low start rung ' + JSON.stringify(start));
+      assert.deepEqual(start.slow, { vision_hedge: { fired: false, won: false }, hedge_fired: 0, hedge_won: 0, throttle_detected: 0, path: [] }, 'slow breakdown');
       const head = by('gv.head').find(e => e.vid === vid);
       assert.ok(head && /googlevideo\.com$/.test(head.host) && head.itag > 0 && head.bytes > 0 && head.v >= 0, 'gv.head ' + JSON.stringify(head));
       const seek = by('video.seek').find(e => e.vid === vid);
@@ -5753,6 +5834,33 @@ chrome.runtime.onMessage.addListener(m => {
       await tv.close();
     }
   });
+  await step('TV mode: focus resting on a card prefetches its first media and warms googlevideo through a request (the shell\'s connection, not a <link rel=preconnect>); OK uses the prefetch', async () => {
+    const tv = await ctx.newPage();
+    const w0 = log.warm.length;
+    try {
+      await tv.addInitScript(() => { try { localStorage.setItem('ytc:platform', 'tv'); } catch {} });
+      await tv.goto('https://www.youtube.com/results?search_query=tv+focus+prefetch', { waitUntil: 'commit' });
+      await tv.waitForSelector('#ytc-list .c a.t');
+      await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+      await tv.waitForTimeout(1500); // a fresh tab: the config refresh (visitor data) lands first
+      const g0 = log.gv.length; // this card may have played in an earlier step
+      await tv.keyboard.press('ArrowRight');
+      const href = await tv.evaluate(() => document.activeElement.getAttribute('href'));
+      const v = new URL(href, 'https://www.youtube.com').searchParams.get('v');
+      const mine = () => log.gv.slice(g0).filter(g => g.v === v);
+      for (let i = 0; i < 40 && mine().length < 2; i++) await tv.waitForTimeout(50);
+      assert.equal(mine().filter(g => g.a === 0).length, 2, 'video + audio first media while focus rests: ' + JSON.stringify(mine()));
+      assert.ok(log.warm.slice(w0).includes('rr1---sn-fixture.googlevideo.com'), 'warmed with /generate_204: ' + log.warm.slice(w0));
+      assert.equal(await tv.evaluate(() => document.querySelectorAll('link[rel=preconnect][href*="googlevideo"]').length), 0, 'no <link rel=preconnect> on TV');
+      await tv.keyboard.press('Enter');
+      await tv.waitForFunction(() => document.documentElement.dataset.ytcFirstFrame, null, { timeout: 8000 });
+      assert.ok(!mine().slice(2).some(g => g.a === 0), 'the prefetched first requests were used: ' + JSON.stringify(mine().map(g => [g.itag, g.a, g.b, g.gen])));
+    } finally {
+      await tv.evaluate(() => localStorage.removeItem('ytc:platform')).catch(() => {});
+      await tv.close();
+    }
+  });
+
   await step('TV panels fit the screen at 960×540 and 1920×1080 inside the overscan-safe area: Home\'s sign-in nudge, the sign-in panel (code + a long status, no code, signed in), the control bar, the player menus (and the remote walks the bar after one closed), skip button, captions', async () => {
     // The TV mode with a stand-in for the TV app's shell (localStorage ytc:platform and ytc:shell, the
     // development switches for what tv/shim/shim.js provides). localStorage e2e:tv picks its answers: 'code' = a sign-in code whose polls fail with a long unbroken reason, 'nocode' =

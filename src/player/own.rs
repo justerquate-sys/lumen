@@ -12,6 +12,7 @@ use super::formats::{self, Codec, Format, Throughput};
 use super::index::{self, Seg};
 use super::live;
 use super::sched::{self, Next};
+use super::throttle;
 use super::stats::{self, Recorder, Schedule, Session, Tracking};
 use super::storyboard::{self, Storyboard};
 use super::ui;
@@ -23,8 +24,12 @@ use crate::util::{esc, is_video_id, next_id};
 use crate::json::{self, Value};
 use std::collections::{HashMap, VecDeque};
 
+mod hedge;
+mod pre;
 mod sb;
 mod tel;
+
+pub use pre::{pre_answer, pre_cancel, pre_progress, prefetch_media};
 
 /// What the app needs from a request: session values and the page.
 pub struct Ctx<'a> {
@@ -91,6 +96,8 @@ const NO_ANSWER_CACHED_MS: f64 = 800.0;
 const VISION_TIMEOUT_MS: u32 = 8000;
 const IDLE_MS: f64 = 2500.0;
 const MAX_RETRIES: u32 = 3;
+/// The first video of a page waits this long at most for decodingInfo (seen: 4–55 ms).
+const CAPS_WAIT_MS: u32 = 150;
 const V: usize = 0;
 const A: usize = 1;
 
@@ -212,12 +219,35 @@ struct Inflight {
     sent: f64,
     /// Short request description for the incident log (host and range, no tokens).
     what: String,
+    /// googlevideo VOD requests (streamed, `on_fetch_progress`): the URL before any mirror, the
+    /// mirror asked, when the headers came (ms after `sent`), body bytes so far and expected.
+    base: String,
+    mirror: usize,
+    ttfb: Option<f64>,
+    got: f64,
+    want: f64,
+    /// The same range asked on another mirror (both run; the first full answer wins).
+    twin: Option<u32>,
+    /// This request is the hedge (the second of a pair).
+    hedge: bool,
+    /// Already judged throttled (one verdict per request).
+    flagged: bool,
+}
+
+impl Inflight {
+    fn new(req: Req, what: String) -> Inflight {
+        Inflight { req, sent: bridge::now(), what, base: String::new(), mirror: 0, ttfb: None, got: 0.0, want: 0.0, twin: None, hedge: false, flagged: false }
+    }
 }
 
 enum Tm {
     Tick,
     VisionTimeout,
     Retry(usize),
+    /// The VISIONOS request has not answered in `throttle::VISION_HEDGE_MS`: ask again.
+    VisionHedge,
+    /// decodingInfo did not answer in `CAPS_WAIT_MS`: choose the streams without it.
+    CapsWait,
     /// Re-request a format's index after a transient (5xx/network) failure.
     Head(u32, usize),
     /// Hover-menu intent/grace (`ui::MenuCtl` generation).
@@ -263,6 +293,9 @@ struct Track {
     quota: bool,
     /// Switch target (itag) and whether it is immediate (user choice).
     pending: Option<(u32, bool)>,
+    /// The start of a segment that came with the index (itag, segment, bytes): only the rest is
+    /// asked for.
+    prefix: Option<(u32, usize, Vec<u8>)>,
 }
 
 impl Track {
@@ -436,6 +469,25 @@ pub struct Own {
     dwell_gen: u32,
     /// SponsorBlock segments, skips and the skip toast (`sb.rs`).
     sb: sb::SbSt,
+    /// The hedged VISIONOS request (`throttle::VISION_HEDGE_MS`) and whether one went out.
+    vision_hedge: Option<u32>,
+    vision_hedged: bool,
+    /// The app's VISIONOS prefetch for this video is still on its way (`Vision::Pending`).
+    vision_app: bool,
+    /// The streams wait (≤ `CAPS_WAIT_MS`) for decodingInfo, so the first requests go to the
+    /// format that will play; decodingInfo request ids → cache keys.
+    caps_wait: bool,
+    caps_keys: HashMap<u32, String>,
+    /// Throttle episodes (`hedge.rs`).
+    thr: hedge::Thr,
+    /// The player box's height in device pixels (0 = not read yet) and when it was read: read on
+    /// the tick, at most once a second, never in the click task.
+    box_h: f64,
+    box_at: f64,
+    /// Hover-prefetched first requests (`pre.rs`): taken only while the streams are chosen,
+    /// answered right after.
+    pre_ok: bool,
+    pre_ready: Vec<(u32, usize, u32, Vec<u8>)>,
     /// Speed telemetry (`tel.rs`).
     pt: tel::PTel,
 }
@@ -643,6 +695,16 @@ impl Own {
             dwell: None,
             dwell_gen: 0,
             sb: sb::SbSt::default(),
+            vision_hedge: None,
+            vision_hedged: false,
+            vision_app: false,
+            caps_wait: false,
+            caps_keys: HashMap::new(),
+            thr: hedge::Thr::default(),
+            box_h: 0.0,
+            box_at: f64::NEG_INFINITY,
+            pre_ok: false,
+            pre_ready: Vec::new(),
             pt: tel::PTel::default(),
         }
         .with_tel()
@@ -680,13 +742,28 @@ impl Own {
     }
 
     fn get(&mut self, req: Req, url: &str, opts: &str) -> u32 {
+        self.get_on(req, url, opts, self.mirror)
+    }
+
+    /// `get` on the `mirror`-th googlevideo mirror. VOD index and segment requests stream
+    /// (`progress`), so a slow host shows within a fraction of a second (`hedge.rs`).
+    fn get_on(&mut self, req: Req, url: &str, opts: &str, mirror: usize) -> u32 {
         let id = next_id();
+        let media = matches!(req, Req::Head { .. } | Req::Seg { .. });
         // A stuck googlevideo node: media requests go to the next mirror the URL itself lists.
-        let moved = if self.mirror > 0 && matches!(req, Req::Head { .. } | Req::Seg { .. }) { mirror_url(url, self.mirror) } else { None };
+        let moved = if mirror > 0 && media { mirror_url(url, mirror) } else { None };
+        let base = url;
         let url = moved.as_deref().unwrap_or(url);
+        let opts = if media && opts == "{}" { "{\"progress\":1}" } else { opts };
         bridge::fetch_opts(id, "GET", url, "", "{}", opts);
         let what = describe(&req, url);
-        self.fetches.insert(id, Inflight { req, sent: bridge::now(), what });
+        let mut f = Inflight::new(req, what);
+        if media {
+            f.base = base.to_string();
+            f.mirror = if moved.is_some() { mirror } else { 0 };
+            f.want = range_len(url);
+        }
+        self.fetches.insert(id, f);
         id
     }
 
@@ -739,8 +816,15 @@ impl Own {
         self.auth = ctx.auth.clone();
         match vision {
             Vision::Fetch => self.send_vision(ctx.cfg, &ctx.route.clone()),
-            Vision::Pending => self.timer(Tm::VisionTimeout, VISION_TIMEOUT_MS),
+            Vision::Pending => {
+                self.vision_app = true;
+                self.timer(Tm::VisionTimeout, VISION_TIMEOUT_MS);
+            }
             Vision::Cached(_) => {}
+        }
+        if !matches!(vision, Vision::Cached(_)) {
+            // A slow or hung `player` request is asked again (the first usable answer plays).
+            self.timer(Tm::VisionHedge, throttle::VISION_HEDGE_MS as u32);
         }
         let sts = ctx.cfg.sts(bridge::epoch());
         let body = api::web_player(ctx.cfg, ctx.hl, ctx.url, &self.v, &self.cpn, sts);
@@ -751,7 +835,7 @@ impl Own {
         self.ping_headers = crate::tv::ping_headers(ctx.auth);
         let id = next_id();
         bridge::fetch(id, "POST", &api::player_url(), &body, &headers);
-        self.fetches.insert(id, Inflight { req: Req::Web, sent: bridge::now(), what: "player WEB".into() });
+        self.fetches.insert(id, Inflight::new(Req::Web, "player WEB".into()));
         self.session = Session {
             client: if tv_session { crate::tv::TV_NAME.into() } else { String::new() },
             platform: if tv_session { "TV".into() } else { String::new() },
@@ -773,7 +857,12 @@ impl Own {
 
     /// The app's prefetched VISIONOS response for this video.
     pub fn feed_vision(&mut self, status: u32, body: &[u8], ms: f64) {
+        self.vision_app = false;
         if self.vision_ms.is_some() || self.failed {
+            return;
+        }
+        if status != 200 && self.fetches.values().any(|f| matches!(f.req, Req::Vision(_))) {
+            // Our own (hedged) request is still on its way.
             return;
         }
         if status != 200 {
@@ -794,7 +883,7 @@ impl Own {
         let id = next_id();
         bridge::fetch_opts(id, "POST", &api::player_url(), &body, &headers, opts);
         let what = if *route == VisionRoute::Anon { "player VISIONOS".to_string() } else { format!("player VISIONOS ({})", route.label()) };
-        self.fetches.insert(id, Inflight { req: Req::Vision(route.clone()), sent: bridge::now(), what });
+        self.fetches.insert(id, Inflight::new(Req::Vision(route.clone()), what));
         self.timer(Tm::VisionTimeout, VISION_TIMEOUT_MS);
     }
 
@@ -817,7 +906,7 @@ impl Own {
         let (body, headers) = api::visitor_id_request(&cfg);
         let id = next_id();
         bridge::fetch_opts(id, "POST", &api::visitor_id_url(), &body, &headers, "{\"credentials\":\"omit\"}");
-        self.fetches.insert(id, Inflight { req: Req::Visitor, sent: bridge::now(), what: "visitor_id (fresh visitor)".into() });
+        self.fetches.insert(id, Inflight::new(Req::Visitor, "visitor_id (fresh visitor)".into()));
         self.timer(Tm::VisionTimeout, VISION_TIMEOUT_MS);
         r.pending += 1;
         self.note(format!("VISIONOS bot check ({}): trying {}", self.route.label(), if r.pending > 1 { "the account session and a fresh visitor" } else { "a fresh visitor" }));
@@ -870,6 +959,12 @@ impl Own {
             self.reqlog.remove(0);
         }
         self.reqlog.push(format!("{:>7.0} ms  {} → HTTP {status} · {} B · {ms:.0} ms", f.sent - self.nav_start, f.what, body.len()));
+        match f.req {
+            Req::Head { .. } | Req::Seg { .. } if self.twin_answer(id, &f, status, body.len()) => return true,
+            Req::Vision(_) if status != 200 && self.vision_twin_pending(status) => return true,
+            Req::Vision(_) if status == 200 => self.vision_answered(id),
+            _ => {}
+        }
         match f.req {
             Req::Vision(route) => self.on_vision(route, status, body, ms),
             Req::Visitor => self.on_visitor(status, body),
@@ -951,7 +1046,7 @@ impl Own {
         let fmts = formats::parse(&json);
         // Warm the video servers' connections while the indexes are being chosen.
         for o in googlevideo_origins(body).iter().take(2) {
-            bridge::preconnect(o);
+            warm_origin(o);
         }
         let hls = json.pointer("/streamingData/hlsManifestUrl").and_then(Value::as_str).filter(|u| u.starts_with("https://") && !u.bytes().any(|b| b <= b' ')).map(str::to_string);
         if self.refreshing {
@@ -1030,7 +1125,9 @@ impl Own {
             return;
         }
         let caps = &self.caps;
-        self.ladder = formats::ladder_with(&self.formats, &codecs, &|m: &str| ok(m), &|i| caps.get(&i).copied()).into_iter().filter(|f| !bad.contains(&f.itag)).cloned().collect();
+        let known = |i: u32| caps.get(&i).copied();
+        let screen = formats::caps_for_screen(&self.formats, bridge::matches("(dynamic-range: high)"), &known);
+        self.ladder = formats::ladder_with(&self.formats, &codecs, &|m: &str| ok(m), &screen).into_iter().filter(|f| !bad.contains(&f.itag)).cloned().collect();
         let usable: Vec<Format> = self.formats.iter().filter(|f| !bad.contains(&f.itag)).cloned().collect();
         let chosen = (!self.audio_sel.is_empty()).then(|| formats::audio_in(&usable, &self.audio_sel, &ok)).flatten();
         self.audio = chosen.or_else(|| formats::audio(&usable, &ok)).cloned();
@@ -1041,12 +1138,14 @@ impl Own {
         if self.prefs.quality > 0 {
             return self.prefs.quality;
         }
-        let s = bridge::size(ui::BOX);
-        let h = if s.len() == 3 { s[1].min(s[0] * 9.0 / 16.0) * s[2] } else { 720.0 };
+        // No layout read here: this runs in the click task right after the watch page was written,
+        // where each `bridge::size` forced a layout (boot builder, 3 Nov 2026: 5 calls ≈ 13 ms, 52 ms
+        // at 4× CPU). The screen decides the cap; the player box (read on the tick) can only raise it.
         let d = bridge::screen_px();
         let screen = if d.len() == 3 { d[1].min(d[0] * 9.0 / 16.0) * d[2] } else { 1080.0 };
-        let cap = formats::display_cap(screen, h);
-        if self.drop_cap > 0 { cap.min(self.drop_cap) } else { cap }
+        let cap = formats::display_cap(screen, self.box_h);
+        let cap = if self.drop_cap > 0 { cap.min(self.drop_cap) } else { cap };
+        self.thr_cap().map_or(cap, |t| cap.min(t))
     }
 
     /// Seconds to keep buffered ahead for the current video rung.
@@ -1070,20 +1169,34 @@ impl Own {
         self.ladder.get(i).is_some_and(|t| t.p > cur)
     }
 
-    /// Ask the browser which video formats it decodes smoothly / in hardware.
-    fn ask_caps(&mut self) {
+    /// Ask the browser which video formats it decodes smoothly / in hardware. Answers are kept
+    /// for this page (`CAPS`): later videos with the same formats need no question. True when
+    /// some answer is still missing (asked now).
+    fn ask_caps(&mut self) -> bool {
         if self.caps_asked {
-            return;
+            return false;
         }
         self.caps_asked = true;
         self.tel_caps_asked();
-        let list: Vec<serde_json::Value> = self
-            .formats
-            .iter()
-            .filter(|f| f.video)
-            .map(|f| serde_json::json!({"i": f.itag, "mime": f.mime, "w": f.width.max(1), "h": f.height.max(1), "b": f.bitrate.max(1), "f": f.fps.max(1)}))
-            .collect();
+        let mut list = Vec::new();
+        for f in self.formats.iter().filter(|f| f.video) {
+            let key = caps_key(f);
+            match CAPS.with(|c| c.borrow().get(&key).copied()) {
+                Some(c) => {
+                    self.caps.insert(f.itag, c);
+                }
+                None => {
+                    self.caps_keys.insert(f.itag, key);
+                    list.push(caps_question(f.itag as u64, f));
+                }
+            }
+        }
+        if list.is_empty() {
+            self.tel_caps();
+            return false;
+        }
         bridge::media_caps(&serde_json::Value::Array(list).to_string());
+        true
     }
 
     /// `decodingInfo` results arrived: rebuild the ladder and let ABR use them.
@@ -1092,16 +1205,26 @@ impl Own {
         let Some(Value::Array(list)) = json::parse_str(json) else { return };
         for r in list {
             let Some(i) = r["i"].as_u64() else { continue };
-            if r["ok"].as_bool() == Some(false) {
-                self.caps.insert(i as u32, (false, false));
-            } else {
-                self.caps.insert(i as u32, (r["s"].as_bool().unwrap_or(true), r["e"].as_bool().unwrap_or(false)));
+            let c = if r["ok"].as_bool() == Some(false) { (false, false) } else { (r["s"].as_bool().unwrap_or(true), r["e"].as_bool().unwrap_or(false)) };
+            self.caps.insert(i as u32, c);
+            if let Some(key) = self.caps_keys.remove(&(i as u32)) {
+                CAPS.with(|m| {
+                    let mut m = m.borrow_mut();
+                    if m.len() < 400 {
+                        m.insert(key, c);
+                    }
+                });
             }
         }
         let eff = self.caps.values().filter(|c| c.1).count();
         let smooth = self.caps.values().filter(|c| c.0).count();
         self.note(format!("decodingInfo: {} formats, {smooth} smooth, {eff} power-efficient", self.caps.len()));
         if self.failed || self.formats.is_empty() {
+            return;
+        }
+        if self.caps_wait {
+            self.caps_wait = false;
+            self.choose_streams_now();
             return;
         }
         self.build_ladder();
@@ -1142,23 +1265,25 @@ impl Own {
             return false;
         }
         let Some(target) = self.desired() else { return false };
-        let refs: Vec<&Format> = self.ladder.iter().collect();
-        let (sv, tv) = (self.ladder[formats::start_rung(&refs, target)].clone(), self.ladder[target].clone());
-        let want_pending = (tv.itag != sv.itag).then_some((tv.itag, true));
-        if sv.itag == tr.rep && tr.pending == want_pending {
+        let sv = self.ladder[target].clone();
+        let old = tr.rep;
+        if sv.itag == old {
             return false;
         }
-        self.note(format!("decodingInfo: starting from {} {} → target {} instead", sv.itag, sv.label, tv.label));
+        self.note(format!("decodingInfo: starting from {} {} instead of {old}", sv.itag, sv.label));
+        // The ruled-out format's first request is no longer needed.
+        let stale: Vec<u32> = self.fetches.iter().filter(|(_, f)| matches!(f.req, Req::Head { kind: V, itag } if itag == old)).map(|(k, _)| *k).collect();
+        for k in stale {
+            self.abort_fetch(k);
+        }
+        self.heads.retain(|&x| x != old);
         let tr = &mut self.tracks[V];
         tr.rep = sv.itag;
+        tr.pending = None;
         if tr.sb == 0 {
             tr.mime = sv.mime.clone();
         }
-        tr.pending = want_pending;
         self.fetch_head(V, &sv, self.start < 4.0);
-        if want_pending.is_some() {
-            self.fetch_head(V, &tv, false);
-        }
         self.quality_label();
         true
     }
@@ -1168,8 +1293,21 @@ impl Own {
         if self.prefs.quality > 0 { formats::pick(&refs, self.prefs.quality) } else { formats::abr(&refs, self.limit(), self.bw.bps) }
     }
 
+    /// decodingInfo first (≤ `CAPS_WAIT_MS`, usually a few ms; answers cached for the page), so
+    /// the first requests already go to the format that will play.
     fn choose_streams(&mut self) {
-        self.ask_caps();
+        if self.ask_caps() {
+            self.caps_wait = true;
+            self.timer(Tm::CapsWait, CAPS_WAIT_MS);
+            return;
+        }
+        self.choose_streams_now();
+    }
+
+    fn choose_streams_now(&mut self) {
+        if self.failed || self.tracks[V].rep != 0 {
+            return;
+        }
         self.build_ladder();
         let (Some(target), Some(audio)) = (self.desired(), self.audio.clone()) else {
             let mut support: HashMap<String, bool> = HashMap::new();
@@ -1180,17 +1318,17 @@ impl Own {
             self.fail(format!("no compatible formats ({} offered: {why})", self.formats.len()));
             return;
         };
-        let refs: Vec<&Format> = self.ladder.iter().collect();
-        let start = formats::start_rung(&refs, target);
-        let (sv, tv) = (self.ladder[start].clone(), self.ladder[target].clone());
+        // Straight to the target rung (≥ 1080p when the screen and connection allow): its
+        // index and first segment in one request. A low start rung only took bandwidth from it
+        // (live 2 Nov 2026: the 360p data was replaced before its first frame showed).
+        let sv = self.ladder[target].clone();
         self.note(format!(
-            "VISIONOS OK {:.0} ms · {} formats · start {} {} {} → target {} · audio {} {}",
+            "VISIONOS OK {:.0} ms · {} formats · start {} {} {} · audio {} {}",
             self.vision_ms.unwrap_or(0.0),
             self.formats.len(),
             sv.itag,
             sv.label,
             sv.codec.map_or("?", |c| c.name()),
-            tv.label,
             audio.itag,
             audio.codec.map_or("?", |c| c.name())
         ));
@@ -1202,33 +1340,28 @@ impl Own {
         self.tracks[V].mime = sv.mime.clone();
         self.tracks[A].rep = audio.itag;
         self.tracks[A].mime = audio.mime.clone();
+        self.pre_ok = true;
         self.fetch_head(V, &sv, extra);
         self.fetch_head(A, &audio, extra);
-        if tv.itag != sv.itag {
-            // Replace the low start rung as soon as the target's index is in
-            // (keeps ~1 s), instead of after everything already buffered.
-            self.tracks[V].pending = Some((tv.itag, true));
-            self.fetch_head(V, &tv, false);
-        }
+        self.pre_ok = false;
         self.streams_at = bridge::now();
         self.load_at = self.streams_at;
-        self.tel_streams(sv.p, tv.p);
+        self.tel_streams(sv.p, sv.p);
         self.quality_label();
         self.setup_mse();
+        self.pre_flush();
     }
 
     fn fetch_head(&mut self, kind: usize, f: &Format, extra: bool) {
         if self.heads.contains(&f.itag) {
             return;
         }
-        let mut end = f.index_end;
-        if extra {
-            // Also take the first segment in the same request (one round trip less).
-            let secs = if kind == V { 6.0 } else { 11.0 };
-            end = (f.index_end + (f.bitrate as f64 / 8.0 * secs) as u64).min(f.index_end + 3_000_000);
-        }
-        end = end.min(f.len.saturating_sub(1));
+        // With `extra`, the first segment comes in the same request (one round trip less).
+        let end = pre::head_end(f, kind, extra);
         self.heads.push(f.itag);
+        if self.pre_ok && self.pre_take(kind, f, end) {
+            return;
+        }
         self.get(Req::Head { itag: f.itag, kind }, &format!("{}&range=0-{end}", f.url), "{}");
     }
 
@@ -1254,7 +1387,9 @@ impl Own {
             }
         };
         self.bw.add(body.len(), ms);
-        let first = segs.first().filter(|s| s.start as usize == need && body.len() > s.end as usize).map(|s| body[s.start as usize..=s.end as usize].to_vec());
+        // The first segment (or its start) came in the same request.
+        let first = segs.first().filter(|s| s.start as usize == need && body.len() > need).map(|s| body[need..body.len().min(s.end as usize + 1)].to_vec());
+        let whole = segs.first().map_or(0, |s| (s.end - s.start + 1) as usize);
         let init = body[..=(f.init_end as usize).min(need - 1)].to_vec();
         let n = segs.len();
         self.reps.insert(itag, Rep { f, segs, init });
@@ -1263,8 +1398,12 @@ impl Own {
             tr.ready = true;
             tr.next = sched::seg_for(&self.reps[&itag].segs, self.start);
             if let (0, Some(bytes)) = (tr.next, first) {
-                tr.next = 1;
-                self.queue_seg(kind, itag, bytes);
+                if bytes.len() == whole {
+                    tr.next = 1;
+                    self.queue_seg(kind, itag, bytes);
+                } else {
+                    tr.prefix = Some((itag, 0, bytes));
+                }
             }
             self.note(format!("{} index itag {itag}: {n} segments ({ms:.0} ms)", if kind == V { "video" } else { "audio" }));
         } else if tr.pending == Some((itag, true)) {
@@ -1285,11 +1424,22 @@ impl Own {
             self.media_http_error(kind, status, None);
             return;
         }
-        if body.len() as u64 != want {
-            self.retry(kind, format!("segment {idx} of itag {itag}: {} of {want} bytes", body.len()));
+        let pre = self.tracks[kind].prefix.take_if(|p| p.0 == itag && p.1 == idx);
+        let have = pre.as_ref().map_or(0, |p| p.2.len() as u64);
+        if body.len() as u64 + have != want {
+            self.tracks[kind].prefix = pre;
+            self.retry(kind, format!("segment {idx} of itag {itag}: {} of {want} bytes", body.len() as u64 + have));
             return;
         }
         self.bw.add(body.len(), ms);
+        let body: std::borrow::Cow<[u8]> = match pre {
+            Some((_, _, mut b)) => {
+                b.extend_from_slice(body);
+                b.into()
+            }
+            None => body.into(),
+        };
+        let body = &body[..];
         let tr = &mut self.tracks[kind];
         tr.retries = 0;
         if tr.rep == itag {
@@ -1383,10 +1533,7 @@ impl Own {
             self.audio.clone()
         } else {
             let target = self.desired();
-            target.map(|t| {
-                let refs: Vec<&Format> = self.ladder.iter().collect();
-                self.ladder[formats::start_rung(&refs, t)].clone()
-            })
+            target.map(|t| self.ladder[t].clone())
         };
         let Some(f) = next.filter(|f| f.itag != itag) else { return false };
         let tr = &mut self.tracks[kind];
@@ -1588,7 +1735,8 @@ impl Own {
         match sched::next(&rep.segs, tr.next, t, ahead) {
             Next::Fetch(i) => {
                 let s = &rep.segs[i];
-                let url = format!("{}&range={}-{}", rep.f.url, s.start, s.end);
+                let have = tr.prefix.as_ref().filter(|p| p.0 == tr.rep && p.1 == i).map_or(0, |p| p.2.len() as u64);
+                let url = format!("{}&range={}-{}", rep.f.url, s.start + have, s.end);
                 let itag = tr.rep;
                 let id = self.get(Req::Seg { kind, idx: i, itag }, &url, "{}");
                 self.tracks[kind].inflight = Some(id);
@@ -2080,7 +2228,11 @@ impl Own {
         if now {
             if let Some(id) = tr.inflight.take() {
                 bridge::abort(id);
-                self.fetches.remove(&id);
+                if let Some(t) = self.fetches.remove(&id).and_then(|f| f.twin) {
+                    if self.fetches.remove(&t).is_some() {
+                        bridge::abort(t);
+                    }
+                }
             }
             tr.drop_appends();
             // Paused: also replace the segment under the playhead, then redraw
@@ -2316,6 +2468,14 @@ impl Own {
                 self.tracks[k].retry_wait = false;
                 self.pump(k);
             }
+            Tm::VisionHedge => self.vision_hedge_due(),
+            Tm::CapsWait => {
+                if self.caps_wait {
+                    self.caps_wait = false;
+                    self.note(format!("decodingInfo: no answer in {CAPS_WAIT_MS} ms, choosing without it"));
+                    self.choose_streams_now();
+                }
+            }
             Tm::Head(itag, kind) => {
                 if let Some(f) = self.format(itag, kind).cloned() {
                     if self.tracks[kind].rep == itag || self.tracks[kind].pending.map(|p| p.0) == Some(itag) {
@@ -2364,8 +2524,15 @@ impl Own {
             self.setup_mse();
         }
         self.pump_all();
-        // Re-check quality every second, also while paused or fully buffered.
         let now_ms = bridge::now();
+        if now_ms - self.box_at > 1000.0 {
+            self.box_at = now_ms;
+            let s = bridge::size(ui::BOX);
+            if s.len() == 3 {
+                self.box_h = s[1].min(s[0] * 9.0 / 16.0) * s[2];
+            }
+        }
+        // Re-check quality every second, also while paused or fully buffered.
         if self.first_frame.is_some() && now_ms - self.abr_at > 1000.0 {
             self.abr_at = now_ms;
             self.abr();
@@ -2418,6 +2585,7 @@ impl Own {
                 }
             }
         }
+        self.thr_tick(now);
         self.stuck_tick(now);
         if self.failed {
             return;
@@ -2666,7 +2834,7 @@ impl Own {
             // TV: the bearer goes with the ping (no cookies in the TV app's WebView).
             let id = next_id();
             bridge::fetch_opts(id, "GET", &url, "", &self.ping_headers, if keepalive { "{\"keepalive\":true}" } else { "{}" });
-            self.fetches.insert(id, Inflight { req: Req::Ping, sent: bridge::now(), what: describe(&Req::Ping, &url) });
+            self.fetches.insert(id, Inflight::new(Req::Ping, describe(&Req::Ping, &url)));
             return;
         }
         self.get(Req::Ping, &url, if keepalive { "{\"keepalive\":true}" } else { "{}" });
@@ -4072,6 +4240,102 @@ mod mirror_tests {
         assert_eq!(super::mirror_url("https://rr4---sn-a.googlevideo.com/videoplayback?mn=sn-a&fvip=4", 1), None, "one mirror only");
         assert_eq!(super::mirror_url("https://manifest.googlevideo.com/api?mn=sn-a,sn-b", 1), None);
         assert_eq!(super::mirror_url("https://example.com/x?mn=sn-a,sn-b", 1), None);
+    }
+}
+
+thread_local! {
+    /// decodingInfo answers of this page: `caps_key` → (smooth, power-efficient).
+    static CAPS: std::cell::RefCell<HashMap<String, (bool, bool)>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Warm the connection to a googlevideo host. In the TV app googlevideo is fetched by the shell
+/// (its Kotlin proxy adds the CORS header the extension's rule 50 adds), so a `<link rel=preconnect>`
+/// would only warm the WebView's own, unused connection: there a tiny request (`/generate_204`, what
+/// YouTube's own player warms with) goes through the shell and leaves its connection open for the
+/// media requests.
+pub fn warm_origin(origin: &str) {
+    if crate::tv::on() {
+        bridge::fetch_opts(next_id(), "GET", &format!("{origin}/generate_204"), "", "{}", "{\"credentials\":\"omit\"}");
+    } else {
+        bridge::preconnect(origin);
+    }
+}
+
+/// decodingInfo questions asked ahead of a player (`warm_caps`) carry ids from here on (the
+/// player's own carry the itag).
+const WARM_ID: u64 = 1_000_000;
+
+thread_local! {
+    static WARM: std::cell::RefCell<HashMap<u64, String>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// A prefetched VISIONOS response (hover, focus, Up next): ask decodingInfo for its video formats
+/// now, so starting that video needs no wait for it.
+pub fn warm_caps(body: &[u8]) {
+    let Some(json) = json::parse(body) else { return };
+    let mut list = Vec::new();
+    WARM.with(|w| {
+        let mut w = w.borrow_mut();
+        for f in formats::parse(&json).iter().filter(|f| f.video) {
+            let key = caps_key(f);
+            if CAPS.with(|c| c.borrow().contains_key(&key)) || w.values().any(|k| *k == key) || w.len() > 200 {
+                continue;
+            }
+            let i = WARM_ID + next_id() as u64;
+            w.insert(i, key);
+            list.push(caps_question(i, f));
+        }
+    });
+    if !list.is_empty() {
+        bridge::media_caps(&serde_json::Value::Array(list).to_string());
+    }
+}
+
+/// decodingInfo answers to `warm_caps` go into the page's cache. True when the answer was one.
+pub fn warm_answer(json: &str) -> bool {
+    let Some(Value::Array(list)) = json::parse_str(json) else { return false };
+    let mut warm = false;
+    for r in list {
+        let Some(i) = r["i"].as_u64().filter(|i| *i >= WARM_ID) else { continue };
+        warm = true;
+        let Some(key) = WARM.with(|w| w.borrow_mut().remove(&i)) else { continue };
+        let c = if r["ok"].as_bool() == Some(false) { (false, false) } else { (r["s"].as_bool().unwrap_or(true), r["e"].as_bool().unwrap_or(false)) };
+        CAPS.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.len() < 400 {
+                m.insert(key, c);
+            }
+        });
+    }
+    warm
+}
+
+/// What a decodingInfo question depends on.
+fn caps_key(f: &Format) -> String {
+    format!("{}|{}x{}|{}|{}", f.mime, f.width, f.height, f.fps, caps_tf(f))
+}
+
+/// HDR formats are asked with their transfer function (and BT.2020): without it a decoder or screen
+/// that cannot show HDR answers "smooth" for them (live 3 Nov 2026, Android TV emulator: 1440p60 HDR
+/// AV1 chosen, no picture, MediaSource rebuilt), and the SDR rung must win there.
+fn caps_tf(f: &Format) -> &'static str {
+    match (f.hdr, f.hlg) {
+        (false, _) => "",
+        (true, true) => "hlg",
+        (true, false) => "pq",
+    }
+}
+
+fn caps_question(i: u64, f: &Format) -> serde_json::Value {
+    serde_json::json!({"i": i, "mime": f.mime, "w": f.width.max(1), "h": f.height.max(1), "b": f.bitrate.max(1), "f": f.fps.max(1), "tf": caps_tf(f)})
+}
+
+/// Bytes a `&range=a-b` URL asks for (0 when it names no range).
+fn range_len(url: &str) -> f64 {
+    let r = url.split("&range=").nth(1).map(|r| r.split('&').next().unwrap_or("")).unwrap_or("");
+    match r.split_once('-').map(|(a, b)| (a.parse::<u64>(), b.parse::<u64>())) {
+        Some((Ok(a), Ok(b))) if b >= a => (b - a + 1) as f64,
+        _ => 0.0,
     }
 }
 

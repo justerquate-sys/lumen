@@ -131,6 +131,12 @@ class Host(activity: MainActivity) {
 class Interceptor(private val inner: WebViewClient) : WebViewClient() {
   @Volatile private var top = "https://www.youtube.com/"
 
+  init {
+    // Keep-alive pool per host (Android's default is 5): video and audio, their mirror hedges, a
+    // focus prefetch and the client's /generate_204 warm-up then reuse warm connections.
+    System.setProperty("http.maxConnections", "16")
+  }
+
   override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
     val url = request.url.toString()
     if (request.isForMainFrame) top = url
@@ -146,8 +152,11 @@ class Interceptor(private val inner: WebViewClient) : WebViewClient() {
   private fun proxy(req: WebResourceRequest): WebResourceResponse? = try {
     val c = URL(req.url.toString()).openConnection() as HttpURLConnection
     c.instanceFollowRedirects = true
-    c.connectTimeout = 15000
-    c.readTimeout = 30000
+    // This call blocks one of the WebView's request threads until the headers arrive, even after
+    // the page gave the request up (a hedge won elsewhere): a hung host lets it go after 6 s to
+    // connect / 15 s without a byte (the client hedges after 0.7 s and refreshes after 2.5 s).
+    c.connectTimeout = 6000
+    c.readTimeout = 15000
     for ((k, v) in req.requestHeaders) {
       if (!k.equals("Origin", true) && !k.equals("Accept-Encoding", true)) c.setRequestProperty(k, v)
     }
