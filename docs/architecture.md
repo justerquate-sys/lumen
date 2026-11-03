@@ -122,16 +122,17 @@ link it fades where it is. *Header:* the logo tile swells and its play mark lean
 logo gives on press. **Zero-click Home** (2 Nov 2026: hovering the logo
 activates it, no click needed; `app/logo.rs`): resting the pointer on the logo (tile or word) for 250 ms
 (`logo::DWELL_MS`) opens Home; a mint pill behind the logo fills left to right over that time (a linear clip-path
-wipe, like the player's Speed/Quality rows; reduced motion fades it). Home's first page is requested the moment
-the pointer enters the logo, so at the end of the dwell Home paints from memory (no network wait). Passing over
+wipe, like the player's Speed/Quality rows; reduced motion fades it). At the end of the dwell Home paints the
+ready Home response (see "Home reload" under Speed); without one, Home's first page is requested the moment the
+pointer enters the logo, so it has a 250 ms head start. Passing over
 never navigates: leaving the logo cancels (the pill retracts), coming back starts over, and after a dwell or a
 press the pointer must leave before another starts. Nothing starts while a popover or menu is open (account,
 notifications, Save, Share, Filters, the topic editor, the search dropdown, a player menu, the shortcut sheet, the
 import dialog) or a text field has focus. A click is instant as before, the keyboard is unchanged. **Home on
-Home** (click, dwell or `g h`) keeps the page: it jumps to the top, shows a held **New videos** feed, and fetches
-a fresh feed only when the one shown is older than the background age (2 min; the same rule as returning to
-Home from another page); no re-render and no extra history entry. With a Topic or YouTube chip showing it goes
-back to the plain Home feed as before. The search field is one surface under the input and button (`.qf`: a border layer and a fill
+Home** (click, dwell or `g h`; like YouTube's logo on its own Home, 3 Nov 2026) jumps to the top at once and
+shows a new Home from YouTube: a held **New videos** feed, else the ready Home response, else the request (the
+page stays until YouTube answers); no extra history entry. With a Topic or YouTube chip showing it goes back to
+the plain Home feed as before. The search field is one surface under the input and button (`.qf`: a border layer and a fill
 layer, both clipped): pointer focus widens it 8 px each side (clip-path on the house spring, exact 21 px ends on
 every frame), the button slides flush and turns mint and the magnifier glances once; the text box never moves and
 the first keystroke paints on its keydown frame (e2e). `#ytc-search.now` (set on every key press, cleared on every
@@ -310,15 +311,24 @@ folds back into it when it expires.
   `priority: 'low'` until **100 videos** are in memory on Home and Subscriptions (one page ahead on
   search, channel and playlist pages). Scrolling moves them into the page 24 cards per DOM write
   (`content-visibility:auto` cards), so reaching 100 cards needs no network wait.
-- **Instant reload / back:** feed pages (Home, Subscriptions, History, search, channel, playlist; last
-  6) are kept as parsed data in **`sessionStorage`** (this tab only, gone when it closes; never
-  `chrome.storage` or `localStorage`). A reload or a return from another page (e.g. YouTube's native
-  watch page) paints the snapshot in the first document write, then the fresh response replaces it in
-  place; if you have already scrolled down, a **New videos** pill offers it instead of moving the page.
-  Back/forward within 30 min restores the snapshot at its scroll position without a request. Snapshot
-  data is validated again on read like a fresh response and rendered through the same escaping.
+- **Home reload** (3 Nov 2026, owner: "the home reload should be the fastest thing out there, but it should
+  actually reload whole videos with the same exact way the YouTube does"; `src/ready.rs`, `app/homeready.rs`).
+  A reload of Home, opening it by URL, the logo (click or dwell), the sidebar and `g h` show **what YouTube
+  answers to its own Home request at that moment, unmodified** (same videos, same order, its sticky picks; only
+  your own filters apply as everywhere), and never this tab's old Home first. See "Home reload" below.
+- **Instant reload / back (other feeds):** feed pages (Home, Subscriptions, History, search, channel, playlist;
+  last 6) are kept as parsed data in **`sessionStorage`** (this tab only, gone when it closes; never
+  `chrome.storage` or `localStorage`). A reload of a feed other than Home, or a return from another page (e.g.
+  YouTube's native watch page), paints the snapshot in the first document write, then the fresh response
+  replaces it in place; if you have already scrolled down, a **New videos** pill offers it instead of moving
+  the page. Back/forward within 30 min restores the snapshot at its scroll position without a request (Home
+  too: back/forward is not a reload). Snapshot data is validated again on read like a fresh response and
+  rendered through the same escaping.
 - **First request** goes out at boot with this tab's config mirror (`sessionStorage`) or the built-in
-  fallback; `chrome.storage` refines later requests (a different `au` session index redoes the page).
+  fallback; `chrome.storage` refines later requests (a different `au` session index redoes the page). Home in a
+  new tab (no mirror yet) waits for the stored config (a few ms), or asks `sw.js_data` first when none was ever
+  stored: without the visitor, YouTube answers a signed-out visitor with its empty "Try searching to get
+  started" Home instead of their own (measured live, 3 Nov 2026).
   The player still waits for `chrome.storage` (its preferences).
 - **Thumbnails:** `srcset` width descriptors (`vi_webp/…/mqdefault.webp` 320w, YouTube's listed 360w and
   720w) with `sizes` per layout, so the browser takes the smallest sharp file (1x screens: ~9 KB vs
@@ -351,6 +361,63 @@ folds back into it when it expires.
 - **Restored pages** (back to a feed) lay all cards out for the scroll jump (`.rs`, 1 s): cards are
   `content-visibility:auto` with a 240 px placeholder, so a freshly written page would otherwise land on other
   cards and then be moved by scroll anchoring.
+
+**Home reload** (3 Nov 2026; `src/ready.rs` pure + unit-tested, `src/app/homeready.rs`). The rule: the first videos
+a reload or a logo-Home shows are what YouTube answers to that request at that moment, unmodified; old videos are
+never shown first and then flipped (the only exception is a YouTube that has not answered for 4 s, below).
+
+- **The ready Home response.** After every Home paint from YouTube, in idle time (≤ 2 s) and at low priority,
+  the Home request is made once more and its answer, first page plus that page's first continuation, is kept
+  for the next reload or logo-Home: in memory and in this tab's `sessionStorage` (`ytc:ready`, the snapshot
+  record format, re-validated on read; never `chrome.storage` or `localStorage`). That reload paints it in its
+  first document write (no request, no parse of 0.9 MB: the record is ~50 KB of parsed items) and uses it up;
+  the next one is fetched after that paint. So a reload costs one Home request, like YouTube's own.
+- **Only while it is what YouTube would answer now**: the same account (`ready::acct`: signed in or out, a hash
+  of the session cookie, the session index, the signed-out visitor's id, the language); no personalizing event
+  since it was fetched (`ready::taint`: opening a video, YouTube's own pages, a like/dislike, subscribe,
+  playlist or Watch later change, YouTube's feedback/history endpoints; it is dropped from memory and the
+  tab, and a refill in flight is ignored); younger than **10 min**. The age was chosen from YouTube's drift
+  (`tools/bench/home-drift.cjs`, two signed-out profiles, 3 Nov 2026): YouTube's answer shares 46 / 48 / 39 /
+  50 / 35 % of its top 24 with its answer from 1 / 3 / 5 / 10 / 20 min earlier, while two of its answers a
+  second apart share 46–74 % and its own page's reloads 33–51 %; so up to 10 min a ready answer is as close to
+  "now" as YouTube's own next reload, at 20 min it is not.
+- **Refills** after a personalizing event or expiry are lazy: on a page that is not a watch page, in idle time,
+  at most once a minute, only while the tab is in use (input in the last 5 min) and visible; when the tab is
+  shown again, at once. Nothing is fetched ahead on watch pages. (The old 2-min background refresh of Home is
+  gone; Subscriptions keeps it.)
+- **Without a ready response** (a new tab, after watching, expired): the skeleton in its final geometry and the
+  request at once. Home in a new tab waits for the stored config first (its visitor; a few ms). If the request
+  has not answered by this tab's p90 Home time (`ready::hedge_ms`: the last 20 durations in `ytc:bt`, clamped
+  to 0.7–2.5 s, 1.3 s before 5 samples: the owner's measured p90 of `req.browse`), the **identical request** goes
+  out again; the first answer paints once, the other is aborted (at p90, about one Home request in ten is
+  hedged). After **4 s** without an answer this tab's old Home shows dimmed with a quiet "Updating…" note
+  (`#ytc-main[data-upd="1"]`) and is replaced in place when YouTube answers; a dropped connection shows it
+  with "No connection" (`data-upd="2"`), probes `generate_204` every 3 s and asks again by itself (never
+  YouTube's own page).
+- **The request** is the one YouTube's web app sends for its Home (`api::home_body`): `browse FEwhat_to_watch`
+  with the WEB context plus the window as YouTube describes it (screen/window size, pixel density, form factor,
+  theme, application state, `mainAppWebInfo`) and the Home URL wherever it is sent from. Without those window
+  fields YouTube's answers measurably differed (`tools/bench/home-parity.cjs`, signed out, n=12–16 per shape:
+  top-24 overlap with answers to YouTube's own context 36–40 % vs 42–53 % among those; with them 41–49 %, and
+  YouTube's sticky picks as often as in its own answers). Not sent (YouTube's own page state, no measured
+  effect on the answer): `configInfo`, click tracking, ad signals, experiment ids, gzip request bodies.
+- **Lumen TV** (the same code in the Android WebView): the ready response and the hedge go through `App::send`, so
+  for a signed-in TV they are the account's TVHTML5 Home request with the access token (`tv::finish`); the account
+  key is "signed in" (the token changes every hour; signing in or out clears the tab's session data and reloads).
+  The WebView's `sessionStorage` lives as long as its session: it survives page reloads in the app (a client
+  update switching in, a reload) but not a new app process, so the ready response stays tab-scoped as on desktop
+  and a cold app start takes the network path. That path's first step is the OAuth refresh behind `auth_token`
+  (a new process holds no access token): the shell now starts it at launch (`shell::init`), in parallel with the
+  WebView, the document and the client's Wasm, instead of when the page first asks. While a cold start holds the
+  first page for the token, nothing goes out without it (no snapshot refresh, no redo for another session index).
+- **Measured** (`tools/bench/home-reload.cjs`, signed-out seeded profile, real youtube.com, Playwright Chromium,
+  reload → the first frame showing YouTube's answer): 0.9.0 p50 1337 / p90 1655 ms with the old Home painted
+  first in 7 of 8 reloads; now p50 189–316 / p90 285–897 ms from the ready response (what remains is the
+  browser's own document request before the content script runs), network path p50 ≈ 1.4 s; YouTube's own page
+  p50 1064–1411 / p90 1429–1604 ms. The body arrives 10–107 ms (p50) after its first byte, so painting the
+  first rows from a streamed body could gain little and is not done. A first Home request 10× / 100× slower
+  (+7.2 s / +79 s, network path): with the hedge YouTube's answer paints at p50 2.5 s (the hedge won 13 of 13);
+  without it at 8.5 s / ~80 s (the dimmed old Home from 4.3 s).
 
 **Player.** Watch pages play in our own `<video>` player (no YouTube player JavaScript, no iframe). The
 streams come from the InnerTube `player` call with the `VISIONOS` client (direct googlevideo URLs, no
@@ -633,6 +700,7 @@ created. Importing twice is harmless (the second run merges into the same record
 | `src/telemetry.rs`, `src/app/telglue.rs`, `src/player/own/tel.rs` | Speed telemetry (see "Speed telemetry" below): the batched event buffer, its gate and frame spans (`telemetry.rs`, unit-tested); the app's hooks (navigations, InnerTube requests, flushes) and the player's (start breakdown, googlevideo requests, seeks, switches, stalls, drops, menus, toasts, session summary). The bridge only observes (`tel_*`), buffers and forwards. |
 | `src/hedge.rs` | Hedged InnerTube reads (pure state: which requests may go out twice, the per-endpoint deadline from the session's latencies, which answer wins); the app sends, times and aborts (`App::send`, `hedge_fire`, the top of `on_fetch`). See "Speed". |
 | `src/snap.rs` | Feed snapshots ↔ JSON for `sessionStorage`: compact item records, re-validated on read (ids, hrefs, image hosts), size caps (150 items, 400 KB, 6 pages). |
+| `src/ready.rs`, `src/app/homeready.rs` | Home reload: the ready Home response (record ↔ JSON, re-validated on read; whose it is; taint by personalizing events; age), the hedge deadline (`ready.rs`, pure, unit-tested); fetching it ahead, using it once, the hedged network path and the slow/offline fallback (`homeready.rs`). |
 | `src/features/*.rs`, `src/app/fxglue.rs` | The extension's features rebuilt natively (see "Features" below): pure, unit-tested logic per feature (`filters`, `history`, `progress`, `websites`, `watch_later`, `topics`, `search_filters`, `home_chips`, `upnext`); `fxglue.rs` (a child module of `app`) wires them in with one-line hooks in `app.rs`; `app/upglue.rs` owns what's next on watch pages, `app/speed.rs` the speculative/background prefetch and the perf report (`src/perf.rs`). Cards get the Watch later button through `render::set_card_hook`; the filter bar fills `#ytc-filters`. |
 
 Privacy (features): the keys below are the only additional records in `chrome.storage.local`:
@@ -659,8 +727,11 @@ cache `cache:"no-store"`); answers are kept in memory for this tab (100 videos) 
 reported back (no `viewedVideoSponsorTime`, no votes, no user id). Turning it off sends nothing at all. Only the
 two small preferences above are stored.
 Feeds, descriptions, recommendations and continuation tokens live in memory, plus feed snapshots (items,
-continuation token, scroll) and a config mirror in this tab's `sessionStorage` (cleared when the tab
-closes; YouTube's own pages in the same tab share that origin storage).
+continuation token, scroll), the ready Home response (`ytc:ready`: the same compact item records plus its
+continuation token, YouTube's Home chips with their tokens and the bell count/avatar; one at a time, used once)
+and a config mirror in this tab's `sessionStorage` (cleared when the tab closes; YouTube's own pages in the same
+tab share that origin storage). `ytc:bt` (sessionStorage) keeps the last 20 Home request durations (numbers only)
+for the hedge deadline.
 
 ## Features (ported from the extension)
 
@@ -720,9 +791,10 @@ closes; YouTube's own pages in the same tab share that origin storage).
   pointerdown and keyboard focus; in idle time the first 8 video cards in view are prefetched speculatively
   (low priority, two at a time; ≤ 30 speculative VISIONOS calls per 10 min because volume risks the bot
   check), cancelled on navigation except the page being opened; watch data and VISIONOS caches hold 40.
-  Home and Subscriptions are refreshed in the background (first page + first continuation, low priority)
+  Subscriptions is refreshed in the background (first page + first continuation, low priority)
   when older than 2 min while the tab is visible and was used in the last 5 min; a click paints the snapshot
-  and the fresh page in the same task, and a snapshot younger than 2 min skips the slow refresh. e2e speed
+  and the fresh page in the same task, and a snapshot younger than 2 min skips the slow refresh (Home: the
+  ready Home response instead, see "Home reload"; 3 Nov 2026). e2e speed
   table (Home first page +1.5 s, `next` +300 ms, before → after): Home click → fresh Home 1783 → 16 ms; idle
   results, click a card in view → related visible 437 → 13 ms; focus a card, Enter 150 ms later → 368 →
   162 ms.
@@ -765,6 +837,11 @@ closes; YouTube's own pages in the same tab share that origin storage).
   stalls, actions, features, voice search against a local WebSocket stand-in (`ws-mock.cjs`), SponsorBlock, motion
   and pixel checks, speed timings. Nothing reaches the network.
 - `tests/live-*.cjs`: a few real requests against live YouTube / Deepgram, run by hand and sparingly.
+- `tools/bench/` (live, by hand, rarely; a signed-out profile with a little watch history is seeded once outside
+  the repository by `profile.cjs`): `home-reload.cjs` (reload → first paint of YouTube's answer, Lumen vs YouTube's
+  own page, parity of the two feeds, artificial latency on the first Home request, with or without the ready
+  response and the hedge), `home-drift.cjs` (how YouTube's Home answer drifts with time) and `home-parity.cjs`
+  (which parts of the request change YouTube's answer).
 
 ## Known gaps / next steps
 

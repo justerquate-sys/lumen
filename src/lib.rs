@@ -17,6 +17,7 @@ pub mod perf;
 pub mod player;
 pub mod render;
 pub mod route;
+pub mod ready;
 pub mod snap;
 pub mod telemetry;
 pub mod tv;
@@ -212,6 +213,12 @@ pub fn on_focus(name: &str, arg: &str, on: bool) {
 #[wasm_bindgen]
 pub fn on_hide() {
     app::with(|a| a.on_hide());
+}
+
+/// The tab became visible again.
+#[wasm_bindgen]
+pub fn on_show() {
+    app::with(|a| a.on_show());
 }
 
 #[wasm_bindgen]

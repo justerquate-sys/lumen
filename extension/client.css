@@ -307,6 +307,13 @@ body{overscroll-behavior:none;overflow-x:clip}
 #ytc #ytc-pill .pill{transition:opacity var(--d-panel) var(--e-out),transform var(--d-panel) var(--e-out)}
 @starting-style{#ytc #ytc-pill .pill{opacity:0;transform:translateY(calc(-10px * var(--mv))) scale(calc(1 - .03 * var(--mv)))}}
 #ytc #ytc-pill .pill:active{transition-duration:var(--d-press)}
+/* Home when YouTube has not answered for 4 s (1) or the connection is down (2): this tab's old Home,
+   dimmed, with a quiet note where the New videos pill appears (fixed: no layout shift). The fresh
+   page replaces it at once (the attribute is cleared in the same write). */
+#ytc-main[data-upd="1"]>.feed,#ytc-main[data-upd="2"]>.feed{opacity:.45}
+#ytc-main:is([data-upd="1"],[data-upd="2"])::after{position:fixed;top:76px;left:50%;transform:translateX(-50%);z-index:11;padding:8px 16px;border-radius:var(--r-ctl);background:var(--rs);color:var(--mu);font-size:13px;box-shadow:var(--sh);pointer-events:none}
+#ytc-main[data-upd="1"]::after{content:"Updating\2026"}
+#ytc-main[data-upd="2"]::after{content:"No connection \00B7  Home updates when it\2019s back"}
 #ytc-keys{display:none;position:fixed;z-index:21;left:50%;top:50%;transform:translate(-50%,-50%);width:min(520px,92vw);max-height:84vh;overflow:auto;box-sizing:border-box;padding:16px 20px;border:1px solid var(--ln);border-radius:18px;background:var(--pn);box-shadow:0 20px 60px rgba(0,0,0,.6)}
 #ytc-keys.on{display:block}#ytc-keys h2{margin:0 0 10px}#ytc-keys dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}#ytc-keys dt{color:var(--ac);font:600 12px/18px ui-monospace,Menlo,monospace}#ytc-keys dd{margin:0;color:var(--mu)}
 #ytc-debug{display:none;position:fixed;right:12px;bottom:12px;z-index:20;max-width:600px;max-height:70vh;overflow:auto;background:var(--pn);border:1px solid var(--ac);border-radius:var(--r-ctl);padding:10px 12px;font:12px/1.45 ui-monospace,Menlo,monospace;color:var(--tx)}

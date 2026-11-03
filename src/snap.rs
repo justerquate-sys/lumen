@@ -51,7 +51,7 @@ fn nonempty(m: &mut Map<String, Value>, k: &str, v: &str) {
     }
 }
 
-fn item_json(it: &Item) -> Value {
+pub(crate) fn item_json(it: &Item) -> Value {
     let mut m = Map::new();
     match it {
         Item::Video(v) => {
@@ -121,7 +121,7 @@ fn w(v: &In, k: &str) -> u16 {
     v.get(k).and_then(In::as_u64).unwrap_or(0).min(4000) as u16
 }
 
-fn item_from(v: &In) -> Option<Item> {
+pub(crate) fn item_from(v: &In) -> Option<Item> {
     match so(v, "k")? {
         "v" => {
             let id = so(v, "i").filter(|x| is_video_id(x))?;

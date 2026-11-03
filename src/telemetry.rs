@@ -56,7 +56,7 @@ pub struct NavSpan {
     pub reqs: Vec<Value>,
     /// The interaction that started it (`ui.act` name), if one did.
     pub act: Option<String>,
-    /// More breakdown (the boot's document timings).
+    /// More breakdown: the boot's document timings (`nav_extra`) and path fields (`nav_field`).
     pub extra: Map<String, Value>,
 }
 
@@ -235,6 +235,13 @@ impl Tel {
     pub fn nav_src(&mut self, src: &'static str) {
         if let Some(n) = self.nav.as_mut() {
             n.src = src;
+        }
+    }
+
+    /// One more breakdown field of the current navigation's event (e.g. `age_ms`).
+    pub fn nav_field(&mut self, k: &str, v: Value) {
+        if let Some(n) = self.nav.as_mut().filter(|n| n.extra.len() < 24) {
+            n.extra.insert(k.into(), v);
         }
     }
 
@@ -717,6 +724,10 @@ mod glue {
 
     pub fn nav_req(r: Value) {
         timed(|t| t.nav_req(r));
+    }
+
+    pub fn nav_field(k: &str, v: Value) {
+        timed(|t| t.nav_field(k, v));
     }
 
     /// The page's content was written to the DOM: the navigation event completes at the next frame.

@@ -86,6 +86,50 @@ impl Req {
     }
 }
 
+/// The window, as YouTube's web app describes it in its requests (`bridge::viewport`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Viewport {
+    pub w: u32,
+    pub h: u32,
+    pub dpr: f64,
+    pub dark: bool,
+    pub share: bool,
+}
+
+impl Viewport {
+    pub fn from_json(s: &str) -> Viewport {
+        let v = crate::json::parse_str(s);
+        let n = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(crate::json::Value::as_f64).filter(|x| x.is_finite() && *x > 0.0);
+        let b = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(crate::json::Value::as_bool).unwrap_or(false);
+        Viewport { w: n("w").unwrap_or(1280.0).min(20_000.0) as u32, h: n("h").unwrap_or(800.0).min(20_000.0) as u32, dpr: n("dpr").unwrap_or(1.0).min(8.0), dark: b("dark"), share: b("share") }
+    }
+}
+
+/// The Home request (`browse FEwhat_to_watch`) as YouTube's web app sends it for its Home: the
+/// usual context plus how the window looks (size, pixel density, form factor, theme, app state),
+/// for the Home URL wherever it is sent from. Measured live (tools/bench/home-parity.cjs, 3 Nov
+/// 2026, signed out): without these fields YouTube's answers to Lumen shared 37–40 % of their top 24
+/// with the answers to YouTube's own context (vs 44–53 % between two of YouTube's own) and carried
+/// its sticky picks less often (61–67 % vs 74–87 %); with them 49 % and 78 %.
+pub fn home_body(cfg: &Config, hl: &str, vp: &Viewport) -> String {
+    let mut body = Map::new();
+    let mut ctx = context(cfg, hl, "/");
+    if let Some(Value::Object(c)) = ctx.get_mut("client") {
+        c.insert("screenWidthPoints".into(), vp.w.into());
+        c.insert("screenHeightPoints".into(), vp.h.into());
+        c.insert("windowWidthPoints".into(), vp.w.into());
+        c.insert("screenPixelDensity".into(), (vp.dpr.round().max(1.0) as u32).into());
+        c.insert("screenDensityFloat".into(), json!(vp.dpr));
+        c.insert("clientFormFactor".into(), "UNKNOWN_FORM_FACTOR".into());
+        c.insert("userInterfaceTheme".into(), if vp.dark { "USER_INTERFACE_THEME_DARK" } else { "USER_INTERFACE_THEME_LIGHT" }.into());
+        c.insert("applicationState".into(), "ACTIVE".into());
+        c.insert("mainAppWebInfo".into(), json!({"graftUrl": "/", "webDisplayMode": "WEB_DISPLAY_MODE_BROWSER", "isWebNativeShareAvailable": vp.share}));
+    }
+    body.insert("context".into(), ctx);
+    body.insert("browseId".into(), "FEwhat_to_watch".into());
+    Value::Object(body).to_string()
+}
+
 /// The VISIONOS (Apple Vision Pro app) InnerTube client: its `player`
 /// response has direct googlevideo URLs without cipher, `n` or PO token
 /// (found by research on 1 Nov 2026; see docs/architecture.md "Player"). Kept as data so versions can be bumped.
@@ -235,6 +279,26 @@ mod tests {
         let h: Value = serde_json::from_str(&headers(&cfg, &Auth::default(), 1)).unwrap();
         assert!(h.get("Authorization").is_none());
     }
+    #[test]
+    fn home_body_like_youtubes() {
+        let mut cfg = Config::default();
+        cfg.visitor = Some("CgtlMmVGYWtlVmlzMCjAhPzWBjIKCgJaWhIEEgAgAA%3D%3D".into());
+        let vp = Viewport::from_json(r#"{"w":1400,"h":900,"dpr":2,"dark":true,"share":false}"#);
+        let b: Value = serde_json::from_str(&home_body(&cfg, "en", &vp)).unwrap();
+        let c = &b["context"]["client"];
+        assert_eq!(b["browseId"], "FEwhat_to_watch");
+        assert_eq!((c["clientName"].as_str(), c["visitorData"].as_str()), (Some("WEB"), cfg.visitor.as_deref()));
+        assert_eq!((c["screenWidthPoints"].as_u64(), c["screenHeightPoints"].as_u64(), c["windowWidthPoints"].as_u64()), (Some(1400), Some(900), Some(1400)));
+        assert_eq!((c["screenPixelDensity"].as_u64(), c["screenDensityFloat"].as_f64()), (Some(2), Some(2.0)));
+        assert_eq!(c["userInterfaceTheme"], "USER_INTERFACE_THEME_DARK");
+        assert_eq!(c["originalUrl"], "https://www.youtube.com/", "the Home URL wherever it is sent from");
+        assert_eq!(c["mainAppWebInfo"]["graftUrl"], "/");
+        // The plain browse body is unchanged for every other page.
+        let plain: Value = serde_json::from_str(&Req::Browse { id: "FEwhat_to_watch".into(), params: None }.body(&cfg, "en", "/")).unwrap();
+        assert!(plain["context"]["client"].get("screenWidthPoints").is_none());
+        assert_eq!(Viewport::from_json("garbage"), Viewport { w: 1280, h: 800, dpr: 1.0, dark: false, share: false });
+    }
+
     #[test]
     fn player_bodies() {
         let mut cfg = Config::default();

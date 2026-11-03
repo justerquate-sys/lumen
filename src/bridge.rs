@@ -251,6 +251,9 @@ extern "C" {
     /// `innerWidth` (CSS px).
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn width() -> f64;
+    /// `{w, h, dpr, dark, share}` of this window (JSON).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn viewport() -> String;
     /// Appends HTML into the closest `sel` ancestor of the hovered link.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn hover_insert(sel: &str, html: &str);

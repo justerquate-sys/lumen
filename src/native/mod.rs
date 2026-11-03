@@ -54,6 +54,8 @@ pub fn leaves(current: Option<&str>, href: &str) -> bool {
 
 pub fn boot(href: &str) {
     ACTIVE.with(|a| a.set(true));
+    // YouTube's own page (a video, usually): what it does changes YouTube's next Home.
+    crate::ready::taint();
     VIDEO.with(|v| *v.borrow_mut() = video_of(href));
     bridge::native_listen();
     clean::boot();
