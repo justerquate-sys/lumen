@@ -1,6 +1,6 @@
 {
   "name": "lumen",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Lumen: your own YouTube front-end at youtube.com, a Rust (Wasm) browser extension.",
   "license": "MIT",
