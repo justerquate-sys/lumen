@@ -32,7 +32,7 @@ const YTC = (() => {
     depth++;
     try { return wasm_bindgen[name](...args); } catch (e) { console.error('[Lumen]', name, e); } finally { depth--; }
   };
-  let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null;
+  let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null, shownWatch = null, held = null;
   const insert = (el, html) => {
     if (policy) el.insertAdjacentHTML('beforeend', policy.createHTML(html));
     else try { el.insertAdjacentHTML('beforeend', html); } catch { setHTML(el, el.innerHTML + html); }
@@ -106,6 +106,8 @@ const YTC = (() => {
       if (call('on_key', e.key, editable(e.target))) e.preventDefault();
     });
     addEventListener('popstate', () => call('on_pop'));
+    addEventListener('scrollend', () => call('on_scroll_end', scrollY), { passive: true });
+    try { chrome.storage.session.onChanged.addListener(ch => { for (const k in ch) call('on_shared_change', k, typeof ch[k].newValue === 'string' ? ch[k].newValue : ''); }); } catch {}
     addEventListener('pagehide', () => call('on_unload'));
     d.addEventListener('fullscreenchange', () => evt(0, 'fullscreenchange'));
     d.addEventListener('dblclick', e => {
@@ -163,6 +165,47 @@ const YTC = (() => {
       try { history.scrollRestoration = 'manual'; } catch {}
       listen();
     },
+    // The page's own document, still streaming in, kept out of the page (the loader does not stop it; `page_stop`
+    // does). Every node the HTML parser inserts at the top of the document is detached at once, before anything of it
+    // renders, and watched where it lies; a detached script never runs (the parser runs a script only while it is in
+    // the document). `doc_hold(prefix, keep)`: once a <script> whose text starts with `prefix` is complete (the parser
+    // has inserted something after it), on_doc_script(text): `<script>…</script>` for every earlier script whose text
+    // contains `keep`, then that one; only the earlier ones when the document ended without it. Call after `doc` (its
+    // nodes are ours).
+    doc_hold(prefix, keep) {
+      const root = d.documentElement, tops = [], checked = [], kept = [];
+      let done = false;
+      const complete = (s, i) => { if (i < tops.length - 1) return true; for (let n = s; n && n !== tops[i]; n = n.parentNode) if (n.nextSibling) return true; return false; };
+      const scan = all => {
+        for (let i = 0; i < tops.length && !done; i++) {
+          const list = tops[i].getElementsByTagName('script');
+          for (; checked[i] < list.length && !done; checked[i]++) {
+            const sc = list[checked[i]];
+            if (!all && !complete(sc, i)) break;
+            const t = sc.textContent;
+            if (t.startsWith(prefix)) { done = true; sub.disconnect(); root.dataset.ytcDocData = perf.now().toFixed(1); call('on_doc_script', kept.join('') + '<script>' + t + '</script>'); }
+            else if (t.includes(keep)) kept.push('<script>' + t + '</script>');
+          }
+        }
+      };
+      const sub = new MutationObserver(() => scan(false));
+      const top = new MutationObserver(rs => {
+        for (const r of rs) for (const n of r.addedNodes) {
+          if (n.parentNode !== root) continue;
+          n.remove();
+          if (n.nodeType !== 1 || done) continue;
+          tops.push(n); checked.push(0);
+          sub.observe(n, { childList: true, subtree: true });
+        }
+        scan(false);
+      });
+      top.observe(root, { childList: true });
+      const end = () => { scan(true); top.disconnect(); sub.disconnect(); if (!done) { done = true; call('on_doc_script', kept.join('')); } held = null; };
+      held = { top, sub, end };
+      d.addEventListener('DOMContentLoaded', () => { if (held) end(); }, { once: true });
+    },
+    // Stops the page's own document (its download and parsing); a `doc_hold` ends without answering.
+    page_stop() { if (held) { held.top.disconnect(); held.sub.disconnect(); held = null; } try { window.stop(); } catch {} },
     html(id, html) { const el = byId(id); if (el) setHTML(el, html); },
     append(id, html) { const el = byId(id); if (el) insert(el, html); },
     // Appends into the closest `sel` ancestor of the element under the pointer.
@@ -473,15 +516,21 @@ const YTC = (() => {
     // response headers arrive (0 bytes), then at most every 100 ms while the body streams in.
     // `chunks: 1` hands a successful (2xx) body over as it arrives instead: on_fetch_chunk(id, status, bytes)
     // per piece the network delivered, then on_fetch(id, status, <empty>) at its end.
+    // `gzip: 1` sends the body gzip-compressed (CompressionStream, with Content-Encoding: gzip; plain where the
+    // browser has no CompressionStream). A redirect
+    // not followed (`redirect: 'manual'`) answers with status 302 and an empty body.
     fetch_opts(id, method, url, body, headers, opts) {
       const c = new AbortController();
       ctl.set(id, c);
-      const o = JSON.parse(opts), prog = o.progress, chunks = o.chunks; delete o.progress; delete o.chunks;
+      const o = JSON.parse(opts), prog = o.progress, chunks = o.chunks, gz = o.gzip; delete o.progress; delete o.chunks; delete o.gzip;
       const init = { method, headers: JSON.parse(headers), credentials: 'same-origin', signal: c.signal, ...o };
-      if (body) init.body = body;
       const done = (status, b) => { ctl.delete(id); call('on_fetch', id, status, b); };
-      gfetch(url, init)
+      const go = b => { if (b) init.body = b; return gfetch(url, init); };
+      const zip = gz && body && globalThis.CompressionStream;
+      if (zip) init.headers['Content-Encoding'] = 'gzip';
+      (zip ? new Response(new Blob([body]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer().then(go) : go(body))
         .then(r => {
+          if (r.type === 'opaqueredirect') return done(302, new Uint8Array(0));
           const stream = chunks && r.ok;
           // Test switch only (e2e): hand the body over in pieces of this many bytes (boxes split anywhere).
           let split = Infinity; if (stream) try { split = +localStorage.getItem('ytc-test-chunk') || Infinity; } catch {}
@@ -521,7 +570,43 @@ const YTC = (() => {
     session_get(key) { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } },
     session_set(key, v) { try { sessionStorage.setItem(key, v); return true; } catch { return false; } },
     session_del(key) { try { sessionStorage.removeItem(key); } catch {} },
+    // The extension's memory-only storage shared by its tabs (chrome.storage.session: never on disk, gone when the
+    // browser closes; the background worker opens it to content scripts). Values are strings; reads answer in
+    // on_shared(key, value) ('' when missing); changes made by any tab arrive in on_shared_change(key, value).
+    shared_ok() { try { return !!(chrome.storage && chrome.storage.session); } catch { return false; } },
+    shared_get(key) {
+      const done = v => call('on_shared', key, typeof v === 'string' ? v : '');
+      try { chrome.storage.session.get(key).then(o => done(o && o[key]), () => done('')); } catch { done(''); }
+    },
+    shared_take(key) {
+      const done = v => call('on_shared', key, typeof v === 'string' ? v : '');
+      try { chrome.storage.session.get(key).then(o => { const v = o && o[key]; if (v !== undefined) chrome.storage.session.remove(key).catch(() => {}); done(v); }, () => done('')); } catch { done(''); }
+    },
+    shared_set(key, v) { try { chrome.storage.session.set({ [key]: v }).catch(() => {}); } catch {} },
+    shared_del(key) { try { chrome.storage.session.remove(key).catch(() => {}); } catch {} },
+    // Elements in view (an IntersectionObserver; the box comes with its entry, no layout read of ours): each `sel`
+    // inside #list with data-<attr> calls on_shown(value, index, x, y, w, h) once when ≥ `ratio` of it is in the
+    // viewport (index: its place among those elements, in document order, as first seen).
+    shown_watch(list, sel, attr, ratio) {
+      YTC.shown_stop();
+      const seen = new WeakMap();
+      let n = 0;
+      const ob = new IntersectionObserver(es => {
+        for (const x of es) {
+          if (!x.isIntersecting || x.intersectionRatio < ratio) continue;
+          ob.unobserve(x.target);
+          const r = x.boundingClientRect;
+          call('on_shown', x.target.getAttribute('data-' + attr) || '', seen.get(x.target) || 0, r.left, r.top, r.width, r.height);
+        }
+      }, { threshold: [ratio] });
+      shownWatch = { ob, scan: () => { const l = byId(list); if (l) for (const el of l.querySelectorAll(sel)) if (!seen.has(el)) { seen.set(el, n++); ob.observe(el); } } };
+      shownWatch.scan();
+    },
+    shown_scan() { if (shownWatch) shownWatch.scan(); },
+    shown_stop() { if (shownWatch) { shownWatch.ob.disconnect(); shownWatch = null; } },
     nav_type() { try { return performance.getEntriesByType('navigation')[0].type; } catch { return 'navigate'; } },
+    // When this document's response started arriving (performance.now ms; 0 when unknown).
+    nav_response_start() { try { return performance.getEntriesByType('navigation')[0].responseStart || 0; } catch { return 0; } },
     width: () => innerWidth,
     // The window as a web app describes it to its server: size, pixel ratio, dark preference, Web Share.
     viewport: () => JSON.stringify({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1, dark: matchMedia('(prefers-color-scheme: dark)').matches, share: typeof navigator.share === 'function' }),

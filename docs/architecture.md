@@ -13,9 +13,13 @@ loader and a generic bridge (`browser/bridge.js`).
 `build.sh` compiles the crate for `wasm32-unknown-unknown` (`--features dev` for the development build), runs
 `wasm-bindgen` into `target/pkg/`, then `browser/build.cjs` writes the loadable extension:
 
-- `extension/content.js`: `window.stop()`, the bridge, the wasm-bindgen glue and the Wasm bytes (base64 inside a
-  block comment, read back with `Function.prototype.toString`), then `boot()` (or `boot_native()` on `?yt-native=1`
-  pages). A boot failure falls back to YouTube's own page.
+- `extension/content.js`: the bridge, the wasm-bindgen glue and the Wasm bytes (base64 inside a block comment, read
+  back with `Function.prototype.toString`), then `boot()` (or `boot_native()` on `?yt-native=1` pages). YouTube's
+  document is stopped first (`window.stop()`), except Home's (`/`): there `boot()` stops it (`bridge::page_stop`,
+  before any request of ours, since a stop aborts the document's requests) unless it is the Home answer the client
+  reads (`bridge::doc_hold`, "Home reload" below); the HTML parser cannot run while the content script does, so
+  nothing of the document runs or renders in between. A boot failure stops it and falls back to YouTube's own page.
+  (The TV bundle stops the document in its loader as before.)
 - `extension/background.js` and `extension/manifest.json` from `browser/background.js` and the manifest template
   `browser/manifest.json`. The public build drops every `/* @dev-start */ … /* @dev-end */` block; the development
   build keeps them and adds the debug-center host permission, a "(dev)" name and a build id (`version_name` and
@@ -327,9 +331,10 @@ folds back into it when it expires.
   rendered through the same escaping.
 - **First request** goes out at boot with this tab's config mirror (`sessionStorage`) or the built-in
   fallback; `chrome.storage` refines later requests (a different `au` session index redoes the page). Home in a
-  new tab (no mirror yet) waits for the stored config (a few ms), or asks `sw.js_data` first when none was ever
-  stored: without the visitor, YouTube answers a signed-out visitor with its empty "Try searching to get
-  started" Home instead of their own (measured live, 3 Nov 2026).
+  new tab asks at once: it is YouTube's own Home document, whose request carries the visitor in the browser's
+  cookies (a signed-out `browse` without the visitor gets YouTube's empty "Try searching to get started" Home,
+  measured live 3 Nov 2026; only the `browse` fallback still waits for the stored config, or `sw.js_data` when none
+  was ever stored), and the document's `ytcfg` gives the tab its visitor and YouTube's current client version.
   The player still waits for `chrome.storage` (its preferences).
 - **Thumbnails:** `srcset` width descriptors (`vi_webp/…/mqdefault.webp` 320w, YouTube's listed 360w and
   720w) with `sizes` per layout, so the browser takes the smallest sharp file (1x screens: ~9 KB vs
@@ -377,12 +382,43 @@ folds back into it when it expires.
 a reload or a logo-Home shows are what YouTube answers to that request at that moment, unmodified; old videos are
 never shown first and then flipped (the only exception is a YouTube that has not answered for 4 s, below).
 
+- **YouTube's own Home** (3 Nov 2026, owner: "the thing that matters more is the quality of a refresh"; `src/homedoc.rs`).
+  Every Home request (a reload, a new tab, the logo, the ready response, the hedge) is what a reload of YouTube's own
+  page asks for: `GET https://www.youtube.com/` with the browser's cookies (an HTML `Accept`, no HTTP cache,
+  redirects not followed). Its server renders the Home feed into the document (`var ytInitialData = {…};`, the
+  `browse` response's shape) and names that answer in `ytcfg` (`EVENT_ID`); Rust cuts the data out of the bytes
+  and parses it like a `browse` answer (nothing in the document runs). Its continuation is the usual `browse`
+  continuation, as on YouTube's page. Same speed as `browse` (live, signed out: p50 1030 vs 1022 ms; 140 vs 61 KB
+  on the wire). A document without Home data (a consent or sign-in page; a redirect answers 302) or a session
+  index other than the first: `browse` (`api::home_body`, below) for the rest of that document. Why: YouTube's own
+  reloads are its reference, and its page ties the "shown" signals to the document's answer id.
+- **"Shown" signals** (owner decision, 3 Nov 2026; `src/impress.rs`, `app/impglue.rs`; CONTRIBUTING "Privacy"). YouTube's
+  own Home page logs which cards it showed (`log_event`, captured live from its page: ~150 events per Home view), and
+  YouTube rotates out what was shown and passed over. Lumen's Home sends the same for its own screen: a
+  `screenCreated` (a new 16-character screen nonce per Home answer, its page type 3854 and the document's
+  `EVENT_ID`, also as `serializedClientEventId`), then per card that is at least half in view, once:
+  `visualElementStateChanged` (the grid item's tracking id, its column and row) and `visualElementShown` (eventType
+  1, the grid item's and the card's own tracking ids, its box in the viewport), and `scrollEvent` when a scroll comes
+  to rest (where it ended, how far). Cards are watched by an IntersectionObserver (`bridge::shown_watch`: the box
+  comes with the observer's entry; no layout read of ours, nothing in a hot path). A batch goes out 1 s after its
+  first event (YouTube's own page: right after load, then every few seconds), gzip, at low priority, `keepalive`
+  when the page is hidden or left; to `log_event?alt=json&prettyPrint=false`, the one `log_event` URL the request
+  rules let through (rule 33; every other, e.g. on YouTube's own pages, stays blocked by rule 30). Signed out too
+  (YouTube's page sends them signed out). Not sent: latency, heartbeats, experiments, ad state, hovers, offline
+  state, anything on other pages; not on TV (YouTube's TV app has no such page to copy). The ready response waits for
+  a screen's first batch (YouTube's next answer then knows those cards); a later batch with newly shown cards
+  (scrolling) makes the waiting one stale (`ready::taint`, refilled lazily).
 - **The ready Home response.** After every Home paint from YouTube, in idle time (≤ 2 s) and at low priority,
   the Home request is made once more and its answer, first page plus that page's first continuation, is kept
-  for the next reload or logo-Home: in memory and in this tab's `sessionStorage` (`ytc:ready`, the snapshot
-  record format, re-validated on read; never `chrome.storage` or `localStorage`). That reload paints it in its
-  first document write (no request, no parse of 0.9 MB: the record is ~50 KB of parsed items) and uses it up;
-  the next one is fetched after that paint. So a reload costs one Home request, like YouTube's own.
+  for the next reload, logo-Home or **new tab**: in the desktop extension one per browser, in the extension's
+  `chrome.storage.session` (`ytc:ready`, owner decision 3 Nov 2026: memory only, never on disk, cleared when the
+  browser closes; the background worker opens it to content scripts) and in each tab's memory (kept current by the
+  storage's change events); in the TV app in the page's `sessionStorage`. The snapshot record format plus the
+  answer id and the cards' tracking ids, re-validated on read; never `chrome.storage.local` or `localStorage`. A
+  document's first Home reads it once (`shared_take`: get and remove, a few ms after the shell), paints it (no
+  request, no parse of 0.9 MB: the record is ~50 KB of parsed items) and so uses it up for every tab; the next one
+  is fetched after that paint. A personalizing event in any tab removes it for all (`ytc:taint`, `{by, at}`: the
+  other tabs drop what they fetched before it). So a reload or a new tab costs one Home request, like YouTube's own.
 - **Only while it is what YouTube would answer now**: the same account (`ready::acct`: signed in or out, a hash
   of the session cookie, the session index, the signed-out visitor's id, the language); no personalizing event
   since it was fetched (`ready::taint`: opening a video, YouTube's own pages, a like/dislike, subscribe,
@@ -394,10 +430,36 @@ never shown first and then flipped (the only exception is a YouTube that has not
   "now" as YouTube's own next reload, at 20 min it is not.
 - **Refills** after a personalizing event or expiry are lazy: on a page that is not a watch page, in idle time,
   at most once a minute, only while the tab is in use (input in the last 5 min) and visible; when the tab is
-  shown again, at once. Nothing is fetched ahead on watch pages. (The old 2-min background refresh of Home is
-  gone; Subscriptions keeps it.)
-- **Without a ready response** (a new tab, after watching, expired): the skeleton in its final geometry and the
-  request at once. Home in a new tab waits for the stored config first (its visitor; a few ms). If the request
+  shown again, at once. (The old 2-min background refresh of Home is gone; Subscriptions keeps it.)
+- **While a video plays** (3 Nov 2026: a new window opened while watching was the slow case): a watch page refills
+  once its playback is healthy (`Own::healthy`: 8 s played since the first frame, not paused, stuck or failed, and
+  20 s buffered ahead in both tracks or up to the end; checked with each 10-s position report), so the video never
+  competes for bandwidth: one request (no continuation: the Home that paints it preloads that itself), low
+  priority, once per watch page (again once it expired), at most once a minute. Opening the video already counted
+  as a personalizing event, so the answer is what YouTube would show now; the next one (another video, a like, …)
+  discards it as everywhere. Measured live (`home-newtab.cjs --modes=playing`, another tab plays a video 70 s, n = 7
+  each, side by side): a new window → Home painted p50 1627 → 193 ms, p90 1835 → 241 ms (7 of 7 from the ready
+  response).
+- **The tab's own document** (3 Nov 2026; extension, Home with nothing ready). The browser already asks for exactly
+  the Home document at navigation; instead of stopping it and asking again, `boot()` keeps it streaming
+  (`bridge::doc_hold`): every node the HTML parser inserts at the top of the document is detached in the same task,
+  before anything of it renders, and watched where it lies (a detached script never runs: the parser runs a script
+  only while it is in the document, after a microtask checkpoint, where the observer has already detached it). A
+  response header from the request rules (rules.json 20, Home's main frame only, outranked by the `yt-native=1`
+  allow rule) adds `script-src 'wasm-unsafe-eval'; style-src 'unsafe-inline'; object-src 'none'`: YouTube's scripts
+  and stylesheets are not even downloaded (also not by the preload scanner: live, 0 JS / 0 CSS requests), while the
+  client's Wasm still compiles (the page CSP governs a content script's Wasm: `script-src 'none'` broke the boot) and
+  its inline styles apply. When `ytInitialData`'s script is complete (the parser has inserted a node after it), its
+  text and the `ytcfg.set` scripts before it go to Rust (`on_doc_script`) and Home paints from them like a fetched
+  document: one Home request per load, as on YouTube's own page (before: the stopped one plus the fetch). A ready
+  response (read a few ms after boot) stops the document first. A YouTube page without Home data (`ytcfg` but no
+  `ytInitialData`): `browse` at once; any other page (the e2e stub): the document fetch. The hedge and the 4 s
+  fallback count from the document's response start. Measured live, interleaved (n = 20 per path, hedge off):
+  reload with nothing ready p50 1590 → 1372 ms (mean 1724 → 1432); a new tab with nothing ready p50 1567 → 1582 ms
+  (mean 1554 → 1563, no difference; a first round of n = 16: p50 1677 → 1487). The data arrives with the document's
+  last bytes (response end 1076 ms → data 1077 → painted 1097): YouTube's server time dominates either way.
+- **Without a ready response** (after watching, expired, used by another tab): the skeleton in its final geometry
+  and the request at once (the Home document needs no stored config). If the request
   has not answered by this tab's p90 Home time (`ready::hedge_ms`: the last 20 durations in `ytc:bt`, clamped
   to 0.7–2.5 s, 1.3 s before 5 samples: the owner's measured p90 of `req.browse`), the **identical request** goes
   out again; the first answer paints once, the other is aborted (at p90, about one Home request in ten is
@@ -405,7 +467,8 @@ never shown first and then flipped (the only exception is a YouTube that has not
   (`#ytc-main[data-upd="1"]`) and is replaced in place when YouTube answers; a dropped connection shows it
   with "No connection" (`data-upd="2"`), probes `generate_204` every 3 s and asks again by itself (never
   YouTube's own page).
-- **The request** is the one YouTube's web app sends for its Home (`api::home_body`): `browse FEwhat_to_watch`
+- **The `browse` request** (TV, a second session index, a document without Home data) is the one YouTube's web app
+  sends for its Home (`api::home_body`): `browse FEwhat_to_watch`
   with the WEB context plus the window as YouTube describes it (screen/window size, pixel density, form factor,
   theme, application state, `mainAppWebInfo`) and the Home URL wherever it is sent from. Without those window
   fields YouTube's answers measurably differed (`tools/bench/home-parity.cjs`, signed out, n=12–16 per shape:
@@ -419,7 +482,7 @@ never shown first and then flipped (the only exception is a YouTube that has not
   update switching in, a reload, the screen loading again for a telemetry change) and the app going to the background (the activity is
   never recreated: it handles its configuration changes, and Back on Home only moves the task back), but not a new
   app process. So the shell's memory would keep it no longer than the page's `sessionStorage` already does (checked
-  3 Nov 2026); the ready response stays tab-scoped as on desktop and a cold app start takes the network path On a
+  3 Nov 2026); the ready response stays tab-scoped (the extension shares it between its tabs; the WebView has one page) and a cold app start would take the network path. On a
   cold app start the shell's kept copy stands in (owner decision, 3 Nov 2026; CONTRIBUTING "Privacy"): every record
   the page keeps also goes to the shell (`ready_put`), which seals it with the account's Android Keystore key and
   writes it to `files/ready.bin` for that account (`readystore.rs`; signing out or another account deletes it). At
@@ -437,6 +500,25 @@ never shown first and then flipped (the only exception is a YouTube that has not
   first rows from a streamed body could gain little and is not done. A first Home request 10× / 100× slower
   (+7.2 s / +79 s, network path): with the hedge YouTube's answer paints at p50 2.5 s (the hedge won 13 of 13);
   without it at 8.5 s / ~80 s (the dimmed old Home from 4.3 s).
+- **Measured, Home's quality** (3 Nov 2026, signed out, seeded profiles, n = 12 per mode; `home-reload.cjs --yt
+  --parity`): with the Home document and the "shown" signals, Lumen's reload answers share 28 % of their top 24 with
+  YouTube's own page reloads (was 21 % with `browse`), as much as YouTube's own reloads share with each other (29–36 %);
+  Lumen's reload-to-reload overlap stays 31 % (YouTube's 29–36 %); vs YouTube's own page at the same moment in the
+  same profile 38 % (was 35 %). The 48 % (`browse`) vs 33 % (page) seen the day before did not come back: that day
+  YouTube's signed-out answers varied as much through `browse` (19 % among 8 answers) as on its page (17 %). The
+  "shown" signals: in a loop of Home documents 6 s apart, the 12 cards shown and signalled came back in the next
+  answer's top 24 20 % of the time, 27 % without signals (n = 12 each; `browse` with signals 14 %): the direction
+  YouTube's rotation implies, small at this n; reload parity with the signals switched off was 40 % (no measurable
+  difference at this n). Reload → painted from the ready response unchanged (p50 169 → 172 ms).
+- **Measured, a new tab** (`tools/bench/home-newtab.cjs`, live, signed out, n = 10 per mode; Home painted from
+  the tab's navigation start): another tab on Home (its ready response shared): p50 1071 → 194 ms, p90 1330 →
+  379 ms (the ready response, used by the new tab; what remains is YouTube's document for the tab, ~150 ms, + 20 ms
+  until the content script runs + 6 ms to the shell + the shared read). Nothing ready (another tab is on a video):
+  the network path, now the Home document: p50 1281 → 1341 ms run side by side (video → Home 1081 → 1133 ms): YouTube
+  renders its Home document ~100 ms slower than it answers `browse` (interleaved n = 20: p50 1129 vs 1024 ms; another
+  hour +8 ms), the price of its own reload's answer (owner: quality over speed for Home). YouTube's own new tab: p50
+  1433 ms. The rest of a new tab's cold path is small: document → content script 19–20 ms, script → shell 6 ms (the
+  1.2 MB Wasm inside content.js included), no wait for the stored config any more.
 
 **Player.** Watch pages play in our own `<video>` player (no YouTube player JavaScript, no iframe). The
 streams come from the InnerTube `player` call with the `VISIONOS` client (direct googlevideo URLs, no
@@ -822,9 +904,9 @@ created. Importing twice is harmless (the second run merges into the same record
 | `manifest.json` | MV3; `storage` + `declarativeNetRequest`; host `https://www.youtube.com/*` (plus `*.googlevideo.com` for the player and `https://sponsor.ajay.app/*` for SponsorBlock; `https://api.deepgram.com/*` for voice search's key check); two `document_start` content scripts: the client (with exclusions) and native mode (`*yt-native=1*`: `native.css` + `content.js`). |
 | `native.css` | YouTube's own pages only: the old extension's hiding/theming rules (see "YouTube's own pages keep the client's setup"). |
 | `src/native/` | Native pages: `mod.rs` returns to the client when leaving the fallback video; `clean.rs` the cleanup logic (captions, keys, CC, promotions, Shorts switch). |
-| `content.js` (generated) | `window.stop()` first, then the bridge, the wasm-bindgen glue and the Wasm bytes (base64 in a block comment, read via `Function.prototype.toString`), `initSync`, `boot()`. |
+| `content.js` (generated) | `window.stop()` first (except Home's document: `boot()` stops or holds it), then the bridge, the wasm-bindgen glue and the Wasm bytes (base64 in a block comment, read via `Function.prototype.toString`), `initSync`, `boot()`. |
 | `bridge.js` | Generic primitives only: replace the document, set/append HTML/text by id, attributes, CSS variables, history, `location.assign`, scroll, fetch (bytes back to Rust, optional init options; `progress: 1` also reports headers and bytes so far), abort, `chrome.storage`, timers, IntersectionObserver, postMessage, fullscreen, element size, `fade_imgs` (images still loading fade in when they land; cached ones are never hidden); media objects by numeric handle (bind a `<video>` and forward its events, `MediaSource`, `addSourceBuffer`, `appendBuffer`, `remove`, `changeType`, `buffered`, get/set/call properties, `isTypeSupported`); delegated click/dblclick/submit/pointerover/pointermove/keydown/input/drag/popstate/pagehide; voice: microphone → 16 kHz PCM chunks with a level custom property, a WebSocket relayed by the background worker (a stored secret appended there), a held bare key, contextmenu on `[data-ctx]`, secrets (only whether one is set; saved straight from an input). No YouTube or player knowledge: every decision is in Rust. |
-| `rules.json` | Static DNR. YouTube's site bundles are not blocked (YouTube's service worker fetches them outside the page frame, so a block broke the native fallback; `window.stop()` keeps them from running on client pages). `allowAllRequests` for `yt-native=1` and the native paths at priority 2; block `log_event`, `/pagead/`, `csi_204` and doubleclick (from youtube.com) at priority 3, so telemetry stays blocked even on native pages; rule 50 sets `Access-Control-Allow-Origin: *` on googlevideo responses to youtube.com, because googlevideo randomly redirects chunk requests to another node and the redirected request carries `Origin: null`. `/s/player/` and `/api/stats/` are never blocked. `background.js` handles auto-update, debug-center delivery and the voice socket relay. |
+| `rules.json` | Static DNR. YouTube's site bundles are not blocked (YouTube's service worker fetches them outside the page frame, so a block broke the native fallback; `window.stop()` keeps them from running on client pages). `allowAllRequests` for `yt-native=1` and the native paths at priority 2; rule 20 (priority 1) adds a script-free CSP to Home's own document (read by the client, never run); block `log_event`, `/pagead/`, `csi_204` and doubleclick (from youtube.com) at priority 3, so telemetry stays blocked even on native pages; rule 33 lets Lumen's own "shown" batches (`log_event?alt=json&prettyPrint=false`) through; rule 50 sets `Access-Control-Allow-Origin: *` on googlevideo responses to youtube.com, because googlevideo randomly redirects chunk requests to another node and the redirected request carries `Origin: null`. `/s/player/` and `/api/stats/` are never blocked. `background.js` handles auto-update, debug-center delivery and the voice socket relay. |
 | `client.css` | The whole look (charcoal/mint tokens, layout, player), injected by the manifest (no flash). 15 KB (4.7 KB gzip). |
 | `src/route.rs` | URL → page. |
 | `src/config.rs` | Replaces the stopped page's `ytcfg`: client version + visitor data from `/sw.js_data` (2.7 KB, the endpoint YouTube's own service worker uses), cached in `chrome.storage.local` key `ytcConfigV1` for 24 h; fallback version `2.20261030.01.00`; session index `au` (default 0); SAPISID cookies → `SAPISIDHASH`/`SAPISID1PHASH`/`SAPISID3PHASH`. |
@@ -1010,10 +1092,11 @@ but use the same rules), Shorts-style looping, storyboard thumbnails on the seek
   latency; `YTC_EXT=<another extension folder> YTC_TIMING_ONLY=1` runs the same table on another build.
 - Since the `/s/desktop` DNR block was removed (0.2.1), the stopped YouTube document's bundles can still
   be *downloaded* (not run) when its first bytes arrive before `window.stop()`; the e2e check "site
-  bundles never requested" fails about 1 run in 4, on `main`'s build as well.
+  bundles never requested" fails about 1 run in 4, on `main`'s build as well. (Home's own document carries a CSP
+  that keeps them from being fetched at all: rules.json 20.)
 - Suggestions come from YouTube's `/complete/search` with your cookies (like YouTube's own box).
-- The YouTube HTML document is still requested (and stopped at the first bytes); the shell appears at
-  roughly time-to-first-byte of that document.
+- The YouTube HTML document is still requested (and stopped at the first bytes, except Home with nothing ready,
+  which reads it); the shell appears at roughly time-to-first-byte of that document.
 - After `window.stop()` the document's `load` event does not fire (readyState is `complete`); no effect
   seen, but noted.
 

@@ -12,6 +12,9 @@
 //              overlap of the two feeds (YouTube's response, not Lumen's filtered cards)
 //   --noready  no ready responses (localStorage ytc-test-noready): every reload takes the network path
 //   --nohedge  no hedge request (localStorage ytc-test-nohedge)
+//   --nodoc    Home from the browse API instead of YouTube's Home document (localStorage ytc-test-nodoc)
+//   --noimp    no "shown" signals (localStorage ytc-test-noimp)
+//   --nokeep   the network path fetches YouTube's Home document instead of reading the tab's own (ytc-test-nokeep)
 //   --cap      give up on a reload after this many ms (default 30000)
 //   --profile  the seeded profile's name (default main)
 //   YTC_EXT    the extension folder (default extension/)
@@ -23,6 +26,8 @@
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { extensionDir } = require('../../tests/browser.cjs');
 const { seeded, launch, homeIds } = require('./profile.cjs');
+// The Home data inside YouTube's Home document (what Lumen reads since 0.12.0, src/homedoc.rs).
+const docData = html => { const m = /var ytInitialData = (\{.*?\});<\/script>/s.exec(html); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
 
 const arg = (k, d) => { const a = process.argv.find(x => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : d; };
 const flag = k => process.argv.includes(`--${k}`);
@@ -78,12 +83,15 @@ async function run(label, withExt, opts = {}) {
   page.on('requestfinished', async req => {
     try {
       const u = new URL(req.url());
-      if (u.pathname !== '/youtubei/v1/browse') return;
-      const b = req.postDataJSON() || {};
+      // (The tab's own document is Home's answer too since 0.12.0 when nothing is ready.)
+      const doc = u.pathname === '/' && (req.resourceType() === 'fetch' || req.resourceType() === 'document');
+      if (u.pathname !== '/youtubei/v1/browse' && !doc) return;
+      const b = doc ? { browseId: 'FEwhat_to_watch' } : req.postDataJSON() || {};
       if (b.browseId !== 'FEwhat_to_watch') return;
       const t = req.timing();
       const r = await req.response();
-      const ids = homeIds(JSON.parse((await r.body()).toString('utf8')));
+      const text = (await r.body()).toString('utf8');
+      const ids = homeIds(doc ? docData(text) : JSON.parse(text));
       if (!ids.length) return; // a continuation, or an empty Home
       browseMs.push(t.responseEnd);
       // net: request start → first byte → last byte (ms), for the streaming question.
@@ -93,7 +101,7 @@ async function run(label, withExt, opts = {}) {
   const rows = [], shown = new Set();
   const url = withExt ? 'https://www.youtube.com/' : 'https://www.youtube.com/';
   await page.goto(url, { waitUntil: 'commit' });
-  if (withExt) await page.evaluate(([nr, nh]) => { for (const [k, on] of [['ytc-test-noready', nr], ['ytc-test-nohedge', nh]]) on ? localStorage.setItem(k, '1') : localStorage.removeItem(k); }, [flag('noready'), flag('nohedge')]).catch(() => {});
+  if (withExt) await page.evaluate(f => { for (const [k, on] of Object.entries(f)) on ? localStorage.setItem(k, '1') : localStorage.removeItem(k); }, { 'ytc-test-noready': flag('noready'), 'ytc-test-nohedge': flag('nohedge'), 'ytc-test-nodoc': flag('nodoc'), 'ytc-test-noimp': flag('noimp'), 'ytc-test-nokeep': flag('nokeep') }).catch(() => {});
   await page.waitForTimeout(6000);
   for (let i = 0; i <= N; i++) {
     // Everything this document showed counts as shown.
@@ -139,13 +147,14 @@ async function run(label, withExt, opts = {}) {
     if (opts.parity) {
       // YouTube's own Home in the same profile (same visitor), right now.
       const t = Date.now();
-      await page.goto('https://www.youtube.com/?yt-native=1', { waitUntil: 'domcontentloaded' });
+      await page.goto('https://www.youtube.com/?yt-native=1', { waitUntil: 'domcontentloaded' }).catch(() => {});
       await page.waitForFunction(() => window.ytInitialData, null, { timeout: 20000 }).catch(() => {});
       const yt = homeIds(await page.evaluate(() => window.ytInitialData).catch(() => ({})));
       row.yt = yt;
       row.parity = overlap(row.ids || [], yt);
       console.log(`  parity: Lumen response ∩ YouTube's own page = ${(row.parity * 100).toFixed(0)} % (top 12: ${(overlap((row.ids || []).slice(0, 12), yt.slice(0, 12)) * 100).toFixed(0)} %) in ${Date.now() - t} ms`);
-      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      // (YouTube's page may still be navigating itself: retry once.)
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' }).catch(() => page.waitForTimeout(1500).then(() => page.goto('https://www.youtube.com/', { waitUntil: 'commit' })));
       await page.waitForTimeout(3000);
     }
     await page.waitForTimeout(WAIT);

@@ -190,7 +190,7 @@ function actFixture(ep, body) {
 const searchStr = JSON.stringify(search), evilSearchStr = JSON.stringify(evilSearch), nextStr = JSON.stringify(next), evilNextStr = JSON.stringify(evilNext);
 const cache = new Map();
 const fx = name => { if (!cache.has(name)) cache.set(name, fixture(name)); return cache.get(name); };
-const log = { warm: [], suggest: [], api: [], docs: [], assets: [], external: [], embeds: [], gv: [], stats: [], timedtext: [], live: [], sb: [] };
+const log = { warm: [], suggest: [], api: [], docs: [], assets: [], external: [], embeds: [], gv: [], stats: [], timedtext: [], live: [], sb: [], imp: [] };
 
 // ---- own player fixtures: VISIONOS streams (synthetic local WebM), WEB metadata, captions.
 let media = null;
@@ -326,7 +326,15 @@ function googlevideo(route, url) {
 }
 // ---- signed-in-like Home: real channel lockups as page 1, then five browse
 // continuations with fresh video ids (HOMECONT1…5) = 180 videos.
-const HOME = { rich: false, delay: 0, latency: 0, stamp: false, served: 0, stall: 0, aborted: 0 };
+const HOME = { rich: false, delay: 0, latency: 0, stamp: false, served: 0, stall: 0, aborted: 0, docs: 0, doc: 'home', nav: false };
+// YouTube's Home document (what a reload of its page gets; src/homedoc.rs): the Home data the browse fixture
+// would answer, inside the page's ytcfg head and its ytInitialData script. HOME.doc: 'home' | 'consent' (a page
+// without Home data) | 'redirect' (to the consent site).
+const HOME_VD = 'CgtlMmVGYWtlVmlzMCjAhPzWBjIKCgJaWhIEEgAgAA%3D%3D';
+const homeDoc = (data, n) => `<!DOCTYPE html><html lang="en"><head><script nonce="n1">var ytcfg={d:function(){return window.yt&&yt.config_||ytcfg.data_||(ytcfg.data_={})},get:function(k,o){return k in ytcfg.d()?ytcfg.d()[k]:o},set:function(){}};
+ytcfg.set({"EVENT_ID":"e2eHomeEvent${String(n).padStart(4, '0')}","INNERTUBE_CLIENT_VERSION":"2.20261102.01.00","INNERTUBE_CONTEXT_GL":"DE","LOGGED_IN":false,"VISITOR_DATA":"${HOME_VD}"});window.__ytAppRan=1;</script></head>
+<body><script nonce="n1">var ytInitialData = ${data};</script><script nonce="n1">window.__ytAppRan=1;</script></body></html>`;
+const gunzipJSON = buf => { try { return JSON.parse(zlib.gunzipSync(buf).toString('utf8')); } catch { try { return JSON.parse(buf.toString('utf8')); } catch { return null; } } };
 // Simulated `next` latency (speed table).
 const NEXT = { latency: 0 };
 const ids11 = str => [...new Set([...str.matchAll(/"contentId":"([A-Za-z0-9_-]{11})"/g)].map(m => m[1]))];
@@ -493,15 +501,31 @@ async function handle(route) {
     return route.abort();
   }
   const p = url.pathname;
-  if (p.startsWith('/youtubei/v1/')) {
-    const ep = p.slice('/youtubei/v1/'.length);
-    const body = req.postDataJSON() || {};
-    log.api.push({ ep, body, headers: req.headers(), t: Date.now(), url: req.url() });
+  // Lumen's "shown" signals (src/impress.rs): gzip'd log_event batches.
+  if (p === '/youtubei/v1/log_event') {
+    log.imp.push({ t: Date.now(), url: req.url(), headers: req.headers(), body: gunzipJSON(req.postDataBuffer() || Buffer.alloc(0)) });
+    return route.fulfill({ status: 200, contentType: 'application/json', body: '{"responseContext":{}}' });
+  }
+  // YouTube's Home document fetched by the page (not a navigation): logged as the Home request it stands for.
+  const homeDocReq = p === '/' && req.method() === 'GET' && req.resourceType() !== 'document';
+  if (homeDocReq && HOME.doc !== 'home') {
+    log.api.push({ ep: 'browse', body: { browseId: 'FEwhat_to_watch' }, headers: req.headers(), t: Date.now(), url: req.url(), doc: HOME.doc });
+    if (HOME.doc === 'redirect') return route.fulfill({ status: 302, headers: { location: 'https://consent.youtube.com/m?continue=https%3A%2F%2Fwww.youtube.com%2F' }, body: '' });
+    return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<!DOCTYPE html><html><body><h1>Before you continue to YouTube</h1></body></html>' });
+  }
+  if (p.startsWith('/youtubei/v1/') || homeDocReq) {
+    const ep = homeDocReq ? 'browse' : p.slice('/youtubei/v1/'.length);
+    const body = homeDocReq ? { browseId: 'FEwhat_to_watch' } : req.postDataJSON() || {};
+    const docN = homeDocReq ? ++HOME.docs : 0;
+    log.api.push({ ep, body, headers: req.headers(), t: Date.now(), url: req.url(), ...(homeDocReq ? { doc: 'home', eid: 'e2eHomeEvent' + String(docN).padStart(4, '0') } : {}) });
+    // (The Home document's answer: the same data inside YouTube's page.)
+    const ct = homeDocReq ? 'text/html; charset=utf-8' : 'application/json';
+    const wrap = out => homeDocReq ? homeDoc(out, docN) : out;
     const hs = HEDGE.stall;
     if (hs && hs.n > 0 && ep === hs.ep && !body.continuation && !url.searchParams.has('fields') && (hs.home ? body.browseId === 'FEwhat_to_watch' : hs.q ? body.query === hs.q : body.videoId === hs.v)) {
       hs.n--;
       await new Promise(r => setTimeout(r, 6000));
-      try { await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }); } catch {}
+      try { await route.fulfill({ status: 200, contentType: ct, body: wrap('{}') }); } catch {}
       return;
     }
     const masked = ep === 'next' && url.searchParams.has('fields') && body.videoId && !body.continuation;
@@ -533,11 +557,11 @@ async function handle(route) {
     if (home && !body.continuation && HOME.stall > 0) {
       HOME.stall--;
       await new Promise(r => setTimeout(r, 12000));
-      return route.fulfill({ status: 200, contentType: 'application/json', body: out }).catch(() => { HOME.aborted++; });
+      return route.fulfill({ status: 200, contentType: ct, body: wrap(out) }).catch(() => { HOME.aborted++; });
     }
     if (home && (HOME.latency || (HOME.delay && !body.continuation))) await new Promise(r => setTimeout(r, HOME.latency + (body.continuation ? 0 : HOME.delay)));
     if (ep === 'next' && NEXT.latency && !body.continuation && !masked) await new Promise(r => setTimeout(r, NEXT.latency));
-    return out ? route.fulfill({ status: 200, contentType: 'application/json', body: out }) : route.fulfill({ status: 404, body: '{}' });
+    return out ? route.fulfill({ status: 200, contentType: ct, body: wrap(out) }).catch(() => {}) : route.fulfill({ status: 404, body: '{}' });
   }
   if (p.startsWith('/api/stats/')) { log.stats.push(req.url()); return route.fulfill({ status: 204, body: '' }); }
   if (p === '/api/timedtext') { log.timedtext.push(req.url()); return route.fulfill({ status: 200, contentType: 'application/json', body: json3 }); }
@@ -550,6 +574,14 @@ async function handle(route) {
   if (p.startsWith('/s/')) { log.assets.push(req.url()); return route.fulfill({ status: 200, contentType: p.endsWith('.css') ? 'text/css' : 'text/javascript', body: p.endsWith('.css') ? '' : 'window.__nativeBundle=(window.__nativeBundle||0)+1;' }); }
   if (req.resourceType() === 'document') {
     log.docs.push(req.url());
+    // HOME.nav: the tab's own Home document is YouTube's Home page ('home') or a YouTube page without Home data
+    // ('nodata'), as a navigation answers (the client reads it instead of asking again; src/app/homeready.rs).
+    if (HOME.nav && p === '/' && !url.searchParams.has('yt-native')) {
+      const docN = ++HOME.docs;
+      log.api.push({ ep: 'browse', body: { browseId: 'FEwhat_to_watch' }, headers: req.headers(), t: Date.now(), url: req.url(), doc: HOME.nav === 'home' ? 'navigation' : HOME.nav, eid: 'e2eHomeEvent' + String(docN).padStart(4, '0') });
+      const html = HOME.nav === 'home' ? homeDoc(apiFixture('browse', { browseId: 'FEwhat_to_watch' }), docN) : homeDoc('{}', docN).replace(/<script nonce="n1">var ytInitialData = [\s\S]*?<\/script>/, '');
+      return route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP }, body: html });
+    }
     if (url.searchParams.get('v') === 'ntvfixture1' && url.searchParams.get('yt-native') === '1') return route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP }, body: NATIVE_PAGE });
     return route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP }, body: STUB });
   }
@@ -615,6 +647,13 @@ chrome.runtime.onMessage.addListener(m => {
   }).listen(0, '127.0.0.1');
   await new Promise(r => collector.once('listening', r));
   const sw = ctx.serviceWorkers()[0] || await ctx.waitForEvent('serviceworker');
+  // The ready Home response, one per browser in the extension's memory-only session storage (src/ready.rs).
+  const readyGet = () => sw.evaluate(() => chrome.storage.session.get('ytc:ready').then(o => o['ytc:ready'] ? JSON.parse(o['ytc:ready']) : null));
+  const readySet = r => sw.evaluate(v => chrome.storage.session.set({ 'ytc:ready': v }), JSON.stringify(r));
+  const readyDel = () => sw.evaluate(() => chrome.storage.session.remove('ytc:ready'));
+  const readyWait = async (min = 30, timeout = 8000) => {
+    for (const t = Date.now(); ;) { const r = await readyGet(); if (r && r.i.length > min) return r; if (Date.now() - t > timeout) throw new Error('no ready response in time'); await new Promise(x => setTimeout(x, 100)); }
+  };
   await sw.evaluate(port => chrome.storage.local.set({ ytcCollectorV1: `http://127.0.0.1:${port}/incident` }), collector.address().port);
   // Voice search: a local stand-in for Deepgram's streaming endpoint (the relay is pointed there), so the
   // suite never reaches the real service.
@@ -631,7 +670,11 @@ chrome.runtime.onMessage.addListener(m => {
   const prio = [];
   const cdp = await ctx.newCDPSession(page);
   await cdp.send('Network.enable');
-  cdp.on('Network.requestWillBeSent', e => { if (e.request.url.includes('/youtubei/v1/browse')) prio.push({ post: e.request.postData || '', p: e.request.initialPriority }); });
+  cdp.on('Network.requestWillBeSent', e => {
+    if (e.request.url.includes('/youtubei/v1/browse')) prio.push({ post: e.request.postData || '', p: e.request.initialPriority });
+    // YouTube's Home document fetched by the page: the Home request (FEwhat_to_watch) it stands for.
+    else if (e.request.url === 'https://www.youtube.com/' && e.type === 'Fetch') prio.push({ post: 'FEwhat_to_watch (document)', p: e.request.initialPriority });
+  });
   const errors = [];
   page.on('pageerror', e => errors.push(String(e)));
   page.on('console', m => { if (m.type() === 'error' && !/ERR_BLOCKED_BY_CLIENT|Failed to load resource/.test(m.text())) errors.push(m.text()); });
@@ -854,6 +897,7 @@ chrome.runtime.onMessage.addListener(m => {
   await step('Home preloads 100 videos in the background (Low priority); the DOM gets them in chunks as you scroll', async () => {
     HOME.rich = true;
     await page.evaluate(() => sessionStorage.clear());
+    await readyDel();
     const before = log.api.length; prio.length = 0;
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-list .c');
@@ -906,18 +950,19 @@ chrome.runtime.onMessage.addListener(m => {
     });
     const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
     const stamp = t => +((/Fresh #(\d+)/.exec(t || '') || [])[1] || 0);
-    const ready = () => page.evaluate(() => { const r = JSON.parse(sessionStorage.getItem('ytc:ready') || 'null'); return r && { n: r.i.length, first: r.f, title: r.i[0].t, at: r.t, cont: !!r.c }; });
-    const waitReady = () => page.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+    const ready = async () => { const r = await readyGet(); return r && { n: r.i.length, first: r.f, title: r.i[0].t, at: r.t, cont: !!r.c, eid: r.e, track: (r.k || []).length }; };
+    const waitReady = () => readyWait();
     const home = () => page.evaluate(() => ({ ...window.__home, src: document.documentElement.dataset.ytcHomeSrc, title: document.querySelector('#ytc-list .c[data-v] .t')?.textContent }));
     try {
       // (A ready response fetched before the stamps were on would be the page: start without one.)
-      await page.evaluate(() => sessionStorage.removeItem('ytc:ready'));
+      await readyDel();
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''));
       // 1. After the paint, in idle time, the Home request once more (low priority) and its first continuation.
       await waitReady();
       const r1 = await ready();
       assert.ok(r1.first > 0 && r1.n > r1.first && r1.cont, `first page + its continuation ${JSON.stringify(r1)}`);
+      assert.ok(/^e2eHomeEvent\d{4}$/.test(r1.eid) && r1.track > 30, `its answer id and the cards' tracking ids (the "shown" signals) ${JSON.stringify(r1)}`);
       const shown = stamp((await home()).title);
       assert.ok(stamp(r1.title) > shown, 'a new answer, not the one on screen');
       const lowReady = prio.filter(x => x.post.includes('FEwhat_to_watch')).at(-1);
@@ -932,7 +977,7 @@ chrome.runtime.onMessage.addListener(m => {
       assert.equal(stamp(h.first), stamp(r1.title), 'the first cards are the ready response');
       assert.equal(h.src, 'ready');
       assert.equal(await page.evaluate(() => document.documentElement.dataset.ytcRepaint), undefined, 'no snapshot repaint');
-      assert.equal(await page.evaluate(() => sessionStorage.getItem('ytc:ready')), null, 'used up: taken out at once');
+      assert.equal(await readyGet(), null, 'used up: taken out at once');
       const after = homeReqs().slice(n0);
       assert.ok(after.every(a => a.t - t0 > h.firstAt - 50), 'no Home request before the paint');
       // 3. Reloading again before the next one has landed: the skeleton and YouTube's answer (never the old Home first).
@@ -945,7 +990,7 @@ chrome.runtime.onMessage.addListener(m => {
       HOME.delay = 0;
       // 4. Expired (older than 10 min): not used.
       await waitReady();
-      await page.evaluate(() => { const r = JSON.parse(sessionStorage.getItem('ytc:ready')); r.t -= 11 * 60000; sessionStorage.setItem('ytc:ready', JSON.stringify(r)); });
+      { const r = await readyGet(); r.t -= 11 * 60000; await readySet(r); }
       await page.reload({ waitUntil: 'commit' });
       await page.waitForFunction(() => window.__home && window.__home.first !== null);
       assert.equal((await home()).src, 'network', 'an expired ready response is not used');
@@ -964,7 +1009,7 @@ chrome.runtime.onMessage.addListener(m => {
       await waitReady();
       await page.click('#ytc-list a.t[href^="/watch"]');
       await page.waitForSelector('#ytc-info h1.wt');
-      assert.equal(await page.evaluate(() => sessionStorage.getItem('ytc:ready')), null, 'watching discards it');
+      assert.equal(await readyGet(), null, 'watching discards it');
       const n1 = homeReqs().length;
       await page.waitForTimeout(2500);
       assert.equal(homeReqs().length, n1, 'nothing fetched ahead on a watch page');
@@ -974,9 +1019,12 @@ chrome.runtime.onMessage.addListener(m => {
       await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''));
       assert.ok(homeReqs().length > n1 && homeReqs()[n1].t >= tc - 100, 'Home asked YouTube when it was opened');
       assert.notEqual(await page.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
-      // 7. Feeds stay in this tab: the ready response is in sessionStorage only (checked with chrome.storage in the next steps).
+      // 7. Memory only: the extension's session storage (never on disk: checked with chrome.storage in the next
+      //    steps), not this tab's sessionStorage or localStorage.
       await waitReady();
       assert.deepEqual(await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('ytc:'))), []);
+      assert.equal(await page.evaluate(() => sessionStorage.getItem('ytc:ready')), null, 'not in the tab');
+      assert.equal(await sw.evaluate(() => chrome.storage.local.get('ytc:ready').then(o => o['ytc:ready'])), undefined, 'not in chrome.storage.local');
     } finally { HOME.delay = 0; HOME.stamp = false; HOME.rich = wasRich; }
   });
 
@@ -985,10 +1033,11 @@ chrome.runtime.onMessage.addListener(m => {
     HOME.rich = true; HOME.stamp = true;
     const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
     const failed = [];
-    const onFail = r => { if (r.url().includes('/youtubei/v1/browse')) failed.push(r.failure()?.errorText); };
+    const onFail = r => { if (r.url().includes('/youtubei/v1/browse') || r.url() === 'https://www.youtube.com/') failed.push(r.failure()?.errorText); };
     page.on('requestfailed', onFail);
     try {
-      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); sessionStorage.setItem('ytc:bt', '120,140,150,160,170,180'); });
+      await readyDel();
+      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.setItem('ytc:bt', '120,140,150,160,170,180'); });
       // 1. The first request hangs: the hedge goes out at this tab's p90 (clamped to ≥ 0.7 s) and paints.
       HOME.stall = 1; HOME.aborted = 0;
       const n0 = homeReqs().length;
@@ -1059,6 +1108,328 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(!bytes.includes(HOME_ID0) && !bytes.includes('HOMECONT') && !bytes.includes('ytc:snap'), 'feed data in chrome.storage');
   });
 
+  // Tracking ids of the first Home page's cards (homeFirst): id → [grid item's, card's own].
+  const homeTrack = (() => {
+    const m = {};
+    (function f(o) {
+      if (!o || typeof o !== 'object') return;
+      const lk = o.richItemRenderer?.content?.lockupViewModel;
+      if (lk?.contentType === 'LOCKUP_CONTENT_TYPE_VIDEO') m[lk.contentId] = [o.richItemRenderer.trackingParams, lk.rendererContext?.loggingContext?.loggingDirectives?.trackingParams];
+      for (const v of Object.values(o)) f(v);
+    })(JSON.parse(homeFirst));
+    return m;
+  })();
+  const until = async (fn, ms = 5000, what = 'condition') => { for (const t = Date.now(); !(await fn());) { if (Date.now() - t > ms) throw new Error('timed out: ' + what); await new Promise(r => setTimeout(r, 50)); } };
+  // (Never empties log.api: later steps read requests made long before them, e.g. the first sw.js_data.)
+  let apiFrom = 0;
+  const homeOnly = () => log.api.slice(apiFrom).filter(a => a.body?.browseId === 'FEwhat_to_watch');
+
+  await step('Home is YouTube\'s own Home document (GET / like its page reload: its ytInitialData, then browse with its continuation); scripts in it never run; no Home data (a consent page, a redirect) → browse for the rest of the document; never on TV', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    try {
+      await readyDel();
+      await page.evaluate(() => localStorage.setItem('ytc-test-noready', '1'));
+      apiFrom = log.api.length;
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      const first = homeOnly()[0];
+      assert.equal(first.doc, 'home', 'the Home request is the document');
+      assert.equal(first.url, 'https://www.youtube.com/');
+      assert.match(first.headers.accept || '', /^text\/html/, 'asked like a page');
+      assert.ok(homeOnly().every(a => a.doc), 'no browse FEwhat_to_watch');
+      assert.equal(await page.evaluate(() => window.__ytAppRan), undefined, 'the document\'s scripts never run');
+      assert.equal(await page.getAttribute('#ytc-list .c[data-v]', 'data-v'), HOME_ID0, 'its ytInitialData is the page');
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 60, null, { timeout: 8000 });
+      assert.ok(log.api.slice(apiFrom).some(a => a.ep === 'browse' && a.body?.continuation === 'HOMECONT1' && !a.doc), 'the continuation: browse with the document\'s token');
+      for (const mode of ['consent', 'redirect']) {
+        HOME.doc = mode;
+        const n = log.api.length;
+        await page.reload({ waitUntil: 'commit' });
+        await page.waitForSelector('#ytc-list .c[data-v]');
+        assert.equal(await page.getAttribute('#ytc-list .c[data-v]', 'data-v'), HOME_ID0, mode + ': Home from browse');
+        assert.deepEqual(log.api.slice(n).filter(a => a.body?.browseId === 'FEwhat_to_watch').map(a => a.doc || 'browse'), [mode, 'browse'], mode);
+        assert.equal(await page.evaluate(() => location.href), 'https://www.youtube.com/', 'stays in the client');
+        HOME.doc = 'home';
+        // The rest of this document: browse (Home on Home asks YouTube again).
+        const m = log.api.length;
+        await page.evaluate(() => document.getElementById('ytc-logo').click());
+        await until(() => log.api.slice(m).some(a => a.body?.browseId === 'FEwhat_to_watch'), 4000, 'Home again');
+        assert.ok(log.api.slice(m).filter(a => a.body?.browseId === 'FEwhat_to_watch').every(a => !a.doc), mode + ': browse for the rest of the document');
+      }
+      await page.evaluate(() => localStorage.setItem('ytc-test-nodoc', '1'));
+      const k = log.api.length;
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      assert.ok(log.api.slice(k).filter(a => a.body?.browseId === 'FEwhat_to_watch').every(a => !a.doc), 'switched off (tests): browse');
+    } finally {
+      HOME.doc = 'home'; HOME.rich = wasRich;
+      await page.evaluate(() => { localStorage.removeItem('ytc-test-noready'); localStorage.removeItem('ytc-test-nodoc'); }).catch(() => {});
+    }
+  });
+
+  await step('Home sends the "shown" signals YouTube\'s own Home sends (log_event: screenCreated with its answer id, then visualElementStateChanged + visualElementShown per card ≥ half in view, once, and scrollEvent), gzip, batched ~1 s; the next ready response waits for the first batch; a later batch makes the waiting one stale; nothing on other pages or with the switch off', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    try {
+      await page.goto('https://www.youtube.com/results?search_query=imp', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      // (A lazy refill may go out on this page: let it land, then start Home from the network path.)
+      await page.waitForTimeout(2500);
+      await readyDel();
+      log.imp.length = 0; apiFrom = log.api.length;
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      const painted = Date.now();
+      assert.equal(await page.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'network');
+      await until(() => log.imp.length >= 1, 4000, 'the first batch');
+      const b = log.imp[0];
+      assert.ok(b.t - painted >= 600 && b.t - painted < 2500, `first batch ${b.t - painted} ms after the paint`);
+      assert.equal(b.url, 'https://www.youtube.com/youtubei/v1/log_event?alt=json&prettyPrint=false');
+      assert.equal(b.headers['content-encoding'], 'gzip');
+      assert.equal(b.headers['x-youtube-client-name'], '1');
+      assert.equal(b.headers['x-goog-visitor-id'] !== undefined, true);
+      assert.ok(b.body, 'a gzip JSON body');
+      const kind = e => Object.keys(e).find(k => k !== 'eventTimeMs' && k !== 'context');
+      const ev = b.body.events;
+      const eid = homeOnly().find(a => a.doc === 'home').eid;
+      assert.equal(kind(ev[0]), 'screenCreated');
+      const csn = ev[0].screenCreated.csn;
+      assert.match(csn, /^[\w-]{16}$/);
+      assert.deepEqual(ev[0].screenCreated.pageVe, { veType: 3854, youtubeData: { servletData: { serializedServletEventId: eid } } }, 'names the answer it shows');
+      assert.equal(b.body.serializedClientEventId.serializedEventId, eid);
+      assert.equal(b.body.context.client.clientName, 1);
+      assert.ok(ev.every(e => /^\d+$/.test(e.context.lastActivityMs)));
+      assert.deepEqual([...new Set(ev.map(kind))].sort(), ['screenCreated', 'visualElementShown', 'visualElementStateChanged']);
+      // Exactly the cards ≥ half in the viewport, each once, with their grid place (4 columns at 1400 px).
+      const vis = await page.$$eval('#ytc-list .c[data-v]', els => els.map((e, i) => { const r = e.getBoundingClientRect(); return { id: e.dataset.v, i, in: Math.min(r.bottom, innerHeight) - Math.max(r.top, 0) >= r.height / 2 }; }));
+      const onScreen = vis.filter(v => v.in);
+      assert.ok(onScreen.length >= 4 && onScreen.length < vis.length, `${onScreen.length} of ${vis.length} cards in view`);
+      const shown = ev.filter(e => e.visualElementShown).map(e => e.visualElementShown);
+      assert.ok(shown.every(x => x.eventType === 1 && x.csn === csn && x.clientData.viewData.widthPoints > 100), JSON.stringify(shown[0]));
+      assert.deepEqual(shown.map(x => x.ve.trackingParams).sort(), onScreen.flatMap(v => homeTrack[v.id]).sort(), 'shown: the cards in view (grid item + own ids), nothing else');
+      const grid = ev.filter(e => e.visualElementStateChanged).map(e => e.visualElementStateChanged);
+      assert.deepEqual(grid.map(g => [g.ve.trackingParams, g.clientData.gridData.veColumnCoordinate, g.clientData.gridData.veRowCoordinate]).sort(), onScreen.map(v => [homeTrack[v.id][0], v.i % 4, Math.floor(v.i / 4)]).sort());
+      // The ready response is fetched after YouTube has that batch.
+      const fill = await readyWait();
+      const fillReq = homeOnly().find(a => a.t > painted);
+      assert.ok(fillReq.t >= b.t, `the refill went out ${fillReq.t - b.t} ms after the first batch`);
+      // Scrolling: a scroll event and the newly shown cards (never one twice); YouTube's next answer depends on them,
+      // so the waiting ready response goes.
+      await page.evaluate(() => scrollTo(0, 1100));
+      await until(() => log.imp.length >= 2, 4000, 'the scroll batch');
+      const ev2 = log.imp[1].body.events;
+      const sc = ev2.find(e => e.scrollEvent).scrollEvent;
+      assert.deepEqual(sc, { clientScreenNonce: csn, orientation: 'SCROLL_ORIENTATION_VERTICAL', startContentOffsetPoints: 1100, netDisplacementPoints: 1100 });
+      const tp2 = ev2.filter(e => e.visualElementShown).map(e => e.visualElementShown.ve.trackingParams);
+      assert.ok(tp2.length > 0 && !tp2.some(t => shown.some(x => x.ve.trackingParams === t)), 'new cards only');
+      await page.waitForTimeout(150);
+      const after = await readyGet();
+      assert.ok(!after || after.t > fill.t, 'the ready response fetched before those cards were shown is gone');
+      // Leaving Home: what is queued goes; nothing on other pages.
+      await page.goto('https://www.youtube.com/results?search_query=imp2', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      const k = log.imp.length;
+      await page.evaluate(() => scrollTo(0, 900));
+      await page.waitForTimeout(1600);
+      assert.equal(log.imp.length, k, 'no signals on a search page');
+      // YouTube's own log_event (its pages) stays blocked; only Lumen's batch URL passes the request rules.
+      const r = await page.evaluate(async () => {
+        const t = async u => { try { await fetch(u, { method: 'POST', body: '{}' }); return 'ok'; } catch { return 'blocked'; } };
+        return { youtube: await t('/youtubei/v1/log_event?alt=json'), lumen: await t('/youtubei/v1/log_event?alt=json&prettyPrint=false') };
+      });
+      assert.deepEqual(r, { youtube: 'blocked', lumen: 'ok' });
+      log.imp.length = 0;
+      // Switched off (tests): none.
+      await page.evaluate(() => localStorage.setItem('ytc-test-noimp', '1'));
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await page.waitForTimeout(1600);
+      assert.equal(log.imp.filter(x => x.url.includes('prettyPrint')).length, 0, 'switched off: no signals');
+    } finally {
+      HOME.rich = wasRich;
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noimp')).catch(() => {});
+    }
+  });
+
+  await step('a new tab or window paints the ready Home response shared by the tabs (extension memory only): no Home request before it; used once for every tab; watching in any tab, expiry or another account → the network path', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true; HOME.stamp = true;
+    const stamp = t => +((/Fresh #(\d+)/.exec(t || '') || [])[1] || 0);
+    const title = p => p.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t')?.textContent);
+    const open = async () => {
+      const t = await ctx.newPage();
+      await t.addInitScript(() => { const tick = () => { if (document.querySelector('#ytc-list .c[data-v]')) window.__firstAt = performance.timeOrigin + performance.now(); else requestAnimationFrame(tick); }; requestAnimationFrame(tick); });
+      await t.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await t.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c[data-v] .t')?.textContent || '') && document.documentElement.dataset.ytcHomeSrc);
+      return t;
+    };
+    const tabs = [];
+    try {
+      await readyDel();
+      await page.bringToFront();
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''));
+      const r1 = await readyWait();
+      // 1. A new tab: the shared ready response on its first frame, no Home request before it, gone for all tabs.
+      const n0 = homeOnly().length;
+      const t2 = await open(); tabs.push(t2);
+      const m = await t2.evaluate(() => ({ src: document.documentElement.dataset.ytcHomeSrc, at: window.__firstAt }));
+      assert.equal(m.src, 'ready');
+      assert.equal(stamp(await title(t2)), stamp(r1.i[0].t), 'the ready response');
+      assert.ok(homeOnly().slice(n0).every(a => a.t > m.at - 30), 'no Home request before the paint');
+      const left = await readyGet();
+      assert.ok(!left || left.t > r1.t, 'used once: gone for every tab');
+      // The first tab's copy went with it: its logo-Home never shows r1 again.
+      await page.bringToFront();
+      await page.mouse.move(700, 450);
+      await page.evaluate(() => scrollTo(0, 0));
+      await page.click('#ytc-logo');
+      await page.waitForTimeout(1500);
+      assert.notEqual(stamp(await title(page)), stamp(r1.i[0].t), 'not shown twice');
+      // 2. Watching in one tab discards it for all.
+      const r2 = await readyWait();
+      await t2.bringToFront();
+      await t2.click('#ytc-list a.t[href^="/watch"]');
+      await t2.waitForSelector('#ytc-info h1.wt');
+      await until(async () => (await readyGet()) === null, 2000, 'discarded');
+      await page.bringToFront();
+      const k = homeOnly().length;
+      await page.click('#ytc-logo');
+      await until(() => homeOnly().length > k, 3000, 'asked YouTube');
+      await page.waitForTimeout(800);
+      assert.notEqual(stamp(await title(page)), stamp(r2.i[0].t), 'the other tab watched: not the response from before');
+      // 3. Expired or another account's: not used by a new tab.
+      for (const change of [r => { r.t -= 11 * 60000; }, r => { r.a = 'sother:0:en'; }]) {
+        const r = JSON.parse(JSON.stringify(r2));
+        r.t = Date.now();
+        change(r);
+        await readySet(r);
+        const t = await open(); tabs.push(t);
+        assert.equal(await t.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'network');
+        await t.close(); tabs.pop();
+      }
+    } finally {
+      for (const t of tabs) await t.close().catch(() => {});
+      await page.bringToFront();
+      HOME.stamp = false; HOME.rich = wasRich;
+    }
+  });
+
+  await step('a new tab\'s Home asks YouTube at once: its Home document carries the visitor (no wait for the stored config or sw.js_data); the visitor and client version are learned from it', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    const cfg = await sw.evaluate(() => chrome.storage.local.get('ytcConfigV1'));
+    const tabs = [];
+    try {
+      await readyDel();
+      await sw.evaluate(() => chrome.storage.local.remove('ytcConfigV1'));
+      const a0 = log.api.length;
+      const t = await ctx.newPage(); tabs.push(t);
+      await t.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await t.waitForSelector('#ytc-list .c[data-v]');
+      const reqs = log.api.slice(a0), home = reqs.findIndex(a => a.doc === 'home'), swd = reqs.findIndex(a => a.ep === 'sw.js_data');
+      assert.ok(home >= 0 && (swd < 0 || swd > home), `Home first (${reqs.map(a => a.doc ? 'doc' : a.ep).join(',')})`);
+      await until(async () => (await sw.evaluate(() => chrome.storage.local.get('ytcConfigV1'))).ytcConfigV1?.vd === HOME_VD, 3000, 'visitor learned');
+      const c = (await sw.evaluate(() => chrome.storage.local.get('ytcConfigV1'))).ytcConfigV1;
+      assert.equal(c.v, '2.20261102.01.00', 'the document\'s client version');
+    } finally {
+      for (const t of tabs) await t.close().catch(() => {});
+      await sw.evaluate(c => chrome.storage.local.set(c), cfg);
+      await page.bringToFront();
+      HOME.rich = wasRich;
+    }
+  });
+
+  await step('nothing ready: Home is read from the tab\'s own document (no second request): held out of the page while it streams (its scripts never run, nothing of it renders, one head and body: the client\'s), its answer id for the "shown" signals; a YouTube page without Home data → browse at once; a ready response stops the document', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    const state = () => page.evaluate(() => ({ doc: document.documentElement.dataset.ytcHomeDoc || '', src: document.documentElement.dataset.ytcHomeSrc, ran: window.__ytAppRan, ytd: document.querySelectorAll('ytd-app').length, bodies: document.querySelectorAll('body').length, heads: document.querySelectorAll('head').length, cards: document.querySelectorAll('#ytc-list .c[data-v]').length }));
+    try {
+      await readyDel();
+      await page.evaluate(() => localStorage.setItem('ytc-test-noready', '1'));
+      HOME.nav = 'home';
+      const a0 = log.api.length;
+      log.imp.length = 0;
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      const reqs = log.api.slice(a0).filter(a => a.body?.browseId === 'FEwhat_to_watch');
+      assert.deepEqual(reqs.map(a => a.doc), ['navigation'], 'the tab\'s own document is the only Home request');
+      const st = await state();
+      assert.deepEqual({ ...st, cards: st.cards > 10 }, { doc: 'navigation', src: 'network', ran: undefined, ytd: 0, bodies: 1, heads: 1, cards: true }, 'its scripts never ran, nothing of it is in the page');
+      assert.equal(await page.getAttribute('#ytc-list .c[data-v]', 'data-v'), HOME_ID0, 'its ytInitialData is the page');
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 60, null, { timeout: 8000 });
+      assert.ok(log.api.slice(a0).some(a => a.body?.continuation === 'HOMECONT1'), 'its continuation');
+      await until(() => log.imp.length >= 1, 4000, 'the first "shown" batch');
+      assert.equal(log.imp[0].body.events[0].screenCreated.pageVe.youtubeData.servletData.serializedServletEventId, reqs[0].eid, 'the signals name its answer');
+      // A YouTube page without Home data: browse at once (a fetch of the same page would not have it either).
+      HOME.nav = 'nodata';
+      const a1 = log.api.length;
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      assert.deepEqual(log.api.slice(a1).filter(a => a.body?.browseId === 'FEwhat_to_watch' && !a.body.continuation).map(a => a.doc || 'browse'), ['nodata', 'browse']);
+      assert.equal((await state()).ran, undefined);
+      // A ready response: painted at once; the document is stopped and nothing of it ran.
+      HOME.nav = 'home';
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noready'));
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await readyWait();
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await page.waitForTimeout(300);
+      const s3 = await state();
+      assert.deepEqual([s3.src, s3.doc, s3.ran, s3.ytd, s3.bodies], ['ready', '', undefined, 0, 1]);
+    } finally {
+      HOME.nav = false; HOME.rich = wasRich;
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noready')).catch(() => {});
+    }
+  });
+
+  await step('a playing video: once playback is healthy (8 s played, 20 s or the rest buffered ahead) one low-priority Home request refills the ready response (no continuation), once per watch page; a new window paints it; the next video discards it for every tab', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    const tabs = [];
+    try {
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await page.mouse.move(700, 450);
+      await page.click('#ytc-list a.t[href^="/watch"]');
+      await page.waitForFunction(() => document.documentElement.dataset.ytcFirstFrame);
+      assert.equal(await readyGet(), null, 'opening the video discarded Home\'s');
+      const a0 = log.api.length, t0 = Date.now();
+      prio.length = 0;
+      await until(async () => (await readyGet()) !== null, 30000, 'refilled while the video plays');
+      const reqs = log.api.slice(a0).filter(a => a.body?.browseId === 'FEwhat_to_watch');
+      assert.equal(reqs.length, 1, 'one request');
+      assert.ok(reqs[0].t - t0 >= 7000, `after the video played a while (${reqs[0].t - t0} ms)`);
+      assert.equal(prio.filter(x => x.post.startsWith('FEwhat_to_watch')).at(-1)?.p, 'Low', 'low priority');
+      assert.equal(await page.evaluate(() => document.querySelector('video') && !document.querySelector('video').paused), true, 'still playing');
+      await page.waitForTimeout(1500);
+      assert.ok(!log.api.slice(a0).some(a => a.body?.continuation?.startsWith('HOME')), 'no continuation while a video plays');
+      // A new window while it plays: the ready response on its first frame.
+      const r = await readyGet();
+      const t = await ctx.newPage(); tabs.push(t);
+      await t.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await t.waitForFunction(() => document.querySelector('#ytc-list .c[data-v]') && document.documentElement.dataset.ytcHomeSrc);
+      assert.equal(await t.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
+      assert.equal(await t.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), r.i[0].t);
+      // Once per watch page: used, it is not fetched again here (refills are at most once a minute anyway).
+      const a1 = log.api.length;
+      await page.waitForTimeout(11000);
+      assert.equal(log.api.slice(a1).filter(a => a.body?.browseId === 'FEwhat_to_watch' && a.t > 0 && !a.body.continuation && a.headers.referer?.includes('watch')).length, 0, 'not again on this page');
+      // The next video is a personalizing event: what the new window fetched since is discarded for every tab.
+      await readyWait(10, 8000);
+      await page.bringToFront();
+      await page.locator('#ytc-main a.t[href^="/watch"]').first().click();
+      await until(async () => (await readyGet()) === null, 3000, 'discarded by the next video');
+    } finally {
+      for (const t of tabs) await t.close().catch(() => {});
+      await page.bringToFront();
+      HOME.rich = wasRich;
+    }
+  });
+
   await step('logo: resting on it opens Home from memory (the ready response, else a request on enter; 250 ms dwell, mint pill fills); a pass-over or a shorter rest never navigates, a new rest starts over; click instant; keyboard unchanged; nothing while typing; Home on Home: top, then a new Home from YouTube', async () => {
     const saved = { ...HOME };
     HOME.rich = true; HOME.latency = 150; HOME.delay = 0;
@@ -1084,7 +1455,8 @@ chrome.runtime.onMessage.addListener(m => {
       await page.mouse.move(700, 450);
       await page.goto('https://www.youtube.com/results?search_query=' + q, { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-list .c[data-v]');
-      await page.evaluate(() => { sessionStorage.removeItem('ytc:snap:/'); sessionStorage.removeItem('ytc:ready'); });
+      await page.evaluate(() => { sessionStorage.removeItem('ytc:snap:/'); });
+      await readyDel();
     };
     try {
       // 1. Rest on the logo from a results page (no Home snapshot): Home's first page is requested the moment
@@ -1118,8 +1490,7 @@ chrome.runtime.onMessage.addListener(m => {
       // (only the next ready response afterwards, once Home is on screen).
       HOME.stamp = true;
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
-      await page.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
-      const readyTitle = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ytc:ready')).i[0].t);
+      const readyTitle = (await readyWait()).i[0].t;
       await page.mouse.move(700, 450);
       await page.goto('https://www.youtube.com/results?search_query=dwellready', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-list .c[data-v]');
@@ -1206,8 +1577,7 @@ chrome.runtime.onMessage.addListener(m => {
       HOME.stamp = true;
       await page.waitForSelector('#ytc-list .c[data-v]');
       await page.mouse.move(700, 450);
-      await page.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
-      const next = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ytc:ready')).i[0].t);
+      const next = (await readyWait()).i[0].t;
       await page.evaluate(() => scrollTo(0, 900));
       const before = { h: await page.evaluate(() => history.length), n: homeReqs().length };
       await page.mouse.move(lc.x, lc.y); await page.waitForTimeout(400);
@@ -1215,7 +1585,8 @@ chrome.runtime.onMessage.addListener(m => {
       assert.deepEqual(s, { y: 0, h: before.h, path: '/', t: next }, 'Home on Home: top, the ready response');
       assert.ok(homeReqs().slice(before.n).every(a => a.t > Date.now() - 350), 'no request at the dwell (only the next ready response after it)');
       // Without a ready response, the click asks YouTube and replaces the page in place.
-      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); scrollTo(0, 900); });
+      await readyDel();
+      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); scrollTo(0, 900); });
       const k0 = HOME.served, n1 = homeReqs().length;
       await page.evaluate(() => document.getElementById('ytc-logo').click());
       s = await page.evaluate(() => ({ y: scrollY, h: history.length }));
@@ -4042,7 +4413,8 @@ chrome.runtime.onMessage.addListener(m => {
       // Home's first page belongs to the Home path (src/app/homeready.rs), which sends its own single hedge:
       // the generic hedger adds nothing on top (no ready response in this check).
       log.api.length = 0;
-      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); });
+      await readyDel();
+      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); });
       HEDGE.stall = { ep: 'browse', home: true, n: 1 };
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForTimeout(3200);
@@ -4583,6 +4955,7 @@ chrome.runtime.onMessage.addListener(m => {
       await page.goto('https://www.youtube.com/results?search_query=reset', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-list .c');
       await page.evaluate(() => sessionStorage.clear());
+      await readyDel();
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForFunction(() => document.querySelectorAll('#ytc-list .c').length >= 30, null, { timeout: 10000 });
       const r = await page.evaluate(() => { const d = document.documentElement.dataset; return { script: +d.ytcScript, wasm: +d.ytcWasm, shell: +d.ytcShell, first: +d.ytcReady }; });
@@ -4619,6 +4992,7 @@ chrome.runtime.onMessage.addListener(m => {
       // A: Home seen, then other pages for > the background age, then Home again.
       await page.goto('https://www.youtube.com/results?search_query=speed' + i, { waitUntil: 'commit' });
       await page.evaluate(() => { sessionStorage.clear(); sessionStorage.setItem('ytc:bgage', '4000'); });
+      await readyDel();
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 10000 });
       const k0 = HOME.served;
@@ -4774,6 +5148,7 @@ chrome.runtime.onMessage.addListener(m => {
   await step('filters: Home popularity order (all loaded cards), Relevance restores; Music/Live labelled cards hidden by default; Playlists only', async () => {
     HOME.rich = true; FX.homeLabels = true;
     await page.evaluate(() => sessionStorage.clear());
+    await readyDel();
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-list .c');
     await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
@@ -4816,6 +5191,7 @@ chrome.runtime.onMessage.addListener(m => {
   await step('filters: Shorts switch (off by default) shows/hides Home Shorts at once, no request; Shorts badge, normal watch link, kept at any minimum length; remembered', async () => {
     HOME.rich = true; FX.homeShorts = true;
     await page.evaluate(() => sessionStorage.clear());
+    await readyDel();
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-list .c');
     await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
@@ -4857,6 +5233,7 @@ chrome.runtime.onMessage.addListener(m => {
     assert.deepEqual(await shortIds(), []);
     await page.waitForTimeout(600);
     await page.evaluate(() => sessionStorage.clear());
+    await readyDel();
     await page.reload({ waitUntil: 'commit' });
     await page.waitForSelector('#ytc-list .c');
     await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
@@ -4921,6 +5298,7 @@ chrome.runtime.onMessage.addListener(m => {
     try {
     HOME.rich = true; FX.homeChips = true;
     await page.evaluate(() => sessionStorage.clear());
+    await readyDel();
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
     await page.waitForTimeout(300);
@@ -4960,6 +5338,7 @@ chrome.runtime.onMessage.addListener(m => {
   await step('YouTube Home chips: beside the own topics, switch by the chip\'s token, All restores without a request, reorder/hide remembered', async () => {
     HOME.rich = true; FX.homeChips = true;
     await page.evaluate(() => sessionStorage.clear());
+    await readyDel();
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
     const bar = () => page.$$eval('#ytc-filters .fx-tc > .fx-ch', bs => bs.map(b => b.textContent));
@@ -5069,6 +5448,7 @@ chrome.runtime.onMessage.addListener(m => {
     });
     try {
       await page.evaluate(() => sessionStorage.clear());
+      await readyDel();
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
       await page.waitForSelector('#ytc-list .c');
@@ -5184,6 +5564,7 @@ chrome.runtime.onMessage.addListener(m => {
       for (const w of [1400, 2560]) {
         await page.setViewportSize({ width: w, height: w === 1400 ? 900 : 1440 });
         await page.evaluate(() => sessionStorage.clear());
+        await readyDel();
         await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
         await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
         await page.waitForSelector('#ytc-list .c');
@@ -5393,6 +5774,7 @@ chrome.runtime.onMessage.addListener(m => {
       requestAnimationFrame(f);
     }); }
     await page.evaluate(linked => { sessionStorage.clear(); sessionStorage.setItem('ytc-e2e-hold', JSON.stringify(linked)); }, [...FX.linked]);
+    await readyDel();
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-list .c');
     const first = await page.$$eval('#ytc-list .c:not(.fxh)', cs => cs.length);
@@ -5755,6 +6137,7 @@ chrome.runtime.onMessage.addListener(m => {
     HOME.rich = true; FX.homeChips = true;
     try {
       await page.evaluate(() => sessionStorage.clear());
+      await readyDel();
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
       await page.hover('#ytc-filters .fx-plus');
@@ -6827,6 +7210,9 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
     const wasRich = HOME.rich;
     HOME.rich = true; HOME.stamp = true;
     const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
+    // YouTube's own TV app has no server-rendered Home and sends Lumen's web "shown" signals never: none here.
+    let tvImp = 0, counting = false;
+    tv.on('request', r => { if (counting && (r.url().includes('/youtubei/v1/log_event') || (r.url() === 'https://www.youtube.com/' && r.resourceType() === 'fetch'))) tvImp++; });
     try {
       await tv.addInitScript(t => {
         localStorage.setItem('ytc:platform', 'tv');
@@ -6837,6 +7223,7 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
       await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await tv.waitForTimeout(2500);
       await tv.evaluate(() => { sessionStorage.clear(); localStorage.removeItem('ytc-test-noready'); });
+      counting = true;
       const n0 = homeReqs().length;
       await tv.reload({ waitUntil: 'commit' });
       await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 8000 });
@@ -6866,6 +7253,7 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
       assert.equal(h.length, 2);
       assert.equal(JSON.stringify(h[0].body), JSON.stringify(h[1].body), 'identical bodies');
       assert.ok(h.every(r => r.headers.authorization === `Bearer ${token}` && r.body.context.client.clientName === 'TVHTML5'), 'both with the access token');
+      assert.equal(tvImp, 0, 'TV: no Home document, no "shown" signals');
     } finally {
       HOME.stall = 0; HOME.stamp = false; HOME.rich = wasRich;
       await tv.evaluate(() => { for (const k of ['ytc:platform', 'ytc:shell', 'ytc-test-noready']) localStorage.removeItem(k); }).catch(() => {});

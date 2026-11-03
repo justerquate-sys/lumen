@@ -41,6 +41,7 @@ fn purpose(p: &Purpose) -> &'static str {
         Purpose::NetProbe => "net-probe",
         Purpose::Ready { .. } => "ready",
         Purpose::ReadyCont { .. } => "ready-cont",
+        Purpose::Imp { .. } => "shown",
     }
 }
 

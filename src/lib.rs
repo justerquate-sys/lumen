@@ -9,6 +9,8 @@ mod native;
 pub mod config;
 pub mod description;
 pub mod hedge;
+pub mod impress;
+pub mod homedoc;
 pub mod json;
 pub mod features;
 pub mod parse;
@@ -344,6 +346,37 @@ pub fn on_unload() {
 #[wasm_bindgen]
 pub fn on_visible(id: &str) {
     app::with(|a| a.on_visible(id));
+}
+
+/// The page's own document gave the script `bridge::doc_hold` waits for ("" when it ended without it).
+#[wasm_bindgen]
+pub fn on_doc_script(text: &str) {
+    app::with(|a| a.on_doc_script(text));
+}
+
+/// `bridge::shared_get` / `shared_take` answered (`value` "" when missing).
+#[wasm_bindgen]
+pub fn on_shared(key: &str, value: &str) {
+    app::with(|a| a.on_shared(key, value));
+}
+
+/// Another context changed the shared store (`value` "" when removed).
+#[wasm_bindgen]
+pub fn on_shared_change(key: &str, value: &str) {
+    app::with(|a| a.on_shared_change(key, value));
+}
+
+/// An element watched by `bridge::shown_watch` came into view (`i`: its place among the watched elements in
+/// document order; its box in the viewport, CSS px).
+#[wasm_bindgen]
+pub fn on_shown(key: &str, i: u32, x: f64, y: f64, w: f64, h: f64) {
+    app::with(|a| a.on_shown(key, i, x, y, w, h));
+}
+
+/// The page came to rest after a scroll (`scrollend`).
+#[wasm_bindgen]
+pub fn on_scroll_end(y: f64) {
+    app::with(|a| a.on_scroll_end(y));
 }
 
 /// Voice search: socket relay events (`open`, `msg`, `close`, `fail`).

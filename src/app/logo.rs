@@ -159,6 +159,7 @@ impl App {
         if let Some(body) = self.held.take() {
             bridge::html(PILL, "");
             bridge::scroll_to(0.0);
+            self.hr.doc_meta = self.hr.held_meta.take();
             self.on_page_body(200, &body);
             return;
         }
