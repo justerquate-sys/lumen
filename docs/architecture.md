@@ -435,7 +435,7 @@ captions and the watch-history URLs.
   unknown until the index is parsed, so the guess is bounded; what of segment 0 came along is appended
   and only the rest is asked for. (512 KB cost ~150 ms on cold connections still in TCP slow start; a
   bit-rate-sized guess of up to 3 MB made the first frame wait for bytes past segment 0.)
-- *Media is appended while it downloads* (4 Nov 2026, `player/frag.rs` pure, `own/stream.rs`; the
+- *Media is appended while it downloads* (3 Nov 2026, `player/frag.rs` pure, `own/stream.rs`; the
   bridge's generic `chunks` fetch option). Every googlevideo index and segment body is handed over piece
   by piece and each piece goes into its SourceBuffer at once: Chromium parses a partial `moof`+`mdat` (or
   WebM `Cluster`) sample by sample, so the first frame shows once the keyframe is in (measured: `loadeddata`
@@ -446,6 +446,11 @@ captions and the watch-history URLs.
   ended). `frag::Asm` keeps each segment's bytes in order when several requests deliver them (the index
   request, the rest, a mirror twin, a retry from where a broken one stopped: only the missing bytes are
   asked for again); a new segment after a partly appended one first drops that part (`abort()`).
+  Live (`video.cjs`, interleaved with 0.10.0, signed out, n = 30 each): cold watch URL first frame p50 711 →
+  518 ms (p90 941 → 707), SPA click 385 → 291 ms (p90 558 → 358), hovered click unchanged (88 → 87 ms; its
+  prefetch already holds segment 0); the picture moves as soon after the first frame as before (131 ms, rVFC);
+  googlevideo 10× slower: cold p50 2268 → 1301 ms, no stall time in either. Quality switch (n = 9 per
+  scenario): down 5.8 s → 72–138 ms, up 2.7–3.8 s → 89–105 ms; a seek after resting on the bar ~105 → ~30 ms.
 - *decodingInfo before the first request*: answers are cached for the page (`CAPS`, memory) and asked
   as soon as a VISIONOS response is prefetched (`warm_caps`), and at boot for the usual YouTube formats
   (AV1/VP9/H.264 at 720p–2160p, 30/60 fps, SDR; `warm_caps_boot`, answered in a few ms, before any
@@ -457,7 +462,7 @@ captions and the watch-history URLs.
   can only raise it) is read on the player's tick, at most once a second. Before, `limit()` read the
   box five times right after the watch page was written, each a forced layout (≈ 13 ms, 52 ms at 4×
   CPU throttling; found by the boot work on 3 Nov 2026).
-- *Instant quality switch* (4 Nov 2026, `own/stream.rs`): a quality the user chooses (and any cut while
+- *Instant quality switch* (3 Nov 2026, `own/stream.rs`): a quality the user chooses (and any cut while
   paused) shows at once instead of at the next segment (3.2–3.9 s before, one keyframe per segment). The new
   quality's segment under the playhead is appended over the old one (Chromium keeps playing the old frames
   meanwhile); once the appended part covers the playhead (+ 0.12 s; `frag::mp4_covered`/`webm_covered`
@@ -685,7 +690,7 @@ no picture came, the 6 s retry also rebuilds the MediaSource and SourceBuffers o
 **40 s**. When the picture comes or playback resumes, the status fades and nothing else changes; a
 `player-recovered` incident records the outcome (`… recovered after 3.2 s (1 retry with fresh URLs)`);
 when it never does, the `player-failed` incident is the outcome. A background tab's start waits until the
-tab is shown, as before. *Data but no picture* (4 Nov 2026, `own/stream.rs`): when the start's video and
+tab is shown, as before. *Data but no picture* (3 Nov 2026, `own/stream.rs`): when the start's video and
 audio cover the playhead for **1.5 s** and the element still has no frame (a decoder that takes data and
 shows nothing, as 1440p60 HDR AV1 on the Android TV emulator did), that video format is given up and the
 start goes on with the next one in a fresh MediaSource at once, before any stuck status.
