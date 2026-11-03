@@ -137,7 +137,7 @@ impl App {
             if first {
                 self.imp.first_id = Some(id);
             }
-            self.pending.insert(id, super::Pending { purpose: Purpose::Imp { first }, sent: bridge::now(), ep: "log_event" });
+            self.pending.insert(id, super::Pending { purpose: Purpose::Imp { first }, sent: bridge::now(), ep: "log_event", unmasked: None });
             if cards > 0 && !first {
                 // YouTube now knows of cards the waiting ready response was fetched without.
                 crate::ready::taint();

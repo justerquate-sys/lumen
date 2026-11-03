@@ -100,7 +100,7 @@ impl Req {
 /// carry whole. Only names YouTube knows today: an unknown name is an HTTP 400 for the whole request.
 macro_rules! next_rel {
     () => {
-        "lockupViewModel(contentId,contentType,contentImage,metadata/lockupMetadataViewModel(title,image,metadata),rendererContext/commandContext),\
+        "lockupViewModel(contentId,contentType,contentImage,metadata/lockupMetadataViewModel(title,image,metadata),rendererContext(commandContext,loggingContext/loggingDirectives/trackingParams)),\
          compactVideoRenderer,compactRadioRenderer,compactPlaylistRenderer,continuationItemRenderer,reelShelfRenderer,shelfRenderer"
     };
 }
@@ -110,7 +110,7 @@ macro_rules! next_rel {
 /// keeps everything `parse::next`, `actions::watch::parse`, `features::upnext::parse`, `parse::ctx`
 /// and the topbar read (a unit test parses fixtures masked and whole and compares); what it drops
 /// is never rendered: the end screen, the structured-description panel, ticket and merchandise
-/// shelves, the lockups' menus and colour palettes, tracking.
+/// shelves, the lockups' menus and colour palettes, tracking (except each lockup's own tracking id: the "shown" signals).
 pub const NEXT_FIELDS: &str = concat!(
     "responseContext,currentVideoEndpoint,topbar,frameworkUpdates,",
     "contents/twoColumnWatchNextResults(",

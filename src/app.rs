@@ -664,7 +664,7 @@ impl App {
         // Home is YouTube's own Home document, as a reload of its page asks for it (`crate::homedoc`).
         if matches!(&req, Req::Browse { id, params: None } if id == "FEwhat_to_watch") && self.doc_ok() {
             bridge::fetch_opts(id, "GET", crate::homedoc::URL, "", crate::homedoc::HEADERS, crate::homedoc::opts(low));
-            self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep: HOME_DOC });
+            self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep: HOME_DOC, unmasked: None });
             return id;
         }
         // Home goes out exactly as YouTube's web app sends it (window fields included).

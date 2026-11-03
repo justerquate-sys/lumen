@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Lumen (dev)",
-  "version": "0.11.0",
+  "name": "Lumen",
+  "version": "0.12.0",
   "description": "Your own YouTube front-end at youtube.com: Rust-rendered, fast, no bloat. Experimental.",
   "permissions": [
     "storage",
@@ -9,7 +9,6 @@
   ],
   "host_permissions": [
     "https://www.youtube.com/*",
-    "http://127.0.0.1:47321/*",
     "https://*.googlevideo.com/*",
     "https://sponsor.ajay.app/*",
     "https://api.deepgram.com/*"
@@ -86,6 +85,5 @@
   },
   "background": {
     "service_worker": "background.js"
-  },
-  "version_name": "0.11.0 (2613c61a3c790f8b)"
+  }
 }

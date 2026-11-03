@@ -424,7 +424,7 @@ impl App {
         self.hr.nav_doc = NavDoc::Waiting;
         self.mark("request");
         let sent = bridge::nav_response_start().clamp(0.0, bridge::now());
-        self.pending.insert(NAV_DOC, super::Pending { purpose: Purpose::Page { nav: self.nav }, sent, ep: super::HOME_DOC });
+        self.pending.insert(NAV_DOC, super::Pending { purpose: Purpose::Page { nav: self.nav }, sent, ep: super::HOME_DOC, unmasked: None });
         self.home_sent_at(NAV_DOC, sent);
         crate::telemetry::nav_field("doc", json!("navigation"));
     }

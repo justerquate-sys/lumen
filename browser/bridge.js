@@ -32,7 +32,7 @@ const YTC = (() => {
     depth++;
     try { return wasm_bindgen[name](...args); } catch (e) { console.error('[Lumen]', name, e); } finally { depth--; }
   };
-  let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null, shownWatch = null, held = null;
+  let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null, shownWatch = null, docHeld = null;
   const insert = (el, html) => {
     if (policy) el.insertAdjacentHTML('beforeend', policy.createHTML(html));
     else try { el.insertAdjacentHTML('beforeend', html); } catch { setHTML(el, el.innerHTML + html); }
@@ -200,12 +200,12 @@ const YTC = (() => {
         scan(false);
       });
       top.observe(root, { childList: true });
-      const end = () => { scan(true); top.disconnect(); sub.disconnect(); if (!done) { done = true; call('on_doc_script', kept.join('')); } held = null; };
-      held = { top, sub, end };
-      d.addEventListener('DOMContentLoaded', () => { if (held) end(); }, { once: true });
+      const end = () => { scan(true); top.disconnect(); sub.disconnect(); if (!done) { done = true; call('on_doc_script', kept.join('')); } docHeld = null; };
+      docHeld = { top, sub, end };
+      d.addEventListener('DOMContentLoaded', () => { if (docHeld) end(); }, { once: true });
     },
     // Stops the page's own document (its download and parsing); a `doc_hold` ends without answering.
-    page_stop() { if (held) { held.top.disconnect(); held.sub.disconnect(); held = null; } try { window.stop(); } catch {} },
+    page_stop() { if (docHeld) { docHeld.top.disconnect(); docHeld.sub.disconnect(); docHeld = null; } try { window.stop(); } catch {} },
     html(id, html) { const el = byId(id); if (el) setHTML(el, html); },
     append(id, html) { const el = byId(id); if (el) insert(el, html); },
     // Appends into the closest `sel` ancestor of the element under the pointer.
