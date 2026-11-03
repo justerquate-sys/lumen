@@ -480,6 +480,10 @@ pub struct Own {
     caps_keys: HashMap<u32, String>,
     /// Throttle episodes (`hedge.rs`).
     thr: hedge::Thr,
+    /// The player box's height in device pixels (0 = not read yet) and when it was read: read on
+    /// the tick, at most once a second, never in the click task.
+    box_h: f64,
+    box_at: f64,
     /// Hover-prefetched first requests (`pre.rs`): taken only while the streams are chosen,
     /// answered right after.
     pre_ok: bool,
@@ -697,6 +701,8 @@ impl Own {
             caps_wait: false,
             caps_keys: HashMap::new(),
             thr: hedge::Thr::default(),
+            box_h: 0.0,
+            box_at: f64::NEG_INFINITY,
             pre_ok: false,
             pre_ready: Vec::new(),
             pt: tel::PTel::default(),
@@ -1132,11 +1138,12 @@ impl Own {
         if self.prefs.quality > 0 {
             return self.prefs.quality;
         }
-        let s = bridge::size(ui::BOX);
-        let h = if s.len() == 3 { s[1].min(s[0] * 9.0 / 16.0) * s[2] } else { 720.0 };
+        // No layout read here: this runs in the click task right after the watch page was written,
+        // where each `bridge::size` forced a layout (boot builder, 3 Nov 2026: 5 calls ≈ 13 ms, 52 ms
+        // at 4× CPU). The screen decides the cap; the player box (read on the tick) can only raise it.
         let d = bridge::screen_px();
         let screen = if d.len() == 3 { d[1].min(d[0] * 9.0 / 16.0) * d[2] } else { 1080.0 };
-        let cap = formats::display_cap(screen, h);
+        let cap = formats::display_cap(screen, self.box_h);
         let cap = if self.drop_cap > 0 { cap.min(self.drop_cap) } else { cap };
         self.thr_cap().map_or(cap, |t| cap.min(t))
     }
@@ -2515,8 +2522,15 @@ impl Own {
             self.setup_mse();
         }
         self.pump_all();
-        // Re-check quality every second, also while paused or fully buffered.
         let now_ms = bridge::now();
+        if now_ms - self.box_at > 1000.0 {
+            self.box_at = now_ms;
+            let s = bridge::size(ui::BOX);
+            if s.len() == 3 {
+                self.box_h = s[1].min(s[0] * 9.0 / 16.0) * s[2];
+            }
+        }
+        // Re-check quality every second, also while paused or fully buffered.
         if self.first_frame.is_some() && now_ms - self.abr_at > 1000.0 {
             self.abr_at = now_ms;
             self.abr();

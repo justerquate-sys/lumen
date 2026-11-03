@@ -355,6 +355,10 @@ captions and the watch-history URLs.
   as soon as a VISIONOS response is prefetched (`warm_caps`); a first video whose answers are missing
   waits for them at most 150 ms (seen: 2–55 ms), so no request goes to a codec that is about to be
   ruled out (before: up to 4 video heads in parallel, two of them wasted).
+- *No layout read in the click task*: the quality cap comes from the screen; the player box (which
+  can only raise it) is read on the player's tick, at most once a second. Before, `limit()` read the
+  box five times right after the watch page was written, each a forced layout (≈ 13 ms, 52 ms at 4×
+  CPU throttling; found by the boot work on 3 Nov 2026).
 - *Hover media prefetch* (`own/pre.rs`): when the pointer has rested on a video link 150 ms past its
   VISIONOS answer, the index + up to 1 MB of segment 0 of exactly the formats the player will choose
   (same ladder, decodingInfo, size cap and ABR) are fetched; the click then appends at once (a body still
