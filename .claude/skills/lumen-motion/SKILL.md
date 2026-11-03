@@ -112,6 +112,10 @@ because clip-path also clips hit-testing (rows must take clicks on the opening f
   Flip it on keydown/pointerdown instead (`#ytc-search.now`).
 - A layout read (`morph_vars`, `rect`) after `innerHTML` gives the new content its first style right there:
   `@starting-style` rules keyed on a class you add afterwards never apply. Read first, then write, then flip.
+- A morph never scales a picture past its own resolution (3 Nov 2026, the owner on the watch-open zoom: "the
+  preview in super bad quality"). The thumbnail → player zoom grows the video's own first frame, decoded while
+  the pointer or focus rested on the link (`player/own/warm.rs`), or the dark player surface until the first
+  frame; never the 320 px card thumbnail stretched to the player.
 - A clipped surface that outruns its content: drive the clip with `--e-out` (front-loaded) and delay the rows'
   fade a little, so content never shows outside the surface. Check with slowed screenshots
   (`Animation.setPlaybackRate`), not by eye at full speed.

@@ -326,6 +326,9 @@ body{overscroll-behavior:none;overflow-x:clip}
 .player{position:relative;aspect-ratio:16/9;background:#000;border-radius:var(--r-card);overflow:clip}
 .player.own{user-select:none;-webkit-user-select:none;container-type:size}
 .player.own video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+/* The warm first frame (own/warm.rs): the video's own first frame, drawn while the pointer or focus rested on its
+   link, over the <video> until the player presents that frame itself; never a thumbnail scaled up. */
+.player.own .pwf{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
 .player:fullscreen{border-radius:0}
 .watch.theater{grid-template-columns:minmax(0,1fr)}
 .watch.theater .wp{max-width:calc((100vh - 60px) * 16 / 9)}.watch.theater .wr{width:100%;max-width:calc((100vh - 60px) * 16 / 9);margin:0 auto}

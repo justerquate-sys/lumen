@@ -235,7 +235,7 @@ pub fn webm_covered(b: &[u8]) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -280,7 +280,7 @@ mod tests {
     }
 
     /// moof (tfhd default-base-is-moof, trun with data offset + durations + sizes) + mdat.
-    fn fragment(samples: &[(u32, u32)]) -> Vec<u8> {
+    pub(crate) fn fragment(samples: &[(u32, u32)]) -> Vec<u8> {
         let tfhd = bx(b"tfhd", &[0, 0x02, 0, 0, 0, 0, 0, 1]);
         let mut trun_body = vec![0, 0, 0x03, 0x01];
         trun_body.extend_from_slice(&(samples.len() as u32).to_be_bytes());

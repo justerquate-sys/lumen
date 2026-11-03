@@ -29,8 +29,10 @@ mod pre;
 mod sb;
 mod stream;
 mod tel;
+mod warm;
 
 pub use pre::{pre_answer, pre_cancel, pre_progress, prefetch_media};
+pub use warm::{warm_keep, warm_media, warm_take, warm_timer, warm_try};
 
 /// What the app needs from a request: session values and the page.
 pub struct Ctx<'a> {
@@ -276,6 +278,8 @@ enum Tm {
     Sb(sb::SbTm),
     /// The seek bar's pointer rested (`stream.rs`, generation).
     SeekPre(u32),
+    /// The first frame is on screen: the warm first frame's canvas (`warm.rs`) goes.
+    Poster,
 }
 
 struct Rep {
@@ -528,6 +532,8 @@ pub struct Own {
     /// answered right after.
     pre_ok: bool,
     pre_ready: Vec<(u32, usize, u32, Vec<u8>)>,
+    /// The warm first frame's canvas over the `<video>` until the player's own first frame shows (`warm.rs`).
+    poster: Option<String>,
     /// Speed telemetry (`tel.rs`).
     pt: tel::PTel,
 }
@@ -752,6 +758,7 @@ impl Own {
             box_at: f64::NEG_INFINITY,
             pre_ok: false,
             pre_ready: Vec::new(),
+            poster: None,
             pt: tel::PTel::default(),
         }
         .with_tel()
@@ -842,6 +849,23 @@ impl Own {
         bridge::media_call(self.vid, "play");
         self.timer(Tm::Tick, TICK_MS);
         self.ui();
+    }
+
+    /// The warm first frame (`warm.rs`, a canvas held by the bridge) goes over the `<video>` until the first
+    /// frame shows: the open's zoom grows the real picture, sharp, instead of a thumbnail or a dark box.
+    pub fn warm_poster(&mut self, id: String) {
+        if bridge::held_put(&id, ui::VIDEO) {
+            self.note(format!("warm first frame shown ({id})"));
+            self.poster = Some(id);
+        } else {
+            bridge::held_drop(&id);
+        }
+    }
+
+    fn drop_poster(&mut self) {
+        if let Some(id) = self.poster.take() {
+            bridge::held_drop(&id);
+        }
     }
 
     /// Preferences loaded after the player was created (storage is async).
@@ -2414,6 +2438,14 @@ impl Own {
                     let ms = now - self.nav_start;
                     self.first_frame = Some(ms);
                     bridge::mark("ytcFirstFrame");
+                    if self.poster.is_some() {
+                        // The canvas shows the same picture: it goes once the video has presented it
+                        // (or after a second, should no frame be presented, e.g. in a hidden tab).
+                        let id = next_id();
+                        self.timers.insert(id, Tm::Poster);
+                        bridge::media_frame(self.vid, id);
+                        self.timer(Tm::Poster, 1000);
+                    }
                     self.tel_first_frame();
                     self.note(format!("first frame ({:.0} ms after the streams were chosen)", now - self.streams_at));
                 }
@@ -2553,6 +2585,7 @@ impl Own {
             return true;
         }
         match t {
+            Tm::Poster => self.drop_poster(),
             Tm::Tick => {
                 self.tick();
                 if !self.failed {
@@ -4213,6 +4246,7 @@ impl Own {
         }
         self.fetches.retain(|_, f| matches!(f.req, Req::Ping));
         self.timers.clear();
+        self.drop_poster();
         if self.vid != 0 {
             bridge::media_call(self.vid, "pause");
             bridge::media_reset(self.vid);

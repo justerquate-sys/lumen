@@ -1189,6 +1189,9 @@ impl App {
             return;
         }
         if !self.timers.contains_key(&id) {
+            if player::own::warm_timer(id) {
+                return;
+            }
             if let Some(p) = self.player.as_mut() {
                 if p.on_timer(id) {
                     self.after_player();
@@ -1346,6 +1349,8 @@ impl App {
         }
         let Some(body) = self.vision_cached(v) else { return };
         let start = self.fx_resume(v).or_else(|| self.resume.get(v).copied()).unwrap_or(0.0);
+        // Its media came with an earlier rest: the first frame can be decoded now.
+        self.warm_frame(v);
         if !player::own::prefetch_media(v, &body, &self.cfg.prefs, self.bw.bps, start) && n < 2 {
             let id = self.timer(Timer::MediaPre(v.to_string(), n + 1));
             bridge::timer(id, MEDIA_PRE_MS);
@@ -1363,6 +1368,9 @@ impl App {
         };
         let here = if let Route::Watch { v, .. } = &self.route { v.clone() } else { String::new() };
         player::own::pre_cancel(&[&v, &here]);
+        if !v.is_empty() {
+            player::own::warm_keep(&[&v]);
+        }
         self.intent_v = v;
         match route::parse(href) {
             Some(Route::Watch { v, list, .. }) => {
@@ -1477,6 +1485,7 @@ impl App {
         // pointer changes when focus scrolls the page under a still pointer).
         if !next.is_empty() {
             self.intent_v.clear();
+            player::own::warm_keep(&[&next]);
         }
         player::own::pre_cancel(&[&next, &here, &self.intent_v]);
         self.hover.clear();
@@ -1966,7 +1975,8 @@ impl App {
     }
 
     pub fn on_fetch(&mut self, id: u32, status: u32, body: &[u8]) {
-        if player::own::pre_answer(id, status, body) {
+        if let Some(v) = player::own::pre_answer(id, status, body) {
+            self.warm_frame(&v);
             return;
         }
         // Hedged reads: the first good answer of the two copies is handled as the original.
@@ -2559,6 +2569,11 @@ impl App {
         // parallel recovery); blocked again → the panel, whose Try again recovers fully.
         p.no_recover = self.vision_block_until > bridge::now();
         p.attach();
+        // The first frame decoded while the pointer or focus rested on the link: the box shows it from the
+        // open's first frame (the zoom grows the real picture); anything else warm is dropped.
+        if let Some(id) = player::own::warm_take(v) {
+            p.warm_poster(id);
+        }
         self.player = Some(p);
         self.tv_mounted(v);
         self.player_wait = true;
@@ -2802,6 +2817,9 @@ impl App {
     }
 
     pub fn on_media(&mut self, h: u32, ev: &str) {
+        if player::own::warm_media(h, ev) {
+            return;
+        }
         if let Some(p) = self.player.as_mut() {
             p.on_media(h, ev);
             self.after_player();

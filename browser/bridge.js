@@ -9,6 +9,8 @@ const YTC = (() => {
   const ctl = new Map();
   // Media objects (video elements, MediaSources, SourceBuffers) by numeric handle.
   const mo = new Map();
+  // Elements made outside the document for Rust to place later (`media_grab`), by id.
+  const held = new Map();
   const sx = {}; // last sideways scroll position per scroller id (wheel_x)
   const evt = (h, type) => call('on_media', h, type);
   const path = (o, p) => p.split('.').reduce((x, k) => (x == null ? x : x[k]), o);
@@ -909,6 +911,33 @@ const YTC = (() => {
     },
     media_reset(h) { const v = mo.get(h); if (v && v.removeAttribute) { v.removeAttribute('src'); try { v.load(); } catch {} } },
     media_free(h) { mo.delete(h); },
+    // A new <video> (muted, inline) as handle `h`, not in the document; each listed event calls on_media(h, type).
+    media_video_new(h, events) {
+      const el = d.createElement('video'); el.muted = true; el.playsInline = true; el.preload = 'auto';
+      mo.set(h, el);
+      for (const t of events.split(',')) el.addEventListener(t, () => evt(h, t));
+    },
+    // Draws the frame video `h` has now into a new <canvas id class> (its size, at most `max_w` px wide), held
+    // outside the document until `held_put` places it; false when there is no frame to draw.
+    media_grab(h, id, cls, max_w) {
+      const v = mo.get(h); if (!v || v.readyState < 2 || !v.videoWidth || !v.videoHeight) return false;
+      const k = Math.min(1, max_w / v.videoWidth), c = d.createElement('canvas');
+      c.width = Math.max(1, Math.round(v.videoWidth * k)); c.height = Math.max(1, Math.round(v.videoHeight * k));
+      c.id = id; c.className = cls; c.setAttribute('aria-hidden', 'true');
+      try { const g = c.getContext('2d', { alpha: false }); g.imageSmoothingQuality = 'high'; g.drawImage(v, 0, 0, c.width, c.height); } catch { return false; }
+      held.set(id, c);
+      return true;
+    },
+    // Calls on_timer(id) once video `h` has presented a frame to the screen (requestVideoFrameCallback; else the next frame).
+    media_frame(h, id) {
+      const v = mo.get(h); if (!v) return;
+      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(() => call('on_timer', id));
+      else requestAnimationFrame(() => setTimeout(() => call('on_timer', id), 0));
+    },
+    // A held element (`media_grab`) goes right after element `after`; false when either is missing.
+    held_put(id, after) { const el = held.get(id), a = byId(after); if (!el || !a) return false; a.after(el); return true; },
+    // Forgets held element `id` and takes it out of the document.
+    held_drop(id) { const el = held.get(id); held.delete(id); if (el) el.remove(); },
     // ---- wheel to choose (player Speed/Quality): a wheel over a `[data-wheel]` inside `id` never scrolls the
     // page (nor swipes history); it reports on_wheel(name, dy px, notches). `notches` counts a mouse wheel's clicks
     // (+ down): lines (Firefox), or Chrome's wheelDeltaY in whole 120s that is not a precise device's −3×deltaY;

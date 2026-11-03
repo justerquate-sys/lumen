@@ -1340,7 +1340,9 @@ chrome.runtime.onMessage.addListener(m => {
     const assets = log.assets.length, mark0 = log.api.length;
     await page.goto('https://www.youtube.com/watch?v=aqz-KE-bpKQ', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-video');
-    assert.equal(await page.getAttribute('#ytc-video', 'poster'), 'https://i.ytimg.com/vi_webp/aqz-KE-bpKQ/mqdefault.webp', 'thumbnail poster at once');
+    // A cold page has no warm first frame: the dark player surface until the first frame, never the 320 px thumbnail scaled up.
+    assert.equal(await page.getAttribute('#ytc-video', 'poster'), null, 'no thumbnail poster');
+    assert.equal(await page.locator('#ytc-player img, #ytc-player .pwf').count(), 0, 'no still in the player box');
     // The caption cue's quick fade-in (a cue at 0 s can show before the first frame) is not a loading indicator.
     assert.equal(await page.evaluate(() => [...document.querySelectorAll('#ytc-player *:not(#ytc-cc)')].filter(e => getComputedStyle(e).animationName !== 'none').length), 0, 'no loading spinner/animation in the player');
     await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 8000);
@@ -2641,6 +2643,62 @@ chrome.runtime.onMessage.addListener(m => {
     await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 8000);
     const after = log.gv.filter(g => g.v === 'mediapre001').slice(2);
     assert.ok(!after.some(g => g.a === 0), 'the prefetched first requests were used, not asked again: ' + JSON.stringify(after));
+  });
+
+  // The warm first frame (own/warm.rs): the zoom shows the video's own first frame, never a thumbnail scaled up.
+  // Watches the warm marks (decoders alive, frames made) and what enters the player box while it opens.
+  const warmWatch = pg => pg.evaluate(() => {
+    const d = document.documentElement, w = window.__warm = { live: [], states: [], added: [] };
+    new MutationObserver(() => { w.live.push(+d.dataset.ytcWarmLive || 0); w.states.push(d.dataset.ytcWarm || ''); }).observe(d, { attributes: true, attributeFilter: ['data-ytc-warm', 'data-ytc-warm-live'] });
+    new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1 && n.closest('#ytc-player')) {
+      const v = document.getElementById('ytc-video'), f = n.matches('canvas.pwf') ? n : null, x = f && f.getContext('2d').getImageData(0, 0, f.width, f.height).data;
+      let lit = 0; if (x) for (let i = 0; i < x.length; i += 4) if (x[i] + x[i + 1] + x[i + 2] > 30) lit++;
+      w.added.push({ tag: n.tagName, cls: n.className, w: f && f.width, h: f && f.height, lit: x ? lit / (x.length / 4) : null, afterVideo: n.previousElementSibling === v,
+        poster: v && v.getAttribute('poster'), imgs: document.querySelectorAll('#ytc-player img').length, zooming: !!document.getElementById('ytc-player')?.getAnimations().some(a => a.id === 'flip'),
+        frameShown: !!d.dataset.ytcFirstFrame && +d.dataset.ytcFirstFrame > 0 && v && v.readyState >= 2 });
+    } }).observe(document.body, { childList: true, subtree: true });
+  });
+  const warmState = pg => pg.evaluate(() => ({ s: document.documentElement.dataset.ytcWarm || '', now: +document.documentElement.dataset.ytcWarmLive || 0, made: +document.documentElement.dataset.ytcWarmMade || 0, ...window.__warm }));
+  await step('open: resting on a card decodes its first frame from the prefetch (no request, decoder released at once); the click zooms that frame, sharp (no thumbnail poster), and the player\'s own frame takes over; one warm frame at a time, dropped when intent moves', async () => {
+    await page.goto('https://www.youtube.com/results?search_query=warm+first+frame', { waitUntil: 'commit' });
+    await page.waitForSelector('#ytc-list .c[data-v] a.th');
+    await page.mouse.move(2, 2);
+    const ids = ['warmfrm0001', 'warmfrm0002'];
+    await page.evaluate(ids => { const cs = document.querySelectorAll('#ytc-list .c[data-v]'); ids.forEach((v, i) => cs[i].querySelectorAll('a[href^="/watch"]').forEach(a => a.setAttribute('href', '/watch?v=' + v))); }, ids);
+    await warmWatch(page);
+    const g0 = log.gv.length, mine = v => log.gv.slice(g0).filter(g => g.v === v);
+    const thumb = i => page.locator('#ytc-list .c[data-v] a.th').nth(i);
+    await thumb(0).hover();
+    await page.waitForFunction(v => document.documentElement.dataset.ytcWarm === 'ready:' + v, ids[0], { timeout: 6000 });
+    let w = await warmState(page);
+    assert.equal(mine(ids[0]).length, 2, 'only the media prefetch\'s two requests (the warm decode fetches nothing): ' + JSON.stringify(mine(ids[0])));
+    assert.equal(w.now, 0, 'the warm decoder is released once its frame is drawn');
+    // Intent moves to another card: the first warm frame goes, the second is decoded; never two decoders.
+    await thumb(1).hover();
+    await page.waitForFunction(v => document.documentElement.dataset.ytcWarm === 'ready:' + v, ids[1], { timeout: 6000 });
+    w = await warmState(page);
+    assert.ok(Math.max(...w.live) <= 1, 'one warm decoder at a time: ' + w.live);
+    const i1 = w.states.findIndex(x => x.endsWith(ids[1]));
+    assert.ok(i1 > 0 && !w.states.slice(i1).some(x => x.endsWith(ids[0])), 'the first card\'s frame dropped when intent moved: ' + w.states);
+    // Back on the first card: decoded again from its kept prefetch (no request), then a pointer click opens it.
+    await thumb(0).hover();
+    await page.waitForFunction(v => document.documentElement.dataset.ytcWarm === 'ready:' + v, ids[0], { timeout: 6000 });
+    const made = (await warmState(page)).made;
+    const tc = Date.now();
+    const b = await thumb(0).boundingBox();
+    await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+    await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 8000);
+    await page.waitForFunction(() => !document.querySelector('#ytc-player .pwf'), null, { timeout: 3000 });
+    w = await warmState(page);
+    const f = w.added.find(a => a.tag === 'CANVAS');
+    assert.ok(f, 'the warm frame entered the player box: ' + JSON.stringify(w.added));
+    assert.ok(f.cls === 'pwf' && f.afterVideo && f.zooming && !f.frameShown, 'over the <video>, while the box zooms, before the player\'s own first frame: ' + JSON.stringify(f));
+    assert.ok(f.w >= 640 && f.h >= 360 && f.lit > 0.5, 'the video\'s own first frame at its resolution (640×360 fixture): ' + JSON.stringify(f));
+    assert.ok(w.added.every(a => !a.poster && !a.imgs), 'no thumbnail poster or image in the zooming box: ' + JSON.stringify(w.added));
+    assert.equal(w.s, 'used:' + ids[0]);
+    assert.equal(w.made, made, 'nothing decoded again at the click');
+    assert.ok(!mine(ids[0]).some(g => g.t >= tc && g.a === 0), 'the prefetched first requests were used: ' + JSON.stringify(mine(ids[0]).map(g => [g.itag, g.a, g.b])));
+    assert.equal(await page.getAttribute('#ytc-video', 'poster'), null, 'no poster');
   });
 
   await step('own player: a media prefetch still loading is cancelled when the pointer leaves the link (no stray requests)', async () => {
@@ -5926,7 +5984,9 @@ chrome.runtime.onMessage.addListener(m => {
       await tv.waitForSelector('#ytc-list .c a.t');
       await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
       await tv.waitForTimeout(1500); // a fresh tab: the config refresh (visitor data) lands first
-      const g0 = log.gv.length; // this card may have played in an earlier step
+      const g0 = log.gv.length;
+      // Fresh ids: a card played in an earlier step resumes past its first segment (no warm first frame for it).
+      await tv.evaluate(() => document.querySelectorAll('#ytc-list .c').forEach((c, i) => c.querySelectorAll('a[href^="/watch"]').forEach(a => a.setAttribute('href', '/watch?v=tvwarm' + String(i).padStart(5, '0')))));
       await tv.keyboard.press('ArrowRight');
       const href = await tv.evaluate(() => document.activeElement.getAttribute('href'));
       const v = new URL(href, 'https://www.youtube.com').searchParams.get('v');
@@ -5935,8 +5995,16 @@ chrome.runtime.onMessage.addListener(m => {
       assert.equal(mine().filter(g => g.a === 0).length, 2, 'video + audio first media while focus rests: ' + JSON.stringify(mine()));
       assert.ok(log.warm.slice(w0).includes('rr1---sn-fixture.googlevideo.com'), 'warmed with /generate_204: ' + log.warm.slice(w0));
       assert.equal(await tv.evaluate(() => document.querySelectorAll('link[rel=preconnect][href*="googlevideo"]').length), 0, 'no <link rel=preconnect> on TV');
+      // The resting focus also decodes the first frame (its decoder released at once): OK shows it, not a thumbnail.
+      await tv.waitForFunction(v => document.documentElement.dataset.ytcWarm === 'ready:' + v, v, { timeout: 6000 });
+      await warmWatch(tv);
+      assert.equal((await warmState(tv)).now, 0, 'TV: no warm decoder kept');
       await tv.keyboard.press('Enter');
       await tv.waitForFunction(() => document.documentElement.dataset.ytcFirstFrame, null, { timeout: 8000 });
+      await tv.waitForFunction(() => !document.querySelector('#ytc-player .pwf'), null, { timeout: 3000 });
+      const w = await warmState(tv), f = w.added.find(a => a.tag === 'CANVAS');
+      assert.ok(f && f.afterVideo && !f.frameShown && f.w >= 640 && f.lit > 0.5 && w.added.every(a => !a.poster && !a.imgs), 'TV: OK shows the warm first frame, no thumbnail: ' + JSON.stringify(w.added));
+      assert.equal(w.s, 'used:' + v);
       assert.ok(!mine().slice(2).some(g => g.a === 0), 'the prefetched first requests were used: ' + JSON.stringify(mine().map(g => [g.itag, g.a, g.b, g.gen])));
     } finally {
       await tv.evaluate(() => localStorage.removeItem('ytc:platform')).catch(() => {});

@@ -137,6 +137,20 @@ impl App {
         }
     }
 
+    /// `v`'s first media is prefetched and the pointer or focus still rests on its link: decode its first
+    /// frame now (`player::own::warm_try`), so opening it zooms the real picture, not a thumbnail.
+    /// On TV there is no warm decode next to a player (hardware decoders are few).
+    pub(super) fn warm_frame(&mut self, v: &str) {
+        if !self.hovering(v) || matches!(&self.route, Route::Watch { v: w, .. } if w == v) || self.player.as_ref().is_some_and(|p| p.v == v) {
+            return;
+        }
+        if crate::tv::on() && self.player.is_some() {
+            return;
+        }
+        let start = self.fx_resume(v).or_else(|| self.resume.get(v).copied()).unwrap_or(0.0);
+        player::own::warm_try(v, start);
+    }
+
     /// The player switched theater mode: a pointer click morphs it from its
     /// old box (as painted now) into the new one; the `t` key is instant.
     pub(super) fn mo_theater(&mut self, on: bool) {

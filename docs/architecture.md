@@ -96,8 +96,9 @@ row) reads the thumbnail's viewport rect (`bridge::click_rect`, one layout read 
 is written exactly as before, and at the end of the same task `bridge::flip_from` paints `#ytc-player` from
 that rect to its own box: one compositor-only `element.animate` (translate + scale, origin top-left),
 easing = the critically damped spring from `motion.rs` over `--d-spring-soft` (458 ms). The player is final,
-playing and clickable from the first frame (its poster is the card's thumbnail, so the picture grows into
-place); `data-flip` lifts it above its neighbours while it moves. The skeleton areas that `next` fills
+playing and clickable from the first frame; what grows into place is the video's own first frame when the
+pointer rested on the link (the *warm first frame*, see "Start path"), else the dark player surface until the
+first frame (never the card's 320 px thumbnail scaled up); `data-flip` lifts it above its neighbours while it moves. The skeleton areas that `next` fills
 (description, playlist panel, Up next, related list; the whole info block when no card data was known)
 settle in with a 180 ms opacity fade. No morph and no fades for keyboard activation, `g`+letter, back/forward
 or restored pages (instant); no morph when the thumbnail is off-screen; reduced motion fades the player in
@@ -503,6 +504,28 @@ captions and the watch-history URLs.
   Focus counts like a resting pointer (the TV remote, keyboard focus): the bridge reports a link's
   `focusin` as intent in a microtask, since focus moved by Rust itself (`spatial_focus`) fires inside
   that call; a link whose VISIONOS response is already cached starts the dwell at once.
+- *Warm first frame* (3 Nov 2026, `own/warm.rs`; the owner: "ideally it should just be the start of the video
+  already, without the preview"): once that prefetch's video body is in and the pointer or focus still rests on
+  the link, a muted `<video>` outside the document with its own MediaSource decodes the first frame from those
+  bytes (no request; only when the start point lies in what came along, `warm::frame_bytes`), the frame is drawn
+  into a canvas at the video's resolution (≤ the screen's width in device pixels) and the decoder is released at
+  once (it lives ~10–50 ms). The click puts the canvas over the player's `<video>` (`Own::warm_poster`), so the
+  zoom grows the real, sharp first frame; when the player has presented its own first frame (the same picture,
+  `requestVideoFrameCallback`) the canvas goes. One warm frame at a time; another video under the pointer or
+  focus drops it, so does a minute without a click; at the mount anything else warm is dropped; on TV no warm
+  decode runs next to a player.
+  Without one (no rest, a resume point past the first segment, a cold page, keyboard without a rest) the box
+  is the dark surface until the first frame. Many videos open on black (a fade-in: frame 0 is black, live
+  3 Nov 2026 on Big Buck Bunny, nature reels, MKBHD, even Rick Astley's single first frame), so for them the
+  warm frame is black too, which is what playback starts with. *Evaluated, not used:* adopting the warm
+  `<video>` as the player: Chromium keeps an MSE `<video>` playing when it moves between parents in one task
+  (detaching it for a task pauses it, the MediaSource stays open), but it needs a second player state machine
+  running hidden and holds a (TV hardware) decoder for as long as the pointer rests, for the same picture.
+  Measured 3 Nov 2026 (live, signed out, Chromium on macOS): the decode takes 8–15 ms (54 ms for the first, decoder
+  start-up included), no long animation frame while it runs, a 1920×1080 canvas (~8 MB) for a 1080p start;
+  first frame (`video.cjs --starts`, interleaved with 0.11.0, n = 20 each, p50 / p90 ms): hovered 55 / 59 →
+  58 / 61, quick 142 / 230 → 169 / 246, SPA 312 / 382 → 264 / 375, cold 430 / 480 → 453 / 525 (cold runs none of
+  this code: ±25 ms is the noise of the run).
 - *HDR only on an HDR screen*: HDR formats count as not smooth unless `(dynamic-range: high)`
   matches, so an SDR screen gets the SDR format of each rung (decodingInfo is also asked with an HDR
   format's transfer function and BT.2020). Live 3 Nov 2026 on the Android TV emulator decodingInfo
@@ -542,8 +565,9 @@ Controls (24 px outline icons): play/pause, mute + volume, time, then the shortc
 when off, filled cut-out letters when on: the old extension's artwork), **Speed** (shows the rate as text:
 `1×`, `1.25×`), **Quality** (shows the rung playing now in a small frame: `360`, `1440`, `4K`), theater,
 fullscreen. The text buttons have a fixed width, so a label change never moves the toolbar. **No loading
-indicator** (1 Nov 2026): the video's thumbnail (the card's `vi_webp/…/mqdefault.webp`, usually
-already cached) is the poster at the final geometry until the first frame replaces it. The three shortcuts **open on hover** (16 ms intent; leaving closes
+indicator** (1 Nov 2026) **and no poster** (3 Nov 2026): the box shows the warm first frame (below) or is the
+dark player surface at the final geometry until the first frame; the card's `mqdefault` thumbnail (320 px, a
+different picture from the video's start) is no longer scaled up to the player. The three shortcuts **open on hover** (16 ms intent; leaving closes
 after 400 ms, or 180 ms once the pointer was in the menu; travel with a button held is not intent and a
 held slider is never dismissed). In CC hover never selects anything; **Speed and Quality choose with zero clicks**
 (since 2 Nov 2026, see below). A click pins a menu (a second click, Esc
@@ -750,6 +774,7 @@ Other modules plug into the markup without editing `render.rs` or the player:
 | `data-hov` / `data-arg` | any element | The bridge reports the hovered zone to `on_hov(zone, arg, held)`; `MenuCtl` in `player/ui.rs` is a ready-made intent/grace state machine for hover-open popovers (the Filters and Save menus reuse it with their own timings). |
 | `bridge::focus_in(id, delta)`, `bridge::focus_grid(id, sel, delta)` | keyboard | Focus the selected/first/next control in a popover; roving focus over a list (±1, ±1000 = one row). |
 | `bridge::morph_vars(btn, pop)` | motion | A popover grows out of its trigger: writes the trigger's box relative to the panel (`--bw --bh --br --up --bx`) on the panel; client.css clips the panel's surface from it. Layout offsets, read once at a pointer open (before the content is written) or close. |
+| `bridge::media_video_new(h, events)`, `bridge::media_grab(h, id, cls, max_w)`, `bridge::media_frame(h, id)`, `bridge::held_put(id, after)`, `bridge::held_drop(id)` | media | A `<video>` outside the document; its current frame drawn into a canvas held by the bridge until Rust places it after an element (or drops it); `on_timer(id)` once a video has presented a frame. |
 | `bridge::click_rect(scope, inner)`, `bridge::rect(id)`, `bridge::flip_from(id, x, y, w, h, easing, ms)`, `bridge::fade_in(id, easing, ms)` | motion | Shared-element morphs (FLIP): read the source rect before a swap, write the page, then paint the destination from that rect (compositor-only). `fade_in` only on content just written. Easings/durations come from `motion.rs`. |
 | `bridge::stagger(id, sel, sub, max, step, dy, easing, ms)`, `bridge::nudge(id, dy, easing, ms)`, `bridge::pill_slide(scope, from, to, cls, easing, ms)`, `bridge::pill_carry(scope)`, `bridge::flip_mark(scope, sel)`, `bridge::flip_play(scope, sel, easing, ms, out)` | motion | Entrance wave over freshly written items (no layout read); a persistent element's new text sliding in; a selection pill sliding between two items of a row (an empty `to` stops a running slide; `pill_carry` after re-rendering the row); reflow FLIP around a re-render that removes/moves items (keyed by `data-k`, else text). Reads happen only at the click. |
 | `bridge::wheel(id, name)` → `on_wheel(name, dir)`, `bridge::read_value(id)` | input | Wheel notches over one element (−1 up / 1 down; trackpad deltas add up to a 50 px notch; a handled one does not scroll the page; Ctrl/⌘ stays zoom), bound once per element. The `value` of a textarea/input (the import paste box). |
@@ -809,7 +834,7 @@ created. Importing twice is harmless (the second run merges into the same record
 | `src/description.rs` | Pure port of the old extension's description rules (`resource`, line walk, bare-link labels), unit-tested case for case against the old extension's cases. |
 | `src/render.rs` | HTML strings; every text/attribute escaped; one `innerHTML` per region; event delegation on the document. |
 | `src/player.rs` | The player boundary (the app only talks to this): markup for the player box, the manual Open on YouTube URL, and `Own`; `player/fail.rs` the failure panel, its messages and the stuck episodes' retry schedule. |
-| `src/player/own.rs` | Our player's state machine: VISIONOS + WEB `player` calls, format choice, index fetch (with the start of the first segment in the same request), hover media prefetch (`own/pre.rs`), hedging and throttle recovery (`own/hedge.rs`), per-track fetch/append queues, seek, quality/codec switch (`changeType`), eviction, end of stream, 403 → one refresh, retries, stall/first-frame watchdogs, captions, pings, controls and keys. |
+| `src/player/own.rs` | Our player's state machine: VISIONOS + WEB `player` calls, format choice, index fetch (with the start of the first segment in the same request), hover media prefetch (`own/pre.rs`) and the warm first frame (`own/warm.rs`), hedging and throttle recovery (`own/hedge.rs`), per-track fetch/append queues, seek, quality/codec switch (`changeType`), eviction, end of stream, 403 → one refresh, retries, stall/first-frame watchdogs, captions, pings, controls and keys. |
 | `src/player/{formats,index,sched,stats,captions,storyboard,throttle,ui}.rs` | Pure, unit-tested parts: when YouTube is slow (hedge deadlines, the throttle verdict, escalation order, the drop rung and its hold); storyboard spec parsing, level choice and frame/cell math (real WEB spec fixture `player_web_storyboard.json`); format ladder (codec order by `isTypeSupported`, size cap = player height × devicePixelRatio with 20 % slack, throughput ABR at 70 % with a 1080p floor; the ≤ 360p start rung is used by live streams only); MP4 `sidx` and WebM `Cues` parsing; buffer decisions (30 s ahead, evict 60 s behind, seek resume, gap-free switch cut); history ping URLs as base.js `Q4a` builds them (`s.youtube.com` → `www.youtube.com` like the web player's `vss_host`); json3 captions; control markup, the three menus and the hover-menu state machine (`MenuCtl`). |
 | `src/app.rs` | State: navigation (pushState/popstate), request lifecycle (stale responses dropped, aborts), feed queue (shown / preloaded / continuation, generation-checked), idle preloading, snapshots (stale-while-revalidate), hover prefetch, previews, suggestions, in-memory caches. |
 | `src/actions/` | Watch-page actions, comments, chapters, notifications, account menu: `watch.rs` (like/subscribe/comment-token/chapter data from `next`, row markup), `comments.rs` (both comment formats, markup), `save.rs` (playlist membership from `get_add_to_playlist`, chooser), `notify.rs` (topbar count/avatar, notification list, account menu), `req.rs` (request bodies, outcome/reason), `toggle.rs` (optimistic state: one request in flight, queue a change of mind, roll back on failure), `mod.rs` (state, popovers, timers, responses). Unknown comment items are counted (debug overlay line `acts`). |
