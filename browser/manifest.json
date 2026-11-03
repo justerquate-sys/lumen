@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lumen",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Your own YouTube front-end at youtube.com: Rust-rendered, fast, no bloat. Experimental.",
   "permissions": [
     "storage",
