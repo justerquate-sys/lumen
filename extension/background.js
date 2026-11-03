@@ -4,6 +4,73 @@
 // auto-reload and the debug-center delivery.
 'use strict';
 
+// ---- Auto-update (development builds). Open YouTube tabs ping this worker. When the files on
+// disk change (browser/build.cjs rewrites build-id.txt on every dev build) the extension reloads
+// itself; each open tab then notices its old script was invalidated and refreshes into the new
+// build, waiting while a video plays (see browser/build.cjs).
+const read = () => fetch(chrome.runtime.getURL('build-id.txt'), { cache: 'no-store' }).then(r => r.text()).then(t => t.trim()).catch(() => '');
+// The build the browser loaded (baked into the manifest at build time). Reading
+// build-id.txt at worker start would miss updates made while the worker slept.
+const loadedId = (/\(([0-9a-f]{16})\)$/.exec(chrome.runtime.getManifest().version_name || '') || [])[1] || '';
+const loaded = Promise.resolve(loadedId);
+
+// ---- Debug center (development builds). The Rust app reports incidents (player fallbacks,
+// InnerTube errors, panics, boot failures) and speed telemetry batches (`kind: "perf"`,
+// schema 2) as JSON. Incidents are kept here (last 100), telemetry batches in their own queue
+// (last 30, removed once delivered, so they never push an incident out), and both are delivered
+// to the local collector (tools/debug-center, 127.0.0.1:47321), which appends them to its
+// incidents file. chrome.storage.local `ytcCollectorV1` may name another collector URL (the e2e
+// test points it at its own). The public build has none of this: it keeps and sends nothing.
+const KEY = 'ytcIncidentsV1', MAX = 100, PERF_KEY = 'ytcPerfQueueV1', PERF_MAX = 30, URL_KEY = 'ytcCollectorV1', COLLECTOR = 'http://127.0.0.1:47321/incident';
+const manifest = chrome.runtime.getManifest();
+// Every report carries the build it came from (the debug center groups by it).
+const BUILD = manifest.version_name || manifest.version;
+const stampBuild = json => json.startsWith('{') && !json.startsWith('{"build":') ? '{"build":' + JSON.stringify(BUILD) + ',' + json.slice(1) : json;
+// Storage writes run one at a time (two reports arriving together must both be kept).
+let chain = Promise.resolve();
+let flushing = false, again = false;
+async function flush() {
+  if (flushing) { again = true; return; }
+  flushing = true; again = false;
+  try {
+    const got = await chrome.storage.local.get([KEY, PERF_KEY, URL_KEY]);
+    const url = got[URL_KEY] || COLLECTOR, sent = new Set();
+    outer: for (const k of [KEY, PERF_KEY]) for (const item of got[k] || []) {
+      if (item.sent) continue;
+      try {
+        const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: item.json });
+        if (!r.ok) break outer;
+        sent.add(item.json);
+      } catch { break outer; }
+    }
+    if (!sent.size) return;
+    // Re-read in the write queue: reports stored meanwhile must stay.
+    await (chain = chain.then(async () => {
+      const now = await chrome.storage.local.get([KEY, PERF_KEY]);
+      await chrome.storage.local.set({
+        [KEY]: (now[KEY] || []).map(i => sent.has(i.json) ? { ...i, sent: true } : i),
+        [PERF_KEY]: (now[PERF_KEY] || []).filter(i => !sent.has(i.json)),
+      });
+    }).catch(() => {}));
+  } finally { flushing = false; if (again) flush(); }
+}
+function store(json, key, max) {
+  chain = chain.then(async () => {
+    const list = (await chrome.storage.local.get(key))[key] || [];
+    list.push({ json: stampBuild(json.slice(0, 400000)), sent: false });
+    await chrome.storage.local.set({ [key]: list.slice(-max) });
+    flush();
+  }).catch(() => {});
+}
+
+let lastFlush = 0;
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message && typeof message.ytcIncident === 'string') { store(message.ytcIncident, KEY, MAX); return; }
+  if (message && typeof message.ytcPerf === 'string') { store(message.ytcPerf, PERF_KEY, PERF_MAX); return; }
+  if (message !== 'ytc-dev-check' || !sender.tab) return;
+  Promise.all([loaded, read()]).then(([was, now]) => { if (was && now && was !== now) chrome.runtime.reload(); });
+  if (Date.now() - lastFlush > 60000) { lastFlush = Date.now(); flush(); }
+});
 
 // ---- Socket relay (voice search). A content script asks for a WebSocket over a
 // chrome.runtime port: {t:'open', url, protocols, secret, probe}, then {t:'bin', d: base64} audio chunks and
