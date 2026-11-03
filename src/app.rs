@@ -561,6 +561,9 @@ pub fn boot() {
     }
     let id = app.timer(Timer::Bg);
     bridge::timer(id, BG_TICK_MS);
+    // decodingInfo for the usual YouTube formats, after the first requests went out (answers in
+    // a few ms, before any player response): a page's first video then waits for none.
+    player::own::warm_caps_boot();
     APP.with(|cell| *cell.borrow_mut() = Some(app));
 }
 
@@ -1950,6 +1953,13 @@ impl App {
             return;
         }
         player::own::pre_progress(id, bytes);
+    }
+
+    /// A piece of a streamed body (only the player's media requests ask for them).
+    pub fn on_fetch_chunk(&mut self, id: u32, status: u32, bytes: &[u8]) {
+        if self.player.as_mut().is_some_and(|p| p.on_fetch_chunk(id, status, bytes)) {
+            self.after_player();
+        }
     }
 
     pub fn on_fetch(&mut self, id: u32, status: u32, body: &[u8]) {

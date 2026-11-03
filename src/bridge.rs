@@ -384,6 +384,9 @@ extern "C" {
     pub fn sb_append(h: u32, bytes: &[u8]) -> String;
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn sb_remove(h: u32, start: f64, end: f64) -> bool;
+    /// `abort()`: drops a partly appended media segment (resetParserState).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn sb_abort(h: u32) -> bool;
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn sb_change_type(h: u32, mime: &str) -> bool;
     /// `buffered` as flat `[start0, end0, start1, end1, …]`.

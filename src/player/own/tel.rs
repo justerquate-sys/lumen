@@ -53,6 +53,11 @@ pub(super) struct PTel {
     stalls: u32,
     stall_ms: f64,
     pub(super) stuck: u32,
+    /// The start's media covered the playhead without a picture: the format was switched.
+    pub(super) nopic: bool,
+    /// Seeks that found their segments fetched ahead (seek bar hover, TV scrub).
+    pub(super) seek_pre: u32,
+    pub(super) seek_hit: bool,
     /// Dropped/total frames per rung (p) and the last sample.
     drops: Vec<(u32, f64, f64)>,
     dq: (f64, f64),
@@ -212,6 +217,7 @@ impl Own {
             "stuck": self.pt.stuck,
             "hidden_wait": self.hidden_wait,
             "mse_rebuilt": self.mse_rebuilt,
+            "nopic": self.pt.nopic,
             "live": self.live.is_some(),
             "since_created_ms": tel::round1(now - self.created),
             "slow": self.tel_slow(),
@@ -278,7 +284,8 @@ impl Own {
             return;
         }
         self.pt.seeks += 1;
-        tel::emit("video.seek", now - t0, json!({"vid": self.v, "input": why, "waited": waited, "paused": self.paused, "at_s": tel::round1(self.time())}));
+        let pre = std::mem::take(&mut self.pt.seek_hit);
+        tel::emit("video.seek", now - t0, json!({"vid": self.v, "input": why, "waited": waited, "paused": self.paused, "at_s": tel::round1(self.time()), "pre": pre}));
     }
 
     /// The picture's size changed: a switch became visible; target/1080p reached; drops per rung.
@@ -379,6 +386,7 @@ impl Own {
                 "stalls": self.pt.stalls,
                 "stall_ms": tel::round1(self.pt.stall_ms),
                 "seeks": self.pt.seeks,
+                "seek_pre": self.pt.seek_pre,
                 "switches": self.pt.switches,
                 "bad_itags": self.bad.len(),
                 "video_itag": self.tracks[V].rep,

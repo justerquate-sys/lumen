@@ -91,6 +91,12 @@ impl Own {
             if let Some(t) = self.fetches.get_mut(&twin) {
                 t.twin = None;
                 self.note(format!("{}: HTTP {status}, {len} B; its mirror twin continues", f.what));
+                // The twin is now the segment's request (its answer must not be taken as stale).
+                if let Req::Seg { kind, .. } = f.req {
+                    if self.tracks[kind].inflight == Some(id) {
+                        self.tracks[kind].inflight = Some(twin);
+                    }
+                }
                 return true;
             }
             return false;

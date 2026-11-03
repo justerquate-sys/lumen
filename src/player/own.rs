@@ -27,6 +27,7 @@ use std::collections::{HashMap, VecDeque};
 mod hedge;
 mod pre;
 mod sb;
+mod stream;
 mod tel;
 
 pub use pre::{pre_answer, pre_cancel, pre_progress, prefetch_media};
@@ -238,11 +239,18 @@ struct Inflight {
     hedge: bool,
     /// Already judged throttled (one verdict per request).
     flagged: bool,
+    /// The body arrives in pieces (`on_fetch_chunk`, `stream.rs`): the file offset of its next
+    /// byte, and (index requests) the bytes so far until the index is parsed.
+    chunked: bool,
+    at: u64,
+    buf: Vec<u8>,
+    /// (Index requests) the index was parsed from the first pieces; later pieces went on as media.
+    early: bool,
 }
 
 impl Inflight {
     fn new(req: Req, what: String) -> Inflight {
-        Inflight { req, sent: bridge::now(), what, base: String::new(), mirror: 0, ttfb: None, got: 0.0, want: 0.0, twin: None, hedge: false, flagged: false }
+        Inflight { req, sent: bridge::now(), what, base: String::new(), mirror: 0, ttfb: None, got: 0.0, want: 0.0, twin: None, hedge: false, flagged: false, chunked: false, at: 0, buf: Vec::new(), early: false }
     }
 }
 
@@ -266,6 +274,8 @@ enum Tm {
     LivePoll,
     /// SponsorBlock (`sb.rs`).
     Sb(sb::SbTm),
+    /// The seek bar's pointer rested (`stream.rs`, generation).
+    SeekPre(u32),
 }
 
 struct Rep {
@@ -276,6 +286,9 @@ struct Rep {
 
 enum Op {
     Append(Vec<u8>),
+    /// A piece of a media segment appended while it downloads (`stream.rs`): whether it is the
+    /// segment's first and last piece.
+    Chunk { bytes: Vec<u8>, first: bool, last: bool },
     Remove(f64, f64),
     ChangeType(String),
 }
@@ -299,16 +312,26 @@ struct Track {
     quota: bool,
     /// Switch target (itag) and whether it is immediate (user choice).
     pending: Option<(u32, bool)>,
-    /// The start of a segment that came with the index (itag, segment, bytes): only the rest is
-    /// asked for.
-    prefix: Option<(u32, usize, Vec<u8>)>,
+    /// The segment being downloaded and appended piece by piece (`stream.rs`).
+    asm: Option<stream::SegAsm>,
+    /// The SourceBuffer holds part of a media segment (its parser is mid-segment): the next new
+    /// segment or init segment first drops it (`abort()`).
+    mid: bool,
 }
 
 impl Track {
     fn drop_appends(&mut self) {
         let before = self.ops.len();
-        self.ops.retain(|o| !matches!(o, Op::Append(_)));
+        self.ops.retain(|o| !matches!(o, Op::Append(_) | Op::Chunk { .. }));
         if self.ops.len() != before {
+            self.appended = 0;
+        }
+    }
+
+    /// Seek or immediate switch: queued appends and the segment in progress are dropped.
+    fn abandon(&mut self) {
+        self.drop_appends();
+        if self.asm.take().is_some() {
             self.appended = 0;
         }
     }
@@ -379,9 +402,20 @@ pub struct Own {
     /// Last `getVideoPlaybackQuality` sample (dropped, total) and the totals.
     dq_last: (f64, f64),
     dq_window: Vec<(f64, f64)>,
-    /// After a quality cut while paused: seek here once the new data covers it,
-    /// so the frame on screen is redrawn in the new quality.
-    repaint_at: Option<f64>,
+    /// An instant quality switch in progress (`stream.rs`), and whether the next immediate
+    /// video switch is the user's choice (instant).
+    flush: Option<stream::Flush>,
+    user_switch: bool,
+    /// When the start's media covered the playhead with no picture yet (`stream.rs`), and whether
+    /// the format was already switched for it.
+    nopic_since: f64,
+    nopic_done: bool,
+    /// Typical googlevideo time to the first byte of a segment (ms, smoothed).
+    ttfb_ms: f64,
+    /// Segments fetched ahead of a likely seek (`stream.rs`), the spot and its timer generation.
+    seek_pre: Vec<stream::SeekPre>,
+    seekpre_at: f64,
+    seekpre_gen: u32,
     /// Last periodic ABR check (ms), so quality also rises while paused.
     abr_at: f64,
     /// Stalls during playback: (ms since navigation, duration ms).
@@ -638,7 +672,14 @@ impl Own {
             dq_last: (0.0, 0.0),
             dq_window: Vec::new(),
             stalls: Vec::new(),
-            repaint_at: None,
+            flush: None,
+            user_switch: false,
+            nopic_since: 0.0,
+            nopic_done: false,
+            ttfb_ms: 0.0,
+            seek_pre: Vec::new(),
+            seekpre_at: 0.0,
+            seekpre_gen: 0,
             abr_at: 0.0,
             stall_stepped: false,
             audio: None,
@@ -760,7 +801,8 @@ impl Own {
         let moved = if mirror > 0 && media { mirror_url(url, mirror) } else { None };
         let base = url;
         let url = moved.as_deref().unwrap_or(url);
-        let opts = if media && opts == "{}" { "{\"progress\":1}" } else { opts };
+        // Bodies arrive piece by piece and are appended as they come (`stream.rs`).
+        let opts = if media && opts == "{}" { "{\"progress\":1,\"chunks\":1}" } else { opts };
         bridge::fetch_opts(id, "GET", url, "", "{}", opts);
         let what = describe(&req, url);
         let mut f = Inflight::new(req, what);
@@ -768,6 +810,8 @@ impl Own {
             f.base = base.to_string();
             f.mirror = if moved.is_some() { mirror } else { 0 };
             f.want = range_len(url);
+            f.chunked = opts.contains("chunks");
+            f.at = range_start(url);
         }
         self.fetches.insert(id, f);
         id
@@ -959,14 +1003,20 @@ impl Own {
         if self.failed {
             return true;
         }
+        if self.seek_pre_end(id, status) {
+            return true;
+        }
         let ms = bridge::now() - f.sent;
-        self.tel_req(&f, status, body.len(), ms);
+        self.note_ttfb(&f);
+        // A streamed body came in pieces (`on_fetch_chunk`); its end carries no bytes.
+        let len = if f.chunked && (200..300).contains(&status) { f.got as usize } else { body.len() };
+        self.tel_req(&f, status, len, ms);
         if self.reqlog.len() >= 80 {
             self.reqlog.remove(0);
         }
-        self.reqlog.push(format!("{:>7.0} ms  {} → HTTP {status} · {} B · {ms:.0} ms", f.sent - self.nav_start, f.what, body.len()));
+        self.reqlog.push(format!("{:>7.0} ms  {} → HTTP {status} · {len} B · {ms:.0} ms", f.sent - self.nav_start, f.what));
         match f.req {
-            Req::Head { .. } | Req::Seg { .. } if self.twin_answer(id, &f, status, body.len()) => return true,
+            Req::Head { .. } | Req::Seg { .. } if self.twin_answer(id, &f, status, len) => return true,
             Req::Vision(_) if status != 200 && self.vision_twin_pending(status) => return true,
             Req::Vision(_) if status == 200 => self.vision_answered(id),
             _ => {}
@@ -975,8 +1025,16 @@ impl Own {
             Req::Vision(route) => self.on_vision(route, status, body, ms),
             Req::Visitor => self.on_visitor(status, body),
             Req::Web => self.on_web(status, body),
-            Req::Head { itag, kind } => self.on_head(itag, kind, status, body, ms),
-            Req::Seg { kind, idx, itag } => self.on_seg(id, kind, idx, itag, status, body, ms),
+            Req::Head { itag, kind } => {
+                if f.early {
+                    // Parsed from its first pieces (`stream.rs`): what is left is the media's.
+                    self.head_done(itag, kind, status, ms, len);
+                } else {
+                    let body = if f.chunked && (200..300).contains(&status) { &f.buf[..] } else { body };
+                    self.on_head(itag, kind, status, body, ms);
+                }
+            }
+            Req::Seg { kind, idx, itag } => self.on_seg(id, kind, idx, itag, status, if f.chunked { None } else { Some((f.at, body)) }, ms, len),
             Req::Captions => {
                 self.cues = if status == 200 { captions::parse_json3(body) } else { Vec::new() };
                 self.note(format!("captions {} cues (HTTP {status})", self.cues.len()));
@@ -1185,24 +1243,30 @@ impl Own {
         self.caps_asked = true;
         self.tel_caps_asked();
         let mut list = Vec::new();
+        let mut unknown = false;
         for f in self.formats.iter().filter(|f| f.video) {
             let key = caps_key(f);
-            match CAPS.with(|c| c.borrow().get(&key).copied()) {
+            if let Some(c) = CAPS.with(|c| c.borrow().get(&key).copied()) {
+                self.caps.insert(f.itag, c);
+                continue;
+            }
+            // The broad answer (asked at boot) decides now; the exact one is asked anyway.
+            match CAPS.with(|c| c.borrow().get(&caps_norm(f)).copied()) {
                 Some(c) => {
                     self.caps.insert(f.itag, c);
                 }
-                None => {
-                    self.caps_keys.insert(f.itag, key);
-                    list.push(caps_question(f.itag as u64, f));
-                }
+                None => unknown = true,
             }
+            self.caps_keys.insert(f.itag, key);
+            list.push(caps_question(f.itag as u64, f));
         }
-        if list.is_empty() {
+        if !list.is_empty() {
+            bridge::media_caps(&serde_json::Value::Array(list).to_string());
+        }
+        if !unknown {
             self.tel_caps();
-            return false;
         }
-        bridge::media_caps(&serde_json::Value::Array(list).to_string());
-        true
+        unknown
     }
 
     /// `decodingInfo` results arrived: rebuild the ladder and let ABR use them.
@@ -1374,84 +1438,87 @@ impl Own {
     fn on_head(&mut self, itag: u32, kind: usize, status: u32, body: &[u8], ms: f64) {
         self.got_media = true;
         self.heads.retain(|&x| x != itag);
-        let Some(f) = self.format(itag, kind).cloned() else { return };
         if status != 200 && status != 206 {
             self.media_http_error(kind, status, Some(itag));
             return;
         }
+        if self.head_parse(itag, kind, body, body.len() as u64, true) {
+            self.bw.add(body.len(), ms);
+        }
+        self.pump(kind);
+    }
+
+    /// An index request's bytes from its start: parse the index (once `body` holds it; `whole` =
+    /// that is all there will be), start the track and append the first segment's bytes that came
+    /// along (`stream.rs` appends the rest as it arrives). True when the index was parsed.
+    fn head_parse(&mut self, itag: u32, kind: usize, body: &[u8], upto: u64, whole: bool) -> bool {
+        let Some(f) = self.format(itag, kind).cloned() else { return false };
         let need = f.index_end as usize + 1;
         if body.len() < need {
-            self.fail(format!("index of itag {itag}: {} of {need} bytes", body.len()));
-            return;
+            if whole {
+                self.fail(format!("index of itag {itag}: {} of {need} bytes", body.len()));
+            }
+            return false;
         }
         let parsed = if f.webm { index::parse_cues(&body[..need], f.len, f.dur.max(self.duration)) } else { index::parse_sidx(&body[..need]) };
         let segs = match parsed {
             Ok(s) => index::clip(s, self.duration),
             Err(e) => {
                 self.fail(format!("index of itag {itag}: {e}"));
-                return;
+                return false;
             }
         };
-        self.bw.add(body.len(), ms);
-        // The first segment (or its start) came in the same request.
-        let first = segs.first().filter(|s| s.start as usize == need && body.len() > need).map(|s| body[need..body.len().min(s.end as usize + 1)].to_vec());
-        let whole = segs.first().map_or(0, |s| (s.end - s.start + 1) as usize);
         let init = body[..=(f.init_end as usize).min(need - 1)].to_vec();
         let n = segs.len();
         self.reps.insert(itag, Rep { f, segs, init });
-        let tr = &mut self.tracks[kind];
+        let tr = &self.tracks[kind];
         if tr.rep == itag && !tr.ready {
-            tr.ready = true;
-            tr.next = sched::seg_for(&self.reps[&itag].segs, self.start);
-            if let (0, Some(bytes)) = (tr.next, first) {
-                if bytes.len() == whole {
-                    tr.next = 1;
-                    self.queue_seg(kind, itag, bytes);
-                } else {
-                    tr.prefix = Some((itag, 0, bytes));
-                }
+            let next = sched::seg_for(&self.reps[&itag].segs, self.start);
+            self.tracks[kind].ready = true;
+            self.tracks[kind].next = next;
+            // The first segment's start came in the same request: append it now.
+            if let Some(s) = self.reps[&itag].segs.first().filter(|s| next == 0 && s.start as usize == need) {
+                let (start, end) = (s.start, s.end);
+                self.tracks[kind].asm = Some(stream::SegAsm::new(itag, 0, start, end, upto.max(start)));
+                self.feed(kind, itag, 0, need as u64, &body[need..]);
             }
-            self.note(format!("{} index itag {itag}: {n} segments ({ms:.0} ms)", if kind == V { "video" } else { "audio" }));
-        } else if tr.pending == Some((itag, true)) {
+            self.note(format!("{} index itag {itag}: {n} segments", if kind == V { "video" } else { "audio" }));
+        } else if self.tracks[kind].pending == Some((itag, true)) {
             self.apply_switch(kind);
+        } else if body.len() > need && self.tracks[kind].asm.as_ref().is_some_and(|a| a.itag == itag && a.idx == 0) {
+            // A second index request (a mirror twin) brings the same first bytes: only new ones count.
+            self.feed(kind, itag, 0, need as u64, &body[need..]);
         }
-        self.pump(kind);
+        true
     }
 
-    fn on_seg(&mut self, id: u32, kind: usize, idx: usize, itag: u32, status: u32, body: &[u8], ms: f64) {
+    fn on_seg(&mut self, id: u32, kind: usize, idx: usize, itag: u32, status: u32, body: Option<(u64, &[u8])>, ms: f64, len: usize) {
         self.got_media = true;
         let tr = &mut self.tracks[kind];
         if tr.inflight != Some(id) {
             return;
         }
         tr.inflight = None;
-        let Some(want) = self.reps.get(&itag).and_then(|r| r.segs.get(idx)).map(|s| s.end - s.start + 1) else { return };
         if status != 200 && status != 206 {
             self.media_http_error(kind, status, None);
             return;
         }
-        let pre = self.tracks[kind].prefix.take_if(|p| p.0 == itag && p.1 == idx);
-        let have = pre.as_ref().map_or(0, |p| p.2.len() as u64);
-        if body.len() as u64 + have != want {
-            self.tracks[kind].prefix = pre;
-            self.retry(kind, format!("segment {idx} of itag {itag}: {} of {want} bytes", body.len() as u64 + have));
+        // A body that came whole (not streamed: e.g. a hover prefetch taken over).
+        if let Some((at, b)) = body {
+            self.feed(kind, itag, idx, at, b);
+        }
+        if self.failed {
             return;
         }
-        self.bw.add(body.len(), ms);
-        let body: std::borrow::Cow<[u8]> = match pre {
-            Some((_, _, mut b)) => {
-                b.extend_from_slice(body);
-                b.into()
-            }
-            None => body.into(),
-        };
-        let body = &body[..];
-        let tr = &mut self.tracks[kind];
-        tr.retries = 0;
-        if tr.rep == itag {
-            tr.next = idx + 1;
+        let tr = &self.tracks[kind];
+        if let Some(a) = tr.asm.as_ref().filter(|a| a.itag == itag && a.idx == idx) {
+            // The request ended before the segment did: ask for the rest from where it stopped.
+            let (have, want) = (a.asm.frontier() - a.asm.start, a.asm.end - a.asm.start + 1);
+            self.retry(kind, format!("segment {idx} of itag {itag}: {have} of {want} bytes"));
+            return;
         }
-        self.queue_seg(kind, itag, body.to_vec());
+        self.bw.add(len, ms);
+        self.tracks[kind].retries = 0;
         if kind == V {
             self.abr();
         }
@@ -1638,21 +1705,6 @@ impl Own {
         self.pump_all();
     }
 
-    fn queue_seg(&mut self, kind: usize, itag: u32, bytes: Vec<u8>) {
-        let Some(rep) = self.reps.get(&itag) else { return };
-        let tr = &mut self.tracks[kind];
-        if tr.appended != itag {
-            if rep.f.mime != tr.mime && tr.sb != 0 {
-                tr.ops.push_back(Op::ChangeType(rep.f.mime.clone()));
-            }
-            tr.mime = rep.f.mime.clone();
-            tr.ops.push_back(Op::Append(rep.init.clone()));
-            tr.appended = itag;
-        }
-        tr.ops.push_back(Op::Append(bytes));
-        self.flush(kind);
-    }
-
     fn flush(&mut self, kind: usize) {
         if !self.ms_open || self.failed {
             return;
@@ -1664,7 +1716,29 @@ impl Own {
                 return;
             }
             let Some(op) = tr.ops.pop_front() else { return };
+            // A new segment (or init/type change) after a partly appended one: drop that part first.
+            if tr.mid && !matches!(op, Op::Remove(..) | Op::Chunk { first: false, .. }) {
+                bridge::sb_abort(tr.sb);
+                tr.mid = false;
+            }
             match op {
+                Op::Chunk { bytes, first, last } => {
+                    let r = bridge::sb_append(tr.sb, &bytes);
+                    if r.is_empty() {
+                        tr.updating = true;
+                        tr.quota = false;
+                        tr.mid = !last;
+                        return;
+                    }
+                    if r == "QuotaExceededError" && !tr.quota {
+                        tr.quota = true;
+                        tr.ops.push_front(Op::Chunk { bytes, first, last });
+                        tr.ops.push_front(Op::Remove(0.0, (t - 10.0).max(0.0)));
+                        continue;
+                    }
+                    self.fail(format!("appendBuffer: {r}"));
+                    return;
+                }
                 Op::ChangeType(m) => {
                     if !bridge::sb_change_type(tr.sb, &m) {
                         self.fail(format!("changeType({m}) failed"));
@@ -1735,17 +1809,37 @@ impl Own {
         if tr.inflight.is_some() || tr.ops.len() > 3 {
             return;
         }
+        // The segment in progress first: the bytes no request is bringing (the index request may
+        // still be delivering its start, `SegAsm::asked`).
+        if let Some(a) = tr.asm.as_ref() {
+            let from = if self.heads.contains(&a.itag) { a.asked } else { a.asm.frontier() };
+            let (itag, idx, end) = (a.itag, a.idx, a.asm.end);
+            if from > end {
+                return;
+            }
+            let Some(rep) = self.reps.get(&itag) else { return };
+            let url = format!("{}&range={from}-{end}", rep.f.url);
+            let id = self.get(Req::Seg { kind, idx, itag }, &url, "{}");
+            if let Some(a) = self.tracks[kind].asm.as_mut() {
+                a.asked = end + 1;
+            }
+            self.tracks[kind].inflight = Some(id);
+            return;
+        }
         let ahead = self.ahead_target();
         let tr = &self.tracks[kind];
         let Some(rep) = self.reps.get(&tr.rep) else { return };
         match sched::next(&rep.segs, tr.next, t, ahead) {
             Next::Fetch(i) => {
                 let s = &rep.segs[i];
-                let have = tr.prefix.as_ref().filter(|p| p.0 == tr.rep && p.1 == i).map_or(0, |p| p.2.len() as u64);
-                let url = format!("{}&range={}-{}", rep.f.url, s.start + have, s.end);
+                let url = format!("{}&range={}-{}", rep.f.url, s.start, s.end);
                 let itag = tr.rep;
+                let asm = stream::SegAsm::new(itag, i, s.start, s.end, s.end + 1);
                 let id = self.get(Req::Seg { kind, idx: i, itag }, &url, "{}");
-                self.tracks[kind].inflight = Some(id);
+                let tr = &mut self.tracks[kind];
+                tr.asm = Some(asm);
+                tr.inflight = Some(id);
+                self.flush_keep(kind);
             }
             Next::Done => self.maybe_eos(),
             Next::Wait => {}
@@ -2197,12 +2291,15 @@ impl Own {
     }
 
     fn switch_to(&mut self, itag: u32, now: bool) {
+        // Only the switch the user's choice asked for is instant (`stream.rs`).
+        let user = std::mem::take(&mut self.user_switch);
         self.tel_switch(itag);
         if self.live.is_some() {
             self.live_switch(itag, now);
             return;
         }
         self.tracks[V].pending = Some((itag, now));
+        self.user_switch = user;
         self.last_switch = bridge::now();
         if self.reps.contains_key(&itag) {
             if now {
@@ -2226,24 +2323,27 @@ impl Own {
         let old_at = self.reps.get(&self.tracks[kind].rep).and_then(|r| r.segs.get(self.tracks[kind].next)).map(|s| s.t0);
         let label = rep.f.label.clone();
         let paused = self.paused && kind == V && self.first_frame.is_some() && self.live.is_none();
-        if now && paused {
-            self.repaint_at = Some(t);
+        let user = kind == V && std::mem::take(&mut self.user_switch);
+        if now {
+            if let Some(id) = self.tracks[kind].inflight.take() {
+                self.abort_fetch(id);
+            }
+            self.tracks[kind].abandon();
+        }
+        // A chosen quality (or any cut while paused) shows within a fraction of a second: the new
+        // quality's segment under the playhead, then a seek to where the playhead is (`stream.rs`).
+        if now && kind == V && self.first_frame.is_some() && self.live.is_none() && (paused || user) {
+            self.flush_switch(itag, t, paused);
+            self.eos = false;
+            self.note(format!("switch to {itag} {label} (instant{})", if paused { ", paused" } else { "" }));
+            self.quality_label();
+            self.flush(kind);
+            return;
         }
         let Some(rep) = self.reps.get(&itag) else { return };
         let tr = &mut self.tracks[kind];
         if now {
-            if let Some(id) = tr.inflight.take() {
-                bridge::abort(id);
-                if let Some(t) = self.fetches.remove(&id).and_then(|f| f.twin) {
-                    if self.fetches.remove(&t).is_some() {
-                        bridge::abort(t);
-                    }
-                }
-            }
-            tr.drop_appends();
-            // Paused: also replace the segment under the playhead, then redraw
-            // the paused frame from the new quality (see `repaint_at`).
-            let i = if paused { sched::seg_for(&rep.segs, t) } else { sched::switch_cut(&rep.segs, &ranges, t, 1.0) };
+            let i = sched::switch_cut(&rep.segs, &ranges, t, 1.0);
             if let Some(s) = rep.segs.get(i) {
                 tr.ops.push_back(Op::Remove(s.t0, f64::INFINITY));
             }
@@ -2289,16 +2389,10 @@ impl Own {
             match ev {
                 "updateend" => {
                     self.tracks[k].updating = false;
-                    if k == V {
-                        if let Some(at) = self.repaint_at {
-                            if sched::range_at(&pairs(bridge::media_ranges(self.tracks[V].sb)), at).is_some() {
-                                self.repaint_at = None;
-                                bridge::media_set(self.vid, "currentTime", at);
-                                self.note(format!("redrew the paused frame at {at:.1} s in the new quality"));
-                            }
-                        }
-                    }
                     self.flush(k);
+                    if k == V {
+                        self.flush_check();
+                    }
                     self.pump(k);
                     self.maybe_eos();
                 }
@@ -2435,18 +2529,19 @@ impl Own {
             self.live_seeking(t);
             return;
         }
+        self.flush = None;
         for k in [V, A] {
-            let tr = &mut self.tracks[k];
-            if let Some(id) = tr.inflight.take() {
-                bridge::abort(id);
-                self.fetches.remove(&id);
+            if let Some(id) = self.tracks[k].inflight.take() {
+                self.abort_fetch(id);
             }
-            tr.drop_appends();
+            let tr = &mut self.tracks[k];
+            tr.abandon();
             if tr.ready {
                 if let Some(rep) = self.reps.get(&tr.rep) {
                     tr.next = sched::resume_index(&rep.segs, &pairs(bridge::media_ranges(tr.sb)), t);
                 }
             }
+            self.seek_pre_take(k);
         }
         self.eos = false;
         self.pump_all();
@@ -2515,6 +2610,7 @@ impl Own {
             Tm::Dwell(_) | Tm::WheelQ(_) => {}
             Tm::LivePoll => self.live_poll(),
             Tm::Sb(k) => self.sb_timer(k),
+            Tm::SeekPre(g) => self.seek_pre_due(g),
         }
         true
     }
@@ -2592,6 +2688,8 @@ impl Own {
             }
         }
         self.thr_tick(now);
+        self.nopic_tick(now);
+        self.flush_check();
         self.stuck_tick(now);
         if self.failed {
             return;
@@ -2707,7 +2805,8 @@ impl Own {
             match f.req {
                 Req::Head { itag, kind } => {
                     self.heads.retain(|&x| x != itag);
-                    if !self.retry_heads.contains(&(itag, kind)) {
+                    // An index already parsed from its first pieces: the segment's rest is asked again by `pump`.
+                    if !self.reps.contains_key(&itag) && !self.retry_heads.contains(&(itag, kind)) {
                         self.retry_heads.push((itag, kind));
                     }
                 }
@@ -2727,6 +2826,7 @@ impl Own {
         for t in &mut self.tracks {
             t.retry_wait = true;
         }
+        self.seek_pre.retain(|p| p.id.is_none());
         self.from_cache = false;
         self.refreshes += 1;
         self.refreshing = true;
@@ -2760,6 +2860,8 @@ impl Own {
             tr.updating = false;
             tr.appended = 0;
             tr.quota = false;
+            tr.asm = None;
+            tr.mid = false;
             if let Some((mime, next)) = fresh {
                 tr.mime = mime;
                 if tr.ready {
@@ -3091,6 +3193,10 @@ impl Own {
         if name == "seek" {
             let shown = self.ch.hover.is_some();
             self.ch.hover = (fx >= 0.0).then_some(fx);
+            let d = self.duration;
+            if self.drag.is_none() && d > 0.0 {
+                self.seek_pre_hint(self.ch.hover.map(|f| f * d));
+            }
             self.hover_ui(shown);
         } else if name == "chaps" {
             // Real pointer movement only (`data-track`): a page scrolled under a still pointer does not open it.
@@ -3758,6 +3864,7 @@ impl Own {
                                 // A chosen rung, or Auto going up: show it now (also while paused).
                                 let cur_p = self.format(self.tracks[V].rep, V).map(|f| f.p).unwrap_or(0);
                                 let up = self.ladder[i].p > cur_p;
+                                self.user_switch = true;
                                 self.switch_to(itag, self.prefs.quality > 0 || up);
                             }
                         }
@@ -3770,6 +3877,7 @@ impl Own {
                         if let Some(i) = self.desired() {
                             let itag = self.ladder[i].itag;
                             if itag != self.tracks[V].rep {
+                                self.user_switch = true;
                                 self.switch_to(itag, true);
                             }
                         }
@@ -4046,6 +4154,8 @@ impl Own {
         let cur = self.drag.map_or_else(|| self.time(), |f| a + f * (b - a));
         let to = (cur + secs).clamp(a, (b - 1.0).max(a));
         self.drag = Some((to - a) / (b - a));
+        // The scrub target's segments load while the remote rests.
+        self.seek_pre_hint(Some(to));
         self.wake();
         self.hover_ui(true);
         true
@@ -4330,6 +4440,7 @@ const WARM_ID: u64 = 1_000_000;
 
 thread_local! {
     static WARM: std::cell::RefCell<HashMap<u64, String>> = std::cell::RefCell::new(HashMap::new());
+    static WARM_BOOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A prefetched VISIONOS response (hover, focus, Up next): ask decodingInfo for its video formats
@@ -4347,6 +4458,58 @@ pub fn warm_caps(body: &[u8]) {
             let i = WARM_ID + next_id() as u64;
             w.insert(i, key);
             list.push(caps_question(i, f));
+        }
+    });
+    if !list.is_empty() {
+        bridge::media_caps(&serde_json::Value::Array(list).to_string());
+    }
+}
+
+/// The usual YouTube video formats per codec, rung and frame rate (AV1 levels as YouTube labels
+/// them), asked at boot so a page's first video finds answers under `caps_norm` (its exact
+/// formats are still asked, in the background, and win once they answer).
+pub fn warm_caps_boot() {
+    if WARM_BOOT.with(|w| w.replace(true)) {
+        return;
+    }
+    let mut list = Vec::new();
+    let rungs: [(u32, u32, u32); 4] = [(720, 1280, 2_500_000), (1080, 1920, 4_500_000), (1440, 2560, 10_000_000), (2160, 3840, 20_000_000)];
+    WARM.with(|w| {
+        let mut w = w.borrow_mut();
+        for (p, width, bitrate) in rungs {
+            for fps in [30u32, 60] {
+                let av1 = match (p, fps) {
+                    (720, 30) => "05",
+                    (720, _) | (1080, 30) => "08",
+                    (1080, _) => "09",
+                    (1440, _) | (2160, 30) => "12",
+                    _ => "13",
+                };
+                let avc = match (p, fps) {
+                    (720, 30) => Some("4D401F"),
+                    (720, _) => Some("4D4020"),
+                    (1080, 30) => Some("640028"),
+                    (1080, _) => Some("64002A"),
+                    _ => None,
+                };
+                let mut mimes = vec![format!("video/mp4; codecs=\"av01.0.{av1}M.08\""), "video/webm; codecs=\"vp9\"".to_string()];
+                if let Some(a) = avc {
+                    mimes.push(format!("video/mp4; codecs=\"avc1.{a}\""));
+                }
+                for mime in mimes {
+                    if !bridge::mse_ok(&mime) {
+                        continue;
+                    }
+                    let f = Format { mime, width, height: p, fps, p, bitrate: (bitrate as f64 * if fps > 30 { 1.0 } else { 0.66 }) as u64, video: true, ..Default::default() };
+                    let key = caps_norm(&f);
+                    if CAPS.with(|c| c.borrow().contains_key(&key)) {
+                        continue;
+                    }
+                    let i = WARM_ID + next_id() as u64;
+                    w.insert(i, key);
+                    list.push(caps_question(i, &f));
+                }
+            }
         }
     });
     if !list.is_empty() {
@@ -4378,6 +4541,22 @@ fn caps_key(f: &Format) -> String {
     format!("{}|{}x{}|{}|{}", f.mime, f.width, f.height, f.fps, caps_tf(f))
 }
 
+/// The same question in broad strokes: codec family, rung, 30/60 fps, transfer function (the
+/// answer of a typical format of that kind, `warm_caps_boot`; used until the exact one is in).
+fn caps_norm(f: &Format) -> String {
+    let m = f.mime.as_str();
+    let family = if m.contains("av01") { "av01" } else if m.contains("vp9") || m.contains("vp09") { "vp9" } else if m.contains("avc1") { "avc1" } else { m };
+    format!("n|{family}|{}|{}|{}", f.p, if f.fps > 30 { 60 } else { 30 }, caps_tf(f))
+}
+
+/// A cached answer for `f`: its own, else the broad one.
+fn caps_known(f: &Format) -> Option<(bool, bool)> {
+    CAPS.with(|c| {
+        let c = c.borrow();
+        c.get(&caps_key(f)).or_else(|| c.get(&caps_norm(f))).copied()
+    })
+}
+
 /// HDR formats are asked with their transfer function (and BT.2020): without it a decoder or screen
 /// that cannot show HDR answers "smooth" for them (live 3 Nov 2026, Android TV emulator: 1440p60 HDR
 /// AV1 chosen, no picture, MediaSource rebuilt), and the SDR rung must win there.
@@ -4391,6 +4570,11 @@ fn caps_tf(f: &Format) -> &'static str {
 
 fn caps_question(i: u64, f: &Format) -> serde_json::Value {
     serde_json::json!({"i": i, "mime": f.mime, "w": f.width.max(1), "h": f.height.max(1), "b": f.bitrate.max(1), "f": f.fps.max(1), "tf": caps_tf(f)})
+}
+
+/// The first byte a `&range=a-b` URL asks for (0 when it names no range).
+fn range_start(url: &str) -> u64 {
+    url.split("&range=").nth(1).and_then(|r| r.split('-').next()).and_then(|a| a.parse().ok()).unwrap_or(0)
 }
 
 /// Bytes a `&range=a-b` URL asks for (0 when it names no range).
