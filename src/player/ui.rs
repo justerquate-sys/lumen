@@ -144,6 +144,7 @@ pub const TREM: &str = "ytc-trem";
 pub const TVWL: &str = "ytc-tvwl";
 const I_LIKE: &str = "<svg class=\"o\" viewBox=\"0 0 24 24\"><path d=\"M7.5 10.5V20H4v-9.5zm0 0 3.8-6.5c1.4 0 2.4 1 2.1 2.5l-.7 3.5H19a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5\"/></svg>";
 const I_INFO: &str = "<svg class=\"o\" viewBox=\"0 0 24 24\"><path d=\"M20.5 12a8.5 8.5 0 1 1-17 0 8.5 8.5 0 0 1 17 0zM12 11v5.5M12 7.6v.1\"/></svg>";
+const I_COMMENTS: &str = "<svg class=\"o\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M20 4H4v13h4v4l5-4h7zM8 8h8M8 12h6\"/></svg>";
 
 /// The TV player (10-foot overlay): the same ids as `shell` where the glue updates them, laid out for the
 /// remote. Over the picture: the time row (elapsed · chapter · remaining), the thick seek bar (a focus stop:
@@ -163,13 +164,14 @@ pub fn shell_tv() -> String {
 <div id=\"{SEEK}\" class=\"pseek\" tabindex=\"0\" role=\"slider\" aria-label=\"Seek: ← and → move 10 s, OK plays or pauses\" data-drag=\"seek\"><div id=\"{SEGS}\" class=\"psegs\">{BAR}</div><i id=\"{RIP}\" class=\"prip\"></i><b class=\"pknob\"></b>\
 <div id=\"{TIP}\" class=\"ptip\" aria-hidden=\"true\"><div id=\"{TIPI}\" class=\"pti\"><i class=\"sbf ptf\"><i id=\"{TIPF}\"></i></i><em id=\"{TIPK}\" class=\"ptk\"></em><b id=\"{TIPC}\"></b><span id=\"{TIPT}\"></span></div></div></div>\
 <div class=\"prow\">\
-<button type=\"button\" class=\"pb\" data-act=\"p-toggle\" aria-label=\"Play/pause\">{PLAYPAUSE}</button>\
-<button type=\"button\" class=\"pb\" id=\"{CCB}\" data-act=\"p-menu\" data-arg=\"cc\" aria-haspopup=\"true\" aria-label=\"Captions\">{CC_OFF}{CC_ON}</button>\
-<button type=\"button\" class=\"pb pw\" id=\"{SPEED}\" data-act=\"p-menu\" data-arg=\"speed\" aria-haspopup=\"true\" aria-label=\"Speed\"><span id=\"{RATEB}\" class=\"plbl\">1×</span></button>\
-<button type=\"button\" class=\"pb pw\" id=\"{QUAL}\" data-act=\"p-menu\" data-arg=\"quality\" aria-haspopup=\"true\" aria-label=\"Quality\"><span id=\"{QLBL}\" class=\"plbl pq\">Auto</span></button>\
-<button type=\"button\" class=\"pb tvlk\" data-act=\"a-like\" aria-label=\"I like this\">{I_LIKE}</button>\
+<button type=\"button\" class=\"pb\" data-act=\"p-toggle\" aria-label=\"Play/pause\">{PLAYPAUSE}<span class=\"tvpl\" aria-hidden=\"true\">Play / pause</span></button>\
+<button type=\"button\" class=\"pb\" id=\"{CCB}\" data-act=\"p-menu\" data-arg=\"cc\" aria-haspopup=\"true\" aria-label=\"Captions\">{CC_OFF}{CC_ON}<span class=\"tvpl\" aria-hidden=\"true\">Captions</span></button>\
+<button type=\"button\" class=\"pb pw\" id=\"{SPEED}\" data-act=\"p-menu\" data-arg=\"speed\" aria-haspopup=\"true\" aria-label=\"Speed\"><span id=\"{RATEB}\" class=\"plbl\">1×</span><span class=\"tvpl\" aria-hidden=\"true\">Speed</span></button>\
+<button type=\"button\" class=\"pb pw\" id=\"{QUAL}\" data-act=\"p-menu\" data-arg=\"quality\" aria-haspopup=\"true\" aria-label=\"Quality\"><span id=\"{QLBL}\" class=\"plbl pq\">Auto</span><span class=\"tvpl\" aria-hidden=\"true\">Quality</span></button>\
+<button type=\"button\" class=\"pb tvlk\" data-act=\"a-like\" aria-label=\"I like this\">{I_LIKE}<span class=\"tvpl\" aria-hidden=\"true\">Like</span></button>\
 <span id=\"{TVWL}\" class=\"pslot\"></span>\
-<button type=\"button\" class=\"pb\" data-act=\"tv-info\" aria-label=\"More info\">{I_INFO}</button>\
+<button type=\"button\" class=\"pb\" data-act=\"tv-comments\" aria-label=\"Comments\" aria-haspopup=\"dialog\">{I_COMMENTS}<span class=\"tvpl\" aria-hidden=\"true\">Comments</span></button>\
+<button type=\"button\" class=\"pb\" data-act=\"tv-info\" aria-label=\"More info\" aria-haspopup=\"dialog\">{I_INFO}<span class=\"tvpl\" aria-hidden=\"true\">More info</span></button>\
 </div></div><div id=\"{MENU}\" class=\"pmenu\" role=\"dialog\"><div id=\"{MENUI}\" class=\"pmi\"></div></div>"
     )
 }
@@ -721,6 +723,9 @@ mod tests {
         assert!(!sh.contains("poster") && !super::shell_tv().contains("poster"), "no thumbnail poster (never scaled up)");
         assert!(!sh.contains("pspin"), "no loading indicator");
         assert!(sh.contains("id=\"ytc-rateb\" class=\"plbl\">1×") && sh.contains("id=\"ytc-qlbl\""));
+        let tv = super::shell_tv();
+        assert!(tv.contains("data-act=\"tv-comments\"") && tv.contains("class=\"tvpl\""));
+        assert!(!sh.contains("tv-comments") && !sh.contains("tvpl"), "TV actions do not alter desktop controls");
     }
 
     use super::*;

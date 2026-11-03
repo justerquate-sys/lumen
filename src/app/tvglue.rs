@@ -122,6 +122,7 @@ pub(super) struct Tv {
     pub(super) info: String,
     /// A search went out from the search screen: its results take the focus when they paint.
     grid_focus: bool,
+    pub(super) keyboard: tv::keyboard::State,
     /// The page box holds the focus only because the page was still loading (no key since).
     auto_rail: bool,
     /// Updates: the shell's last answer, the bundle this page started with, the screen open, a line about the
@@ -172,7 +173,7 @@ impl App {
             return;
         }
         bridge::back_hook();
-        bridge::append("ytc", &format!("<div id=\"{SIGN}\" class=\"tvs\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Sign in\"></div><aside id=\"{INFO}\" class=\"tvi\" role=\"dialog\" aria-label=\"More info\"></aside>"));
+        bridge::append("ytc", &format!("<div id=\"{SIGN}\" class=\"tvs\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Sign in\"></div><aside id=\"{INFO}\" class=\"tvi\" role=\"dialog\" aria-modal=\"true\" aria-label=\"More info\"></aside>"));
         self.tv_slot();
         self.tv_ask_token(self.tv.hold);
         if self.tv.hold {
@@ -508,6 +509,9 @@ impl App {
                 self.tv_call("shell_install", "null", Call::Install);
             }
             "tv-info" => self.tv_info_open(),
+            "tv-info-close" => self.tv_info_close(),
+            "tv-comments" => self.tv_comments_open(),
+            "tv-comments-close" => self.tv_comments_close(),
             "tv-tel-on" => {
                 // (An address typed but not submitted yet goes along.)
                 let typed = bridge::input_value(DEV_FIELD);
@@ -542,7 +546,7 @@ impl App {
             bridge::focus_save("search");
         }
         bridge::attr("ytc", "data-tvq", "1");
-        bridge::focus("ytc-q");
+        self.tv_keyboard_open();
     }
 
     /// Closes the search screen; `refocus`: the focus returns to where it was before it opened.
@@ -550,6 +554,7 @@ impl App {
         if !self.tv_search_on() {
             return;
         }
+        self.tv_keyboard_hide();
         bridge::attr("ytc", "data-tvq", "");
         self.fx_sug_end();
         if refocus && !bridge::focus_load("search") {
@@ -562,6 +567,9 @@ impl App {
         if tv::on() && on && !self.tv_search_on() {
             bridge::focus_save("search");
             bridge::attr("ytc", "data-tvq", "1");
+        }
+        if on {
+            self.tv_keyboard_label();
         }
     }
 
@@ -583,6 +591,9 @@ impl App {
         self.tv.info.clear();
         let mut out = String::new();
         crate::features::wl_button(&mut out, v);
+        if let Some(end) = out.rfind("</button>") {
+            out.insert_str(end, "<span class=\"tvpl\" aria-hidden=\"true\">Watch later</span>");
+        }
         bridge::html(crate::player::ui::TVWL, &out);
         self.tv_focus_check();
     }
@@ -677,25 +688,6 @@ impl App {
         }
     }
 
-    // ---------------------------------------------------------- more info
-
-    fn tv_info_open(&mut self) {
-        if self.tv.info.is_empty() {
-            return;
-        }
-        bridge::focus_save("info");
-        bridge::html(INFO, &self.tv.info);
-        bridge::attr(INFO, "class", "tvi on");
-        bridge::focus_sel(INFO, ".tvd");
-    }
-
-    fn tv_info_close(&mut self) {
-        bridge::attr(INFO, "class", "tvi");
-        if !bridge::focus_load("info") {
-            bridge::focus(SEEK);
-        }
-    }
-
     // ---------------------------------------------------------- Back
 
     /// The platform Back button: 1 = handled here, 0 = the shell goes back (or leaves the app when there is
@@ -703,6 +695,9 @@ impl App {
     pub fn on_back(&mut self) -> u32 {
         if !tv::on() {
             return 0;
+        }
+        if self.tv_keyboard_back() {
+            return 1;
         }
         if self.tv.open {
             self.tv_close();
@@ -716,8 +711,7 @@ impl App {
             self.tv_search_close(true);
             return 1;
         }
-        if bridge::any("#ytc-tvinfo.on") {
-            self.tv_info_close();
+        if self.tv_drawer_back() {
             return 1;
         }
         if bridge::any(OPEN) {
@@ -777,6 +771,13 @@ impl App {
         if !tv::on() {
             return None;
         }
+        if let Some(handled) = self.tv_keyboard_key(key, editable) {
+            return Some(handled);
+        }
+        if key == "/" && !editable {
+            self.tv_search_open();
+            return Some(true);
+        }
         self.tv.auto_rail = false;
         let watch = matches!(self.route, Route::Watch { .. });
         if let Some(r) = tv::remote(key) {
@@ -804,12 +805,8 @@ impl App {
                 _ => None,
             };
         }
-        if bridge::any("#ytc-tvinfo.on") {
-            // More info: ↑/↓ scroll the description, nothing else moves.
-            if let Some(dir @ (Dir::Up | Dir::Down)) = d {
-                bridge::scroll_box(INFO, if dir == Dir::Up { -0.3 } else { 0.3 });
-            }
-            return d.map(|_| true);
+        if let Some(handled) = self.tv_drawer_key(key, d) {
+            return Some(handled);
         }
         if watch {
             return self.tv_watch_key(key, d);
@@ -1014,7 +1011,7 @@ impl App {
     }
 
     /// Moves focus inside `scope` only; false when nothing lies that way.
-    fn tv_move_in(&mut self, scope: &str, d: Dir) -> bool {
+    pub(super) fn tv_move_in(&mut self, scope: &str, d: Dir) -> bool {
         let flat = bridge::spatial_rects(scope, SEL, "", "", CARD);
         let Some((rects, _, cur)) = split(&flat) else { return false };
         let Some(c) = cur else { return false };
@@ -1102,6 +1099,14 @@ impl App {
     /// Nothing focused: the seek bar on watch pages, else the link last opened from this page, else
     /// the first card in view, else the first stop of the page, else the rail.
     pub(super) fn tv_focus_default(&mut self) {
+        if self.tv_search_on() {
+            if bridge::any("#ytc[data-tvk='1']") {
+                bridge::focus_sel(tv::keyboard::ID, ".tvk-keys button");
+            } else {
+                bridge::focus(tv::keyboard::QUERY);
+            }
+            return;
+        }
                 if matches!(self.route, Route::Watch { .. }) {
             if bridge::any("#ytc-player .pfail .pfbt") {
                 bridge::focus_sel(PLAYER, ".pfail .pfbt");
@@ -1161,6 +1166,10 @@ impl App {
             return;
         }
 
+        if self.tv_drawer_focus() {
+            return;
+        }
+
         if !bridge::any(":focus") || bridge::any("body:focus") {
             self.tv.auto_rail = false;
             self.tv_focus_default();
@@ -1177,7 +1186,7 @@ impl App {
 }
 
 /// `[x, y, w, h, m]*n, current` → rects, marks and the focused index.
-fn split(flat: &[f64]) -> Option<(Vec<tv::Rect>, Vec<u8>, Option<usize>)> {
+pub(super) fn split(flat: &[f64]) -> Option<(Vec<tv::Rect>, Vec<u8>, Option<usize>)> {
     if flat.len() < 6 {
         return None;
     }

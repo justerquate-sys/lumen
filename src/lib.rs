@@ -239,7 +239,14 @@ pub fn on_show() {
 
 #[wasm_bindgen]
 pub fn on_key(key: &str, editable: bool) -> bool {
-    let name = if telemetry::enabled() { telemetry::key_action(key, editable) } else { None };
+    // TV Search edits text while buttons have focus, so `editable` is false. Neither physical
+    // letters nor the remote's directions/OK sequence may become a keystroke trace. Navigation
+    // and request spans still measure the submitted search without recording its text.
+    let name = if telemetry::enabled() && !(tv::on() && bridge::any("#ytc[data-tvq='1']")) {
+        telemetry::key_action(key, editable)
+    } else {
+        None
+    };
     let tel = name.is_some();
     if let Some(n) = name {
         telemetry::act_begin(n, if editable { "field" } else { "key" }.into(), "keyboard", app::route_now(), false);

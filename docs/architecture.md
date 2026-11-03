@@ -913,6 +913,26 @@ toasts); text `--tx --mu --fa` (≥ 10:1, ≥ 5:1, ≥ 4.5:1 on bg/pn/rs), accen
 `--pd-icon` .95 (icon-only buttons), `--pd-glyph` .84 (an icon squeezing inside its control). Selected:
 rows get `--on` + mint text; chips and segments solid `--ac` with `--bg` text.
 
+### Google TV interaction layer
+
+The TV platform flag keeps these behaviors separate from the desktop extension. The existing four-column layout,
+charcoal/mint palette and overscan-safe sizing remain; focus uses a stationary mint frame. Remote focus, rail
+expansion, panels and late-arriving page content are immediate, without the desktop's entrance waves or card zoom.
+
+Search uses a Rust-rendered D-pad keyboard (`app/tvkeyboard.rs`, `tv/keyboard.rs`) and a query activation button,
+with a hidden backing input for the shared search pipeline. It does not depend on Android's VirtualKeyboard API,
+including on existing TV 0.3.0 shells whose shim intercepts Enter on text inputs. Letters, symbols, space, deletion,
+clear and submission reuse the shared suggestion/prefetch/request logic. Back first dismisses the keyboard to
+the query, then closes Search; a physical keyboard remains usable. The bridge's `data-key-input` opt-in forwards
+keyboard events from controls; Rust decides how they edit text or activate controls.
+
+The TV player exposes Comments and More info as remote-operated side panels (`app/tvwatch.rs`). Comments uses
+the existing anonymous WEB parsing, sorting, replies and continuation state, and fetches only after explicit
+opening. Closing retains that state in memory. More info restores its content after Back/Forward, with the
+description, channel, subscription action and available chapters. Each panel has Back to video, contains remote
+focus while open and restores it to its originating player button on close. Navigation closes panels before
+the watch snapshot is saved, preventing stale overlays on another page. Desktop markup and behavior are preserved.
+
 ## Moving from the old YourTube extension
 
 An earlier, private YourTube extension (a native-YouTube restyling) kept its data in its own storage. The client

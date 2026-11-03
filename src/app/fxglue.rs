@@ -598,7 +598,7 @@ impl App {
     /// is written first, exactly as for the keyboard): the chip row's selection pill slides to the new
     /// chip, a removed/moved/hidden chip reflows its neighbours, the Filters segments' pill slides.
     pub(super) fn fx_click(&mut self, act: &str, arg: &str) -> bool {
-        let kbd = self.fx.kbd;
+        let kbd = self.fx.kbd || crate::tv::on();
         // Movement (pill slides, reflows) is off for the keyboard and under reduced motion.
         let still = kbd || (matches!(act, "fx-topic" | "fx-nchip" | "fx-tdel" | "fx-nup" | "fx-ndown" | "fx-nhide" | "fx-dur" | "fx-order") && bridge::reduced_motion());
         let chip_before = matches!(act, "fx-topic" | "fx-nchip").then(|| self.fx_chip_sel_id());
@@ -663,7 +663,7 @@ impl App {
     pub(super) fn fx_entrance(&mut self, skeleton: bool, fresh_list: bool) {
         let armed = std::mem::take(&mut self.fx.enter) && fresh_list;
         let fresh = skeleton && self.nav > 1 && !self.mo.calm && !self.fx.calm;
-        if !(armed || fresh) || self.lay() != Lay::Grid {
+        if crate::tv::on() || !(armed || fresh) || self.lay() != Lay::Grid {
             return;
         }
         let still = bridge::reduced_motion();
@@ -1294,7 +1294,11 @@ impl App {
                 self.fx_form_now(kb);
                 if on {
                     self.fx.sug.anim = !kb;
-                    let typed = if self.fx.sug.typed.is_empty() {
+                    let typed = if crate::tv::on() {
+                        // The TV query control is a button backed by this input. Empty is a real
+                        // edit too: returning from its keyboard must not revive the route's query.
+                        bridge::input_value("ytc-q")
+                    } else if self.fx.sug.typed.is_empty() {
                         if let Route::Search { q, .. } = &self.route { q.clone() } else { String::new() }
                     } else {
                         self.fx.sug.typed.clone()

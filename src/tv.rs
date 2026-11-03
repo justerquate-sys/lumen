@@ -18,6 +18,8 @@ use crate::config::{Auth, Config, ORIGIN};
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 
+pub mod keyboard;
+
 /// YouTube's TV client (`/tv`, read 2 Nov 2026: `INNERTUBE_CLIENT_NAME` TVHTML5, version
 /// `7.20261027.15.00`). Kept as data so the version can be bumped.
 pub const TV_NAME: &str = "TVHTML5";

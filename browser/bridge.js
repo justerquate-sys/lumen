@@ -101,9 +101,10 @@ const YTC = (() => {
       if (e.altKey) return;
       // Ctrl/⌘ combinations outside text fields are offered as `Mod+<key>`; unhandled ones stay the browser's.
       if (e.ctrlKey || e.metaKey) { if (!editable(e.target) && call('on_key', 'Mod+' + e.key, false)) e.preventDefault(); return; }
-      // Enter/Space on a focused button or link stay native activation (→ click).
-      if ((e.key === 'Enter' || e.key === ' ') && e.target.closest && e.target.closest('button,a[href]')) return;
-      if (call('on_key', e.key, editable(e.target))) e.preventDefault();
+      // Enter/Space stay native activation unless this control's region also accepts text keys.
+      // An unhandled key still follows its native activation path.
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.closest && e.target.closest('button,a[href]') && !e.target.closest('[data-key-input]')) return;
+      if (call('on_key', e.key === 'Tab' && e.shiftKey ? 'Shift+Tab' : e.key, editable(e.target))) e.preventDefault();
     });
     addEventListener('popstate', () => call('on_pop'));
     addEventListener('scrollend', () => call('on_scroll_end', scrollY), { passive: true });

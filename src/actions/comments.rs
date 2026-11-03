@@ -222,7 +222,9 @@ pub fn comment_html(out: &mut String, c: &Comment, v: &str, reply: Option<usize>
     out.push_str(if href.is_some() { "</a>" } else { "</span>" });
     out.push_str("<span class=\"yctm\">");
     esc_into(out, &c.time);
-    out.push_str("</span></div><div class=\"yct\">");
+    // The text is the remote's reader stop. The surrounding thread contains the author/reply
+    // actions and expanded replies; making that entire box focusable traps its contained controls.
+    out.push_str(if crate::tv::on() { "</span></div><div class=\"yct\" tabindex=\"0\">" } else { "</span></div><div class=\"yct\">" });
     crate::render::runs(out, &c.text, v);
     out.push_str("</div><div class=\"ycf\"><span class=\"ycl\">");
     out.push_str(watch::I_LIKE);
@@ -289,11 +291,42 @@ pub fn notice_html(text: &str, retry: bool) -> String {
     s
 }
 
+/// A TV reply error keeps its own retry action, including after "Show more replies" was hidden.
+pub fn reply_error_html(text: &str, slot: usize) -> String {
+    let mut s = String::from("<p class=\"yc-note\">");
+    esc_into(&mut s, text);
+    s.push_str(&format!(" <button type=\"button\" class=\"ycrb\" data-act=\"a-rep\" data-arg=\"{slot}\">Try again</button></p>"));
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::actions::tests::fixture;
     use crate::parse::Link;
+    #[test]
+    fn tv_comment_is_readable_by_remote_without_changing_desktop_tab_order() {
+        let c = Comment { author: "A <viewer>".into(), text: vec![Run { text: "Read this".into(), link: None }], ..Default::default() };
+        let mut tv = String::new();
+        crate::tv::set_on(true);
+        comment_html(&mut tv, &c, "abcdefghijk", None);
+        crate::tv::set_on(false);
+        let mut desktop = String::new();
+        comment_html(&mut desktop, &c, "abcdefghijk", None);
+        assert!(tv.starts_with("<div class=\"ycm\">"));
+        assert!(tv.contains("<div class=\"yct\" tabindex=\"0\">Read this</div>"));
+        assert!(tv.contains("A &lt;viewer&gt;") && desktop.contains("Read this"));
+        assert!(!desktop.contains("tabindex=\"0\""));
+    }
+
+    #[test]
+    fn tv_reply_error_has_an_escaped_message_and_the_original_slot() {
+        let h = reply_error_html("Couldn't load <replies> & retry", 17);
+        assert!(h.contains("&lt;replies&gt; &amp; retry"));
+        assert!(h.contains("data-act=\"a-rep\" data-arg=\"17\">Try again</button>"));
+        assert!(!h.contains("data-act=\"a-cretry\""), "reply Retry must not reload the top-level comments");
+    }
+
     #[test]
     fn first_page_entity_format() {
         let p = page(&fixture("comments.json"), "-Bxc4gJluC0");

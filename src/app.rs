@@ -34,6 +34,8 @@ mod motionglue;
 mod speed;
 mod telglue;
 mod tvglue;
+mod tvwatch;
+mod tvkeyboard;
 mod upglue;
 mod voiceglue;
 /// Request context for `actions` (disjoint from `App::acts`).
@@ -930,8 +932,10 @@ impl App {
         self.voice_leave();
         self.tel_leave();
         self.logo_done();
+        self.tv_keyboard_leave();
         self.direct = false;
         self.acts.leave();
+        self.tv_drawers_reset();
         self.stop_player();
         self.save_current();
         self.fx_leave();
@@ -966,6 +970,7 @@ impl App {
         bridge::attr("ytc", "data-nav", self.route.nav_key());
         self.side_move();
         bridge::value("ytc-q", if let Route::Search { q, .. } = &self.route { q } else { "" });
+        self.tv_keyboard_label();
         if mode == Mode::Pop {
             if let Some(i) = self.saved.iter().position(|s| s.url == self.url) {
                 let s = self.saved.remove(i);
@@ -983,6 +988,7 @@ impl App {
                     self.acts.on_restore(&v, w.as_deref());
                     if let Some(w) = w.as_deref() {
                         self.player_chapters(&v, w);
+                        self.tv_watch_data(w, &v);
                     }
                     self.up_head();
                 }
@@ -1607,6 +1613,9 @@ impl App {
             return false;
         }
         crate::telemetry::input(if kbd { "keyboard" } else { "pointer" });
+        if act.starts_with("tv-kb-") {
+            return self.tv_keyboard_click(act, arg);
+        }
         if act.starts_with("tv-") {
             return self.tv_click(act);
         }
@@ -1635,7 +1644,10 @@ impl App {
         if act.starts_with("a-") {
             let now = self.player.as_ref().map(|p| p.time()).unwrap_or(0.0);
             match self.acts.on_click(&net!(self), act, arg, now, kbd) {
-                Click::Handled => return true,
+                Click::Handled => {
+                    self.tv_drawer_focus();
+                    return true;
+                }
                 Click::Ignored => return false,
                 Click::Pass => {}
             }
@@ -2125,6 +2137,7 @@ impl App {
         }
         if self.acts.owns_fetch(id) {
             self.acts.on_fetch(&net!(self), id, status, body);
+            self.tv_drawer_focus();
             for (kind, reason) in std::mem::take(&mut self.acts.incidents) {
                 self.incident(kind, &reason, None);
             }
@@ -2600,10 +2613,8 @@ impl App {
     fn render_watch(&mut self, w: &Watch) {
         let Route::Watch { v, .. } = self.route.clone() else { return };
         bridge::html(INFO, &render::watch_info(w, &v));
-        if crate::tv::on() {
-            self.tv.info = render::tv_info(w, &v);
-        }
         self.acts.on_watch(&v, w);
+        self.tv_watch_data(w, &v);
         self.player_chapters(&v, w);
         let mut s = String::with_capacity(w.related.items.len() * 1000);
         render::related(&mut s, &self.fx_visible(&w.related.items));

@@ -33,6 +33,10 @@ pub const CM: &str = "ytc-cm";
 pub const CM_LIST: &str = "ytc-cm-list";
 pub const CM_MORE: &str = "ytc-cm-more";
 pub const ACCT: &str = "ytc-acct";
+pub const TV_CM_BODY: &str = "ytc-tvcm-body";
+const TV_SUB: &str = "ytc-tvsub";
+const TV_SUB_B: &str = "ytc-tvsub-b";
+const TV_MSG: &str = "ytc-tvact-msg";
 
 /// Filled into `render::COMMENTS` (outside `#ytc-info`): chapters, then comments.
 const BELOW: &str = "<div id=\"ytc-chap\"></div><div id=\"ytc-cm\" class=\"yc\" aria-label=\"Comments\"></div>";
@@ -291,6 +295,9 @@ impl Actions {
     fn say(&mut self, html: &str) {
         bridge::attr(MSG, "class", "ya-msg");
         bridge::html(MSG, html);
+        if crate::tv::on() {
+            bridge::html(TV_MSG, html);
+        }
         self.msg_gen += 1;
         let g = self.msg_gen;
         self.timer(Tm::Msg(g), MSG_MS);
@@ -311,7 +318,11 @@ impl Actions {
         if signed_in() {
             return false;
         }
-        self.say(&format!("Sign in to {what}. <a href=\"{SIGN_IN}\">Sign in</a>"));
+        if crate::tv::on() {
+            self.say(&format!("Sign in to {what} <button type=\"button\" class=\"tvb\" data-act=\"tv-signin\">Sign in with your phone</button>"));
+        } else {
+            self.say(&format!("Sign in to {what}. <a href=\"{SIGN_IN}\">Sign in</a>"));
+        }
         true
     }
 
@@ -539,6 +550,22 @@ impl Actions {
             None => String::new(),
         };
         bridge::html(SUB, &html);
+        self.tv_info_refresh();
+    }
+
+    /// More info reuses the watch page's subscription state without duplicating the desktop ids.
+    pub fn tv_info_refresh(&self) {
+        if !crate::tv::on() {
+            return;
+        }
+        let html = match self.acts.channel_id.as_ref().and_then(|c| self.subs.get(c)) {
+            Some(t) if signed_in() => {
+                let (cls, label, aria) = watch::sub_view(t.shown(), t.busy(), self.confirm != 0, &self.acts.channel);
+                format!("<button type=\"button\" id=\"{TV_SUB_B}\" class=\"{cls}\" data-act=\"a-sub\" aria-pressed=\"{}\" aria-label=\"{}\">{label}</button>", t.shown(), crate::util::esc(&aria))
+            }
+            _ => String::new(),
+        };
+        bridge::html(TV_SUB, &html);
     }
 
     /// A Subscribe state change: the same button, new attributes (its colors
@@ -550,6 +577,12 @@ impl Actions {
         bridge::attr(watch::SUB_B, "aria-pressed", if t.shown() { "true" } else { "false" });
         bridge::attr(watch::SUB_B, "aria-label", &aria);
         bridge::text(watch::SUB_B, label);
+        if crate::tv::on() {
+            bridge::attr(TV_SUB_B, "class", &cls);
+            bridge::attr(TV_SUB_B, "aria-pressed", if t.shown() { "true" } else { "false" });
+            bridge::attr(TV_SUB_B, "aria-label", &aria);
+            bridge::text(TV_SUB_B, label);
+        }
     }
 
     /// Opens or closes a persistent popover by class (client.css grows it from
@@ -806,6 +839,9 @@ impl Actions {
                 if g == self.msg_gen {
                     bridge::html(MSG, "");
                     bridge::attr(MSG, "class", "ya-msg");
+                    if crate::tv::on() {
+                        bridge::html(TV_MSG, "");
+                    }
                 }
             }
             Some(Tm::Copied(g)) => {
@@ -1015,8 +1051,18 @@ impl Actions {
 
     // ------------------------------------------------------------ comments
 
+    /// Explicit TV drawer opening: begin the first page, otherwise resume ordinary sentinel paging.
+    pub fn tv_comments_open(&mut self, net: &Net) {
+        if self.cm.as_ref().is_some_and(|cm| !cm.started) {
+            self.on_visible(net, CM_MORE);
+        } else if self.cm.as_ref().is_some_and(|cm| cm.cont.is_some() && !cm.busy) {
+            bridge::observe(CM_MORE);
+        }
+    }
+
     fn start_comments(&mut self) {
-        bridge::html(crate::render::COMMENTS, BELOW);
+        let tv = crate::tv::on();
+        bridge::html(if tv { TV_CM_BODY } else { crate::render::COMMENTS }, BELOW);
         bridge::html(CHAP, &watch::chapters_html(&self.v, &self.acts.chapters));
         let a = &self.acts;
         let mut cm = Cm { v: self.v.clone(), epoch: 0, sorts: a.sorts.clone(), count: a.comment_count.clone(), first: a.comments.clone(), ..Default::default() };
@@ -1026,7 +1072,7 @@ impl Actions {
             return;
         }
         if cm.first.is_none() {
-            bridge::html(CM, "");
+            bridge::html(CM, if tv { "<p class=\"yc-note\">Comments are not available for this video</p>" } else { "" });
             self.cm = None;
             return;
         }
@@ -1035,6 +1081,10 @@ impl Actions {
         bridge::mark_slide(comments::SORT, &comments::sort_id(0), "", "ycsk", false);
         let g = cm.epoch;
         self.cm = Some(cm);
+        // TV comments are a deliberate drawer action. Its hidden sentinel must never compete with playback.
+        if tv {
+            return;
+        }
         let id = next_id();
         self.timers.insert(id, Tm::Comments(g));
         bridge::idle(id, COMMENTS_IDLE_MS);
@@ -1069,6 +1119,9 @@ impl Actions {
     pub fn on_visible(&mut self, net: &Net, id: &str) -> bool {
         if id != CM_MORE {
             return false;
+        }
+        if crate::tv::on() && !bridge::any("#ytc-comments.on") {
+            return true;
         }
         let Some(cm) = self.cm.as_mut() else { return true };
         if cm.busy || cm.v != self.v {
@@ -1189,7 +1242,9 @@ impl Actions {
                     t.loaded = false;
                 }
                 self.report("comments", msg);
-                bridge::html(&rp, &comments::notice_html(&format!("Couldn't load replies. {r}"), false));
+                let reason = format!("Couldn't load replies. {r}");
+                let html = if crate::tv::on() { comments::reply_error_html(&reason, slot) } else { comments::notice_html(&reason, false) };
+                bridge::html(&rp, &html);
                 return;
             }
         };

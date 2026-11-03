@@ -41,13 +41,19 @@ scan the QR code with your phone, or go to the address shown (google.com/device 
 the code shown on the TV and pick your account. That is YouTube's own TV sign-in: your history, subscriptions,
 Watch later and playlists are the same as everywhere else. *Account → Sign out* revokes the TV's access.
 
-**Remote:** the arrows move the focus (the focused card grows and gets a mint ring), OK selects, Back closes what
+**Remote:** the arrows move the focus (a steady mint frame marks the focused card), OK selects, Back closes what
 is open, then goes to the rail, then back (on Home it leaves the app). ← from the first column opens the rail
 (Search, Home, Subscriptions, History, Watch later, Playlists, Liked, Account). *Search* opens the search screen:
-OK on the field opens the TV keyboard (its microphone dictates), ↓ walks recent searches and suggestions. A video
+the built-in keyboard opens at once, with letters, numbers/symbols, Space, Delete, Clear and Search, all operated
+with the remote. Back closes the keyboard onto the query control; ↓ then walks recent searches and suggestions,
+and OK on the query reopens the keyboard. A physical keyboard can type too. Another Back returns to the page.
+A video
 plays full screen at once; any key shows the controls (they hide 4 s after the last key while playing): ←/→ on the
 bar seek 10 s (faster while held, with the storyboard frame), OK plays/pauses, ↓ goes to the buttons (captions,
-speed, quality, like, Watch later, more info) and once more to Up next. Media keys (play/pause, rewind,
+speed, quality, like, Watch later, Comments, More info), with a visible label for the focused action, and once
+more to Up next. Comments opens a readable side panel with Top/Newest, replies and more pages; it loads only
+when opened. More info includes the description, channel, Subscribe when signed in, and chapters when available.
+Back or Back to video closes either panel and returns to its player control. Media keys (play/pause, rewind,
 fast-forward) work everywhere on the watch page. The look is documented in [design/](design/README.md).
 
 ## Updates
@@ -55,6 +61,10 @@ fast-forward) work everywhere on the watch page. The look is documented in [desi
 Everything is in the app: **About & updates**, the last item of the rail (under Sign in / Account, so it is there
 signed out too). It shows the app version, the interface version and build, when the last check ran and what it
 found, with one action focused:
+
+The two versions advance independently: **App** changes after Android installs an APK; **Interface** changes
+when the signed client update is applied. An interface update can add TV features while the installed app
+version stays the same. A local build is not available to the TV until its signed release is published.
 
 - **Check for updates** asks GitHub now (the shell's `shell_check`).
 - **Update now** (a new interface was found): it is already downloaded and verified; the screen restarts with it at
@@ -150,6 +160,21 @@ chmod 600 *
 GITHUB_TOKEN=… node tv/scripts/release.cjs            # build, sign, publish
 node tv/scripts/release.cjs --dry-run                 # build and sign into tv/out/release/ only
 ```
+
+Before a release, advance the shared client version in `Cargo.toml`, `package.json` and
+`browser/manifest.json` together (including their lockfiles). For a new APK, advance the shell version in
+`tv/shell/src-tauri/Cargo.toml` and its lockfile too. Verify the APK's actual Android version name and code,
+then check the staged package against the previous published release with the Rust updater:
+
+```sh
+LUMEN_TV_RELEASE_DIR="$PWD/tv/out/release" \
+LUMEN_TV_PREVIOUS_RELEASE_DIR=/path/to/previous-release \
+cargo test --locked --manifest-path tv/core/Cargo.toml --test release_package -- --ignored
+```
+
+The previous-release directory contains its published manifest and signature. This check verifies both
+signatures, every staged file, increasing version/sequence values, the fixed APK download alias, the older
+app's update offer and download, and the new app's up-to-date state. It serves artifacts only on loopback.
 
 It builds the release APK (`tv/scripts/build.sh --release`), signs `lumen-tv-manifest.json` (the bundle's files and
 the APK with their SHA-256, the bundle sequence, the client version) with

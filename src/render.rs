@@ -201,7 +201,8 @@ fn sidebar(out: &mut String, at: usize) {
 /// `None` shows the skeleton. The preconnects start the image CDN handshakes
 /// at document_start, before the first InnerTube response.
 pub fn shell(route: &Route, _url: &str, main: Option<&str>) -> String {
-    let q = if let Route::Search { q, .. } = route { esc(q) } else { String::new() };
+    let query = if let Route::Search { q, .. } = route { q.as_str() } else { "" };
+    let q = esc(query);
     let tv = crate::tv::on();
     let mut side = String::with_capacity(1600);
     if tv {
@@ -214,13 +215,17 @@ pub fn shell(route: &Route, _url: &str, main: Option<&str>) -> String {
 <link rel=\"preconnect\" href=\"https://i.ytimg.com\"><link rel=\"preconnect\" href=\"https://yt3.ggpht.com\"></head>\
 <body id=\"ytc\" data-nav=\"{nav}\"><header id=\"ytc-top\">\
 <a id=\"{LOGO_ID}\" class=\"logo\" href=\"/\" aria-label=\"YouTube home\" data-hov=\"logo\">{LOGO}<span>YouTube</span></a>\
-<form id=\"ytc-search\" role=\"search\" action=\"/results\"><i class=\"qf\" aria-hidden=\"true\"></i><input id=\"ytc-q\" name=\"search_query\" type=\"search\" placeholder=\"Search\" aria-label=\"Search\" autocomplete=\"off\" spellcheck=\"false\" role=\"combobox\" aria-autocomplete=\"list\" aria-controls=\"ytc-sug\" aria-expanded=\"false\" data-input=\"q\" data-focus=\"q\" value=\"{q}\"><button type=\"button\" class=\"qx\" data-act=\"fx-qx\" data-keep-focus aria-label=\"Clear search\" tabindex=\"-1\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m7 7 10 10M17 7 7 17\"/></svg></button><span id=\"ytc-qv\" class=\"qv\" aria-hidden=\"true\"></span><button type=\"button\" id=\"ytc-mic\" class=\"qm\" data-hov=\"mic\" data-act=\"vk-mic\" data-ctx=\"vk\" data-pop=\"vk\" data-keep-focus aria-label=\"Voice search\" aria-pressed=\"false\" aria-keyshortcuts=\"Alt\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"9\" y=\"3\" width=\"6\" height=\"11.5\" rx=\"3\"/><path d=\"M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21\"/></svg><i class=\"wv\" aria-hidden=\"true\"><b></b><b></b><b></b><b></b><b></b></i></button><ul id=\"ytc-sug\" class=\"sug\" role=\"listbox\" aria-label=\"Search history and suggestions\" data-keep-focus></ul><button type=\"submit\" class=\"qs\" aria-label=\"Search\"><svg viewBox=\"0.5 0.5 24 24\" aria-hidden=\"true\"><circle cx=\"10.5\" cy=\"10.5\" r=\"6.5\"/><path d=\"M15.5 15.5 21 21\"/></svg></button></form><div id=\"ytc-vk\" class=\"vk\" data-pop=\"vk\" role=\"dialog\" aria-label=\"Voice search\"></div>\
+<form id=\"ytc-search\" role=\"search\" action=\"/results\"{key_input}><i class=\"qf\" aria-hidden=\"true\"></i>{tv_query}<input id=\"ytc-q\" name=\"search_query\" type=\"{query_type}\" placeholder=\"Search\" aria-label=\"Search\" autocomplete=\"off\" spellcheck=\"false\" role=\"combobox\" aria-autocomplete=\"list\" aria-controls=\"ytc-sug\" aria-expanded=\"false\" data-input=\"q\" data-focus=\"q\" value=\"{q}\"><button type=\"button\" class=\"qx\" data-act=\"fx-qx\" data-keep-focus aria-label=\"Clear search\" tabindex=\"-1\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m7 7 10 10M17 7 7 17\"/></svg></button><span id=\"ytc-qv\" class=\"qv\" aria-hidden=\"true\"></span><button type=\"button\" id=\"ytc-mic\" class=\"qm\" data-hov=\"mic\" data-act=\"vk-mic\" data-ctx=\"vk\" data-pop=\"vk\" data-keep-focus aria-label=\"Voice search\" aria-pressed=\"false\" aria-keyshortcuts=\"Alt\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"9\" y=\"3\" width=\"6\" height=\"11.5\" rx=\"3\"/><path d=\"M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21\"/></svg><i class=\"wv\" aria-hidden=\"true\"><b></b><b></b><b></b><b></b><b></b></i></button>{tv_keyboard}<ul id=\"ytc-sug\" class=\"sug\" role=\"listbox\" aria-label=\"Search history and suggestions\" data-keep-focus></ul><button type=\"submit\" class=\"qs\" aria-label=\"Search\"><svg viewBox=\"0.5 0.5 24 24\" aria-hidden=\"true\"><circle cx=\"10.5\" cy=\"10.5\" r=\"6.5\"/><path d=\"M15.5 15.5 21 21\"/></svg></button></form><div id=\"ytc-vk\" class=\"vk\" data-pop=\"vk\" role=\"dialog\" aria-label=\"Voice search\"></div>\
 <div class=\"tr\"><div id=\"ytc-hfx\"></div>{acct}</div>\
 </header>{side}<div id=\"{PILL}\"></div><main id=\"{MAIN}\">{main}</main><div id=\"{KEYS}\" role=\"dialog\" aria-label=\"Keyboard shortcuts\"></div><div id=\"ytc-imp\" class=\"imp\"></div><div id=\"{DEBUG}\" hidden></div></body>",
         nav = route.nav_key(),
         main = main.map(String::from).unwrap_or_else(|| skeleton(route)),
         // TV: the account control is the rail's last item.
         acct = if tv { "" } else { "<div id=\"ytc-acct\"></div>" },
+        key_input = if tv { " data-key-input" } else { "" },
+        query_type = if tv { "hidden" } else { "search" },
+        tv_query = if tv { crate::tv::keyboard::query(query) } else { String::new() },
+        tv_keyboard = if tv { crate::tv::keyboard::shell() } else { String::new() },
     )
 }
 
@@ -834,7 +839,12 @@ pub fn watch_shell(player_html: &str, info: &str, theater: bool) -> String {
     out.push_str(info);
     out.push_str("</div><section id=\"");
     out.push_str(COMMENTS);
-    out.push_str("\" class=\"cmts\"></section></div><aside class=\"wr\"><section id=\"");
+    if crate::tv::on() {
+        out.push_str("\" class=\"cmts tvcm\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Comments\"><header class=\"tvcm-head\"><button type=\"button\" class=\"tvb tvx\" data-act=\"tv-comments-close\">Back to video</button><h2>Comments</h2></header><div id=\"ytc-tvcm-body\" class=\"tvcm-body\"><p class=\"yc-note\">Loading comments…</p></div>");
+    } else {
+        out.push_str("\" class=\"cmts\">");
+    }
+    out.push_str("</section></div><aside class=\"wr\"><section id=\"");
     out.push_str(PLAYLIST);
     out.push_str("\" class=\"plw\"></section><div id=\"");
     out.push_str(UPNEXT);
@@ -962,23 +972,37 @@ fn description(out: &mut String, w: &Watch, video_id: &str) {
     out.push_str("</section>");
 }
 
-/// TV: the watch page's "More info" panel (title, channel, views and date, the whole description as text;
-/// ↑/↓ scroll it).
-pub fn tv_info(w: &Watch, _video_id: &str) -> String {
+/// TV: the watch page's readable details, with the same links, timestamps and chapters as the video.
+pub fn tv_info(w: &Watch, video_id: &str) -> String {
     let mut out = String::with_capacity(2048);
-    out.push_str("<h2>");
+    out.push_str("<header class=\"tvih\"><button type=\"button\" class=\"tvb tvx\" data-act=\"tv-info-close\">Back to video</button></header><div id=\"ytc-tvinfo-body\" class=\"tvib\"><h2>");
     esc_into(&mut out, &w.title);
-    out.push_str("</h2><p class=\"m\">");
+    out.push_str("</h2><p class=\"m tvim\">");
     let meta: Vec<&str> = [w.channel.as_str(), w.views.as_str(), w.date.as_str()].into_iter().map(str::trim).filter(|s| !s.is_empty()).collect();
     esc_into(&mut out, &meta.join(" · "));
-    out.push_str("</p><div class=\"tvd\" tabindex=\"0\" aria-label=\"Description\">");
-    let mut any = false;
-    for r in &w.desc {
-        any |= !r.text.trim().is_empty();
-        esc_into(&mut out, &r.text);
+    out.push_str("</p><div class=\"tvia\">");
+    if let Some(href) = w.channel_href.as_deref().filter(|_| !w.channel.trim().is_empty()) {
+        out.push_str("<a class=\"tvb tvx\" href=\"");
+        esc_into(&mut out, href);
+        out.push_str("\">View channel</a>");
     }
-    if !any {
-        out.push_str("<span class=\"m\">No description.</span>");
+    out.push_str("<span id=\"ytc-tvsub\"></span></div><div id=\"ytc-tvact-msg\" class=\"tvam\" role=\"status\"></div><div class=\"tvd\" tabindex=\"0\" aria-label=\"Description\">");
+    if w.desc.iter().any(|r| !r.text.trim().is_empty()) {
+        runs(&mut out, &w.desc, video_id);
+    } else {
+        out.push_str("<span class=\"m\">No description</span>");
+    }
+    out.push_str("</div>");
+    if !w.acts.chapters.is_empty() {
+        out.push_str("<section class=\"tvchap\" aria-label=\"Chapters\"><h3>Chapters</h3><ol>");
+        for chapter in &w.acts.chapters {
+            out.push_str(&format!("<li><button type=\"button\" data-act=\"seek\" data-arg=\"{}\"><span>", chapter.start));
+            esc_into(&mut out, &crate::actions::watch::clock(chapter.start));
+            out.push_str("</span><span>");
+            esc_into(&mut out, &chapter.title);
+            out.push_str("</span></button></li>");
+        }
+        out.push_str("</ol></section>");
     }
     out.push_str("</div>");
     out
@@ -1065,6 +1089,30 @@ pub fn debug(d: &DebugInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tv_details_keep_safe_links_and_chapter_actions() {
+        let mut w = Watch {
+            title: "A <video>".into(),
+            channel: "A channel".into(),
+            channel_href: Some("/@a?x=\"bad\"".into()),
+            desc: vec![Run { text: "At 0:12 <script>".into(), link: Some(Link::Seek(12)) }],
+            ..Default::default()
+        };
+        w.acts.chapters.push(crate::actions::watch::Chapter { start: 12, title: "Setup <script>".into(), ..Default::default() });
+        let h = tv_info(&w, "abcdefghijk");
+        assert!(h.contains("A &lt;video&gt;") && !h.contains("<script>"));
+        assert!(h.contains("/@a?x=&quot;bad&quot;") && h.contains("View channel"));
+        assert_eq!(h.matches("data-act=\"seek\" data-arg=\"12\"").count(), 2);
+        assert!(h.contains("data-act=\"tv-info-close\"") && h.contains("id=\"ytc-tvsub\""));
+        crate::tv::set_on(true);
+        let tv = watch_shell("", "", false);
+        crate::tv::set_on(false);
+        let desktop = watch_shell("", "", false);
+        assert!(tv.contains("id=\"ytc-tvcm-body\"") && tv.contains("aria-label=\"Comments\""));
+        assert_eq!(tv.matches("id=\"ytc-comments\"").count(), 1);
+        assert!(!desktop.contains("tvcm-body") && !desktop.contains("tv-comments-close"));
+    }
+
     #[test]
     fn hostile_text_is_escaped() {
         let evil = "<img src=x onerror=\"alert(1)\">'&";

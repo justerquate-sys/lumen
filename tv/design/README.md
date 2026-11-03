@@ -1,6 +1,7 @@
 # Lumen for TV: design reference
 
-`look-sheet.html` is the 10-foot design of every TV screen, one 1920×1080 frame each (static and self-contained).
+`look-sheet.html` is the static composition reference for the TV screens, one 1920×1080 frame each.
+The fixture-driven TV screenshots from `tests/e2e.cjs` verify the shipped interface, including keyboard and comments.
 `node tv/design/render.cjs [dir]` renders the frames to PNGs (default `/tmp/lumen-tv-look/`). The app's TV
 stylesheet is the block `/* ===== TV app` at the end of `extension/client.css` (everything under
 `html[data-ytc-tv]`), and it uses the same numbers.
@@ -12,8 +13,8 @@ stylesheet is the block `/* ===== TV app` at the end of `extension/client.css` (
 | Root size | `font-size: 100vw / 60` | 1 rem = 16 CSS px on a 960×540 WebView (DPR 2), 32 px at 1920×1080, 64 px at 3840×2160: one layout at every resolution |
 | Safe area | `--sx: 3rem`, `--sy: 1.6875rem` | 5 % per side (overscan). Content and focus rings stay inside; backgrounds and pictures may bleed |
 | Ring | `--ring: .1875rem` (6 px at 1080p), offset `.1875rem` | mint `#b7ebca`, the only focus ring |
-| Focus | scale 1.06 (cards, chips, pills), 1.08 (round player buttons), 1.04 (rail items), 1.02 (list rows) | plus a raised surface (`#212b2e`, mint for primary buttons); transform only, `--d-pop` (170 ms) `--e-out` |
-| Colours | bg `#101315`, panels `#151a1d` / `#1c2428`, surface `#212b2e`, raised `#293936`, selected `#233d36`, mint `#b7ebca`, text `#edf3f3`, secondary `#a0afb1` | the desktop palette |
+| Focus | Steady mint frame, no scale | Focus, rail expansion, panels and key feedback are immediate; the focused surface steps to `#212b2e` |
+| Colours | bg `#101315`, panels `#151a1d` / `#1c2428`, surface `#212b2e`, raised `#293134`, selected `#252e2e`, mint `#b7ebca`, text `#edf3f3`, secondary `#a0afb1` | the desktop palette |
 | Type (1080p px) | titles 48–56 (`1.5–1.75rem`), body 28 (`.875rem`), secondary 24 (`.75rem`), never below 22 (`.6875rem`: duration badges, the failure reason) | card titles 2 lines, ellipsis |
 
 ## Layout
@@ -21,25 +22,33 @@ stylesheet is the block `/* ===== TV app` at the end of `extension/client.css` (
 - **Rail**: icons at x = 3.375 rem (2.5 rem tiles, pitch `--tvrow` 2.875 rem from 5.25 rem: Search, Home,
   Subscriptions, History, Watch later, Playlists, Liked), the Lumen mark on top, and at the bottom (25.875 rem)
   the account (Sign in / Account) and About & updates (a mint dot while an update is ready).
-  The focus entering it opens it over the content (labels, a panel fading in from the left, the page's mint pill
-  widening with them); the content never moves. Back from the content focuses the rail on the page's own item; →
+  The focus entering it reveals labels over the content immediately; the selected row has a quiet neutral
+  surface and mint text. The content never moves. Back from the content focuses the rail on the page's own item; →
   returns to where the focus was.
 - **Pages**: content from x = 7.75 rem to 56.25 rem, starting 2.1875 rem from the top (the chips row or the
-  heading, 2.25 rem tall), the grid 1.3125 rem below. **4 cards per row**, 11 rem wide (16:9 thumbnail 6.19 rem),
-  1.5 rem gaps: a focused card grown 6 % with its ring still ends inside the safe area. The focused row keeps the
+  heading, 2.25 rem tall), the grid 1.25 rem below. **4 cards per row**, 11 rem wide (16:9 thumbnail 6.19 rem),
+  1.5 rem gaps: a focused card and its ring stay inside the safe area without growing. The focused row keeps the
   first row's place while the remote walks the grid (instant scroll, so a held key never waits); a fixed scrim
   fades what scrolled under the top edge.
-- **Search**: a screen of its own (the header, full screen): the 3 rem field (OK opens the TV keyboard; its
-  microphone dictates), the hint, then recent searches and YouTube's suggestions as a list (→ on a recent search
-  reaches its remove button). Results: the query stays on top as the field (↑ reaches it), the grid below.
+- **Search**: a full-screen remote keyboard, independent of the installed Android input method. The 3 rem query
+  button stays above a 22 rem-wide six-column alphabet/symbol grid on the left and recent searches / YouTube's
+  suggestions on the right. Keys are 2.5 rem tall with .375 rem gaps; Space, Delete, Clear, alphabet/symbol switch
+  and Search use the same focus frame. Back first collapses the keyboard, then closes Search. Results keep the
+  query on top (↑ reaches it). Edit opens the keyboard again; a physical keyboard can also type. Search opens
+  above the playing video and its drawers too, then returns to the originating focus when closed.
 - **Player**: full screen at once. The overlay (any key; hidden 4 s after the last one while playing): title
   1.5 rem and channel top-left over a scrim; at the bottom the time row (elapsed · chapter · remaining), the bar
   (.25 rem, .375 rem focused, chapter gaps, a 1 rem knob), and the 3 rem round buttons (play/pause, captions,
-  speed, quality, like, Watch later, more info). ←/→ on the bar scrub 10 s per press (30, 60, 120 s while held)
+  speed, quality, like, Watch later, comments, more info). The focused action has a visible label below it. ←/→ on the bar scrub 10 s per press (30, 60, 120 s while held)
   with the storyboard frame above the target; the seek goes out once, when the remote rests. ↓ from the buttons
-  slides the overlay up 10 rem for the Up next row (8.5 rem cards). Menus and More info are panels from the right
-  edge (19.5 / 26 rem, content inside the safe area), focus on the current value. Captions bottom-centre at
-  1.625 rem, 7.75 rem higher while the overlay shows. The skip notice sits bottom-right (↑ from the last button).
+  moves the overlay up 10 rem immediately for the Up next row (8.5 rem cards). Menus, More info and Comments are panels from the right
+  edge (19.5 / 26 / 30 rem, content inside the safe area), visible immediately. More info has Back to video,
+  channel/subscription actions, a readable linked description and chapter buttons. Comments keeps a fixed
+  header above a scrolling list with Top/Newest, replies, loading/error notices and focusable comment text. Captions bottom-centre at
+  1.625 rem, 9.5 rem higher while the overlay shows, clear of the time and chapter row; an open settings menu keeps captions in the visible picture
+  to its left. The skip notice sits to the right of the action row (↑ or → from the last button), below the time
+  row and captions. It follows the controls above Up next, and idle captions make room for a visible notice.
+  Menu switches and seek-category labels use the same rem scale as the rest of the TV interface.
 - **Sign in / Account**: full screen: the steps on the left (the URL the device flow returned, the code at
   3.25 rem), the QR code of that URL on a light 13 rem tile on the right (`src/qr.rs`), Back first and focused.
 
@@ -48,8 +57,44 @@ stylesheet is the block `/* ===== TV app` at the end of `extension/client.css` (
   and its action focused (Check for updates, Update now, Install update, Retry). While an update is ready a small
   notice sits top right on the pages (never over a video) until the screen was opened.
 
+## Direction and finishing
+
+- **Product:** YouTube browsing and watching from the sofa, controlled by a remote.
+- **Character:** Calm, legible, responsive.
+- **World:** A dark cinema screen with quiet controls.
+- **Moments:** Real thumbnails in browse; the playing picture in watch.
+- **Signature:** One crisp mint focus frame that shows the next remote action.
+
+Text controls have .375–.5 rem corners; icon-only player buttons stay round. Type remains Roboto/system, with
+400/500 weights and 600 only for compact emphasis. Labels use sentence case. The background, raised controls,
+and selected surfaces stay charcoal; mint marks focus and meaningful state. No generated imagery is needed.
+
+## Applied polish passes
+
+1. **Spacing:** keep the existing four-card rhythm and 5% safe area. Reserve room for focus frames,
+   keyboard keys and the player's action labels; scrolling readers stop above the bottom safe margin.
+2. **Color:** retain charcoal and mint, with quieter neutral selected surfaces. Remove the seek knob's
+   decorative halo and panel shadows; video remains the main source of color.
+3. **Icons:** retain the existing outline family and consistent TV-sized icon boxes. Comments uses the
+   same stroke treatment; focused player actions also have readable text labels.
+4. **Copy:** use sentence case for Up next and Recent and suggested. Keyboard instructions describe the
+   actual remote controls, and every reader has an explicit Back to video action.
+5. **Type:** keep Roboto/system, the existing readable TV scale and three text roles. Supporting labels
+   lose uppercase tracking; numbers keep tabular alignment.
+6. **Layout:** preserve the rail, feed order and full-screen picture. Search pairs a six-column keyboard
+   with suggestions; Comments and More info use bounded scrolling panels with persistent exit controls.
+7. **Details:** rounded rectangles replace excess capsules, while icon-only player controls stay round.
+   Focus is visible, stays inside open panels and returns to the originating action when closed.
+8. **Visuals:** real thumbnails and the playing video carry the visual detail. No generated images,
+   background decoration or new brand elements were introduced.
+9. **Motion:** remote input, rail expansion and panel changes are immediate, including late responses.
+   Only the idle overlay's short opacity fade remains; reduced motion removes it.
+
 ## Motion
 
-Focus moves are the main interaction on a TV, so they move (scale, ring, the rail opening, panels sliding in from
-their edge) but never delay anything: the focus and the content are final at once, the motion is transform and
-opacity only, 110–220 ms, and scrolling that follows the focus is instant. No backdrop blur, no animated shadows.
+Remote focus, key feedback, rail expansion, panel openings, search typing and Back are immediate. No control or
+card grows while focus travels. The control overlay can fade out over 120 ms when it becomes idle, using
+`cubic-bezier(.22,1,.36,1)`; waking is immediate, and reduced motion removes that fade too. Playback progress still
+follows the media. No looping decoration, spring focus, backdrop blur or animated layout/shadows.
+
+The polish process follows [unslop by Damir Sokolovsky (@heydamir)](https://x.com/heydamir), CC BY 4.0.

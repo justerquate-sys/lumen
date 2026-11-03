@@ -5297,58 +5297,86 @@ chrome.runtime.onMessage.addListener(m => {
   });
 
   await step('filters: Shorts switch (off by default) shows/hides Home Shorts at once, no request; Shorts badge, normal watch link, kept at any minimum length; remembered', async () => {
+    const wasShorts = FX.homeShorts;
+    const noReadyBefore = await page.evaluate(() => localStorage.getItem('ytc-test-noready'));
     HOME.rich = true; FX.homeShorts = true;
-    await page.evaluate(() => sessionStorage.clear());
-    await readyDel();
-    await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
-    await page.waitForSelector('#ytc-list .c');
-    await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
-    const shortIds = () => cardIds().then(ids => ids.filter(id => homeShorts.ids.includes(id)));
-    const items = await page.evaluate(() => +document.documentElement.dataset.ytcItems);
-    assert.deepEqual(await shortIds(), [], 'Shorts hidden by default');
-    assert.equal(await page.locator('#ytc-list .th b', { hasText: /^Shorts$/ }).count(), 0);
-    await page.hover('#ytc-hfx .fx-fb');
-    await page.waitForFunction(() => getComputedStyle(document.querySelector('#ytc-fx-f .fx-p')).visibility === 'visible');
-    assert.equal(await page.locator('#ytc-fx-shorts').getAttribute('aria-checked'), 'false');
-    const n = log.api.length;
-    await page.click('#ytc-hfx [data-act=fx-shorts]');
-    await page.waitForFunction(id => !!document.querySelector(`#ytc-list .c[data-v="${id}"]`), homeShorts.ids[0]);
-    assert.equal(await page.locator('#ytc-fx-shorts').getAttribute('aria-checked'), 'true');
-    assert.deepEqual(await shortIds(), homeShorts.ids, 'all Shorts of the shelf, in native order');
-    const ids = await cardIds();
-    assert.equal(ids.indexOf(homeShorts.ids[0]), 2, 'in the shelf\'s place, after the first two videos');
-    const card = page.locator(`#ytc-list .c[data-v="${homeShorts.ids[0]}"]`);
-    assert.equal(await card.locator('.th b').textContent(), 'Shorts', 'Shorts badge in place of the duration');
-    assert.equal(await card.locator('a.t').textContent(), homeShorts.title);
-    assert.match(await card.locator('.m').last().textContent(), /views$/);
-    assert.equal(await card.locator('a.th').getAttribute('href'), `/watch?v=${homeShorts.ids[0]}`, 'opens our watch page');
-    assert.deepEqual(log.api.slice(n).filter(a => a.ep === 'browse' || a.ep === 'search').map(a => a.ep), [], 'no feed request for the switch');
-    // A minimum length hides short videos but keeps the Shorts (they were asked for).
-    await page.click('#ytc-hfx [data-act=fx-dur][data-arg="60"]');
-    await page.waitForFunction(() => document.querySelector('#ytc-fx-dur-60')?.getAttribute('aria-pressed') === 'true');
-    assert.deepEqual(await shortIds(), homeShorts.ids, 'Shorts kept at 60+ min');
-    await page.click('#ytc-hfx [data-act=fx-dur][data-arg="0"]');
-    // Remembered across a reload (chrome.storage, the main extension's key).
-    await page.waitForTimeout(600);
-    await page.reload({ waitUntil: 'commit' });
-    await page.waitForFunction(id => !!document.querySelector(`#ytc-list .c[data-v="${id}"]`), homeShorts.ids[0]);
-    assert.ok(leveldb().includes('shortsInFeeds'));
-    // Off again: hidden at once, and Home counts as before (hidden Shorts are not loaded cards).
-    await page.hover('#ytc-hfx .fx-fb');
-    await page.click('#ytc-hfx [data-act=fx-shorts]');
-    await page.waitForFunction(id => !document.querySelector(`#ytc-list .c[data-v="${id}"]`), homeShorts.ids[0]);
-    assert.equal(await page.locator('#ytc-fx-shorts').getAttribute('aria-checked'), 'false');
-    assert.deepEqual(await shortIds(), []);
-    await page.waitForTimeout(600);
-    await page.evaluate(() => sessionStorage.clear());
-    await readyDel();
-    await page.reload({ waitUntil: 'commit' });
-    await page.waitForSelector('#ytc-list .c');
-    await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
-    assert.deepEqual(await shortIds(), [], 'off is remembered');
-    assert.equal(await page.evaluate(() => +document.documentElement.dataset.ytcItems), items, 'same loaded count as with Shorts off before');
-    FX.homeShorts = false;
-    await page.mouse.move(5, 600);
+    try {
+      // Ready Home refills independently after the shown batch (Home + HOMECONT1). Keep that
+      // separately tested prefetch out of this display-only switch's zero-request window.
+      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.clear(); });
+      await readyDel();
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
+      const shortIds = () => cardIds().then(ids => ids.filter(id => homeShorts.ids.includes(id)));
+      const items = await page.evaluate(() => +document.documentElement.dataset.ytcItems);
+      assert.deepEqual(await shortIds(), [], 'Shorts hidden by default');
+      assert.equal(await page.locator('#ytc-list .th b', { hasText: /^Shorts$/ }).count(), 0);
+      await page.hover('#ytc-hfx .fx-fb');
+      await page.waitForFunction(() => getComputedStyle(document.querySelector('#ytc-fx-f .fx-p')).visibility === 'visible');
+      assert.equal(await page.locator('#ytc-fx-shorts').getAttribute('aria-checked'), 'false');
+      const n = log.api.length;
+      await page.click('#ytc-hfx [data-act=fx-shorts]');
+      await page.waitForFunction(id => !!document.querySelector(`#ytc-list .c[data-v="${id}"]`), homeShorts.ids[0]);
+      assert.equal(await page.locator('#ytc-fx-shorts').getAttribute('aria-checked'), 'true');
+      assert.deepEqual(await shortIds(), homeShorts.ids, 'all Shorts of the shelf, in native order');
+      const ids = await cardIds();
+      assert.equal(ids.indexOf(homeShorts.ids[0]), 2, 'in the shelf\'s place, after the first two videos');
+      const card = page.locator(`#ytc-list .c[data-v="${homeShorts.ids[0]}"]`);
+      assert.equal(await card.locator('.th b').textContent(), 'Shorts', 'Shorts badge in place of the duration');
+      assert.equal(await card.locator('a.t').textContent(), homeShorts.title);
+      assert.match(await card.locator('.m').last().textContent(), /views$/);
+      assert.equal(await card.locator('a.th').getAttribute('href'), `/watch?v=${homeShorts.ids[0]}`, 'opens our watch page');
+      assert.deepEqual(log.api.slice(n).filter(a => a.ep === 'browse' || a.ep === 'search').map(a => ({ ep: a.ep, browseId: a.body?.browseId, continuation: a.body?.continuation, doc: a.doc })), [], 'no feed request for the switch');
+      // A minimum length hides short videos but keeps the Shorts (they were asked for).
+      await page.click('#ytc-hfx [data-act=fx-dur][data-arg="60"]');
+      await page.waitForFunction(() => document.querySelector('#ytc-fx-dur-60')?.getAttribute('aria-pressed') === 'true');
+      assert.deepEqual(await shortIds(), homeShorts.ids, 'Shorts kept at 60+ min');
+      await page.click('#ytc-hfx [data-act=fx-dur][data-arg="0"]');
+      // Remembered across a reload (chrome.storage, the main extension's key).
+      await page.waitForTimeout(600);
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(id => !!document.querySelector(`#ytc-list .c[data-v="${id}"]`), homeShorts.ids[0]);
+      assert.ok(leveldb().includes('shortsInFeeds'));
+      // Off again: hidden at once, and Home counts as before (hidden Shorts are not loaded cards).
+      await page.hover('#ytc-hfx .fx-fb');
+      await page.click('#ytc-hfx [data-act=fx-shorts]');
+      await page.waitForFunction(id => !document.querySelector(`#ytc-list .c[data-v="${id}"]`), homeShorts.ids[0]);
+      assert.equal(await page.locator('#ytc-fx-shorts').getAttribute('aria-checked'), 'false');
+      assert.deepEqual(await shortIds(), []);
+      await page.waitForTimeout(600);
+      await page.evaluate(() => sessionStorage.clear());
+      await readyDel();
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
+      assert.deepEqual(await shortIds(), [], 'off is remembered');
+      assert.equal(await page.evaluate(() => +document.documentElement.dataset.ytcItems), items, 'same loaded count as with Shorts off before');
+    } finally {
+      FX.homeShorts = wasShorts;
+      try {
+        // An assertion can interrupt the test with Shorts or the 60-minute filter still on.
+        // Reset through the real controls so both this page's state and its saved preferences agree.
+        const reset = await page.evaluate(() => {
+          let changed = false;
+          const shorts = document.getElementById('ytc-fx-shorts');
+          if (shorts?.getAttribute('aria-checked') === 'true') { shorts.click(); changed = true; }
+          const any = document.getElementById('ytc-fx-dur-0');
+          if (any && any.getAttribute('aria-pressed') !== 'true') { any.click(); changed = true; }
+          return changed;
+        });
+        if (reset) await until(async () => {
+          const p = await sw.evaluate(() => chrome.storage.local.get(['shortsInFeeds', 'yourTubeMinimumHomeDurationV1']));
+          return p.shortsInFeeds !== true && !(p.yourTubeMinimumHomeDurationV1 > 0);
+        }, 3000, 'Shorts test preferences reset');
+        await page.mouse.move(5, 600);
+      } finally {
+        await page.evaluate(previous => {
+          if (previous === null) localStorage.removeItem('ytc-test-noready');
+          else localStorage.setItem('ytc-test-noready', previous);
+        }, noReadyBefore);
+      }
+    }
   });
 
   await step('topic feeds: + Topic adds a topic; first cards from one anonymous fresh search (YouTube\'s This month + Videos params) in < 1 s; All restores Home; × removes it', async () => {
@@ -5864,55 +5892,95 @@ chrome.runtime.onMessage.addListener(m => {
   });
 
   await step('blocked websites: appended Home batches hold back unchecked cards until their check answers; blocked cards never appear', async () => {
-    // Block example.net again (from the description), then open a rich Home.
-    await page.goto('https://www.youtube.com/watch?v=blockLINK01', { waitUntil: 'commit' });
-    await page.waitForSelector('#ytc-desc .fx-blk');
-    await page.hover('#ytc-desc a[target=_blank]');
-    await page.click('#ytc-desc .fx-blk');
-    await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent === 'Blocked · Undo');
-    HOME.rich = true;
-    // Every video of continuation pages 1–2 links to the blocked site.
-    FX.linked = new Set([...ids11(homeConts[0]), ...ids11(homeConts[1])]);
-    FX.checkDelay = 150; FX.homeMax = 0;
-    // From the very first frame of the next document: was any blocked card ever displayed?
-    if (!holdWatch) { holdWatch = true; await page.addInitScript(() => {
-      if (!sessionStorage.getItem('ytc-e2e-hold')) return;
-      const linked = JSON.parse(sessionStorage.getItem('ytc-e2e-hold')), seen = window.__hold = { flashed: [], frames: 0 };
-      const f = () => { seen.frames++; for (const id of linked) { const c = document.querySelector(`#ytc-list .c[data-v="${id}"]`); if (c && c.getClientRects().length && !seen.flashed.includes(id)) seen.flashed.push(id); } requestAnimationFrame(f); };
-      requestAnimationFrame(f);
-    }); }
-    await page.evaluate(linked => { sessionStorage.clear(); sessionStorage.setItem('ytc-e2e-hold', JSON.stringify(linked)); }, [...FX.linked]);
-    await readyDel();
-    await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
-    await page.waitForSelector('#ytc-list .c');
-    const first = await page.$$eval('#ytc-list .c:not(.fxh)', cs => cs.length);
-    await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
-    // Scroll fast: two more chunks are appended right away.
-    const before = await page.$$eval('#ytc-list .c', cs => cs.length);
-    await page.waitForFunction(n => { scrollBy(0, 2000); return document.querySelectorAll('#ytc-list .c').length >= n + 40; }, before, { timeout: 8000, polling: 50 });
-    try { await page.waitForFunction(() => !document.querySelector('#ytc-list .c.fxh'), null, { timeout: 20000 }); }
-    catch (e) {
+    const previous = { rich: HOME.rich, linked: FX.linked, checkDelay: FX.checkDelay };
+    const previousRules = await sw.evaluate(() => chrome.storage.local.get('yourTubeBlockedWebsitesV1'));
+    const previousMarker = await page.evaluate(() => sessionStorage.getItem('ytc-e2e-hold'));
+    try {
+      // Block example.net again (from the description), then open a rich Home.
+      await page.goto('https://www.youtube.com/watch?v=blockLINK01', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-desc .fx-blk');
+      await page.hover('#ytc-desc a[target=_blank]');
+      await page.click('#ytc-desc .fx-blk');
+      await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent === 'Blocked · Undo');
+      HOME.rich = true;
+      // Every video of continuation pages 1–2 links to the blocked site.
+      FX.linked = new Set([...ids11(homeConts[0]), ...ids11(homeConts[1])]);
+      FX.checkDelay = 150; FX.homeMax = 0;
+      // From the very first frame of the next document: was any blocked card ever displayed?
+      if (!holdWatch) { holdWatch = true; await page.addInitScript(() => {
+        if (!sessionStorage.getItem('ytc-e2e-hold')) return;
+        const linked = JSON.parse(sessionStorage.getItem('ytc-e2e-hold')), seen = window.__hold = { flashed: [], frames: 0, inserted: [], active: true };
+        const inserted = new Set();
+        const card = c => { const id = c.dataset.v; if (!inserted.has(id)) { inserted.add(id); seen.inserted.push(id); } };
+        const collect = node => {
+          if (node.nodeType !== 1) return;
+          if (node.matches('.c[data-v]')) card(node);
+          node.querySelectorAll('.c[data-v]').forEach(card);
+        };
+        // Count insertion, including cards removed by a later verdict. The live survivor count can
+        // decrease while scrolling and cannot tell whether two chunks were appended.
+        const observer = window.__holdObserver = new MutationObserver(records => {
+          for (const record of records) for (const node of record.addedNodes) {
+            if (record.target.nodeType === 1 && record.target.closest('#ytc-list')) collect(node);
+            else if (node.nodeType === 1) {
+              if (node.id === 'ytc-list') collect(node);
+              node.querySelectorAll('#ytc-list').forEach(collect);
+            }
+          }
+        });
+        observer.observe(document, { childList: true, subtree: true });
+        document.querySelectorAll('#ytc-list').forEach(collect);
+        // Keep the original paint-by-paint assertion independent of insertion accounting.
+        const f = () => { if (!seen.active) return; seen.frames++; for (const id of linked) { const c = document.querySelector(`#ytc-list .c[data-v="${id}"]`); if (c && c.getClientRects().length && !seen.flashed.includes(id)) seen.flashed.push(id); } requestAnimationFrame(f); };
+        requestAnimationFrame(f);
+      }); }
+      await page.evaluate(linked => { sessionStorage.clear(); sessionStorage.setItem('ytc-e2e-hold', JSON.stringify(linked)); }, [...FX.linked]);
+      await readyDel();
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      const first = await page.$$eval('#ytc-list .c:not(.fxh)', cs => cs.length);
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
+      // Scroll fast: two more chunks are appended right away.
+      const before = await page.evaluate(() => window.__hold.inserted.length);
+      await page.waitForFunction(n => { scrollBy(0, 2000); return window.__hold.inserted.length >= n + 40; }, before, { timeout: 8000, polling: 50 });
+      try { await page.waitForFunction(() => !document.querySelector('#ytc-list .c.fxh'), null, { timeout: 20000 }); }
+      catch (e) {
+        await page.keyboard.press('Backquote');
+        console.log('     still held: ' + await page.$$eval('#ytc-list .c.fxh', cs => cs.map(c => c.dataset.v).join(' ')) + '\n     ' + (await page.locator('#ytc-debug').textContent()).split('\n').find(l => l.includes('websites ·')));
+        throw e;
+      }
+      const h = await page.evaluate(() => { sessionStorage.removeItem('ytc-e2e-hold'); return window.__hold; });
+      assert.ok(h.frames > 10, 'frames sampled');
+      assert.deepEqual(h.flashed, [], 'no blocked card was ever displayed');
+      const left = await cardIds();
+      assert.ok(left.every(id => !FX.linked.has(id)), 'blocked cards removed');
+      assert.ok(FX.homeMax <= 2, `concurrent checks ${FX.homeMax}`);
       await page.keyboard.press('Backquote');
-      console.log('     still held: ' + await page.$$eval('#ytc-list .c.fxh', cs => cs.map(c => c.dataset.v).join(' ')) + '\n     ' + (await page.locator('#ytc-debug').textContent()).split('\n').find(l => l.includes('websites ·')));
-      throw e;
+      const dbg = (await page.locator('#ytc-debug').textContent()).split('\n').find(l => l.includes('websites ·')) || '';
+      await page.keyboard.press('Backquote');
+      assert.match(dbg, /held back \d+ \(shown \d+, blocked [1-9]\d*, timed out 0, waiting 0\)/);
+      console.log(`     first paint ${first} visible cards · ${h.inserted.length - before} unique cards appended · ${left.length} surviving cards · ${dbg.trim()}`);
+      // Undo the rule; restore.
+      await page.goto('https://www.youtube.com/watch?v=blockLINK01', { waitUntil: 'commit' });
+      await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent === 'Blocked · Undo');
+      await page.click('#ytc-desc .fx-blk');
+      await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent.startsWith('Block '));
+    } finally {
+      FX.checkDelay = previous.checkDelay; FX.linked = previous.linked; HOME.rich = previous.rich;
+      try {
+        await page.evaluate(marker => {
+          if (window.__hold) window.__hold.active = false;
+          window.__holdObserver?.disconnect();
+          if (marker === null) sessionStorage.removeItem('ytc-e2e-hold');
+          else sessionStorage.setItem('ytc-e2e-hold', marker);
+        }, previousMarker);
+      } finally {
+        await sw.evaluate(async saved => {
+          if ('yourTubeBlockedWebsitesV1' in saved) await chrome.storage.local.set(saved);
+          else await chrome.storage.local.remove('yourTubeBlockedWebsitesV1');
+        }, previousRules);
+      }
     }
-    const h = await page.evaluate(() => { sessionStorage.removeItem('ytc-e2e-hold'); return window.__hold; });
-    assert.ok(h.frames > 10, 'frames sampled');
-    assert.deepEqual(h.flashed, [], 'no blocked card was ever displayed');
-    const left = await cardIds();
-    assert.ok(left.every(id => !FX.linked.has(id)), 'blocked cards removed');
-    assert.ok(FX.homeMax <= 2, `concurrent checks ${FX.homeMax}`);
-    await page.keyboard.press('Backquote');
-    const dbg = (await page.locator('#ytc-debug').textContent()).split('\n').find(l => l.includes('websites ·')) || '';
-    await page.keyboard.press('Backquote');
-    assert.match(dbg, /held back \d+ \(shown \d+, blocked [1-9]\d*, timed out 0, waiting 0\)/);
-    console.log(`     first paint ${first} visible cards · ${dbg.trim()}`);
-    // Undo the rule; restore.
-    await page.goto('https://www.youtube.com/watch?v=blockLINK01', { waitUntil: 'commit' });
-    await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent === 'Blocked · Undo');
-    await page.click('#ytc-desc .fx-blk');
-    await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent.startsWith('Block '));
-    FX.checkDelay = 0; FX.linked = new Set(); HOME.rich = false;
   });
 
   await step('resume: the player reports its position; a card shows the local progress bar; reopening resumes there; stored ≤ 2,000 records', async () => {
@@ -6544,7 +6612,7 @@ chrome.runtime.onMessage.addListener(m => {
   };
   const tvShot = async (tv, name) => {
     if (!tvShots) return;
-    await tv.waitForTimeout(260); // the focus scale and panel slides settle (≤ 220 ms)
+    await tv.waitForTimeout(260); // let the fixture's content settle before the visual capture
     const vp = tv.viewportSize();
     await tv.screenshot({ path: path.join(tvShots, `${name}-${vp.width}.png`) });
   };
@@ -6588,7 +6656,16 @@ chrome.runtime.onMessage.addListener(m => {
       let fixed = false;
       for (let p = el; p; p = p.parentElement) if (getComputedStyle(p).position === 'fixed') { fixed = true; break; }
       if (!fixed || el.closest('.wr #ytc-list')) continue; // (the Up next row scrolls sideways under the focus)
-      const r = el.getBoundingClientRect();
+      // A scrollable fixed panel may contain controls beyond its visible reader.
+      // Audit the painted portion here; the focused stop and its full ring are checked above.
+      let r = el.getBoundingClientRect();
+      for (let p = el.parentElement; p && p !== document.documentElement; p = p.parentElement) {
+        const ps = getComputedStyle(p);
+        if (!['auto', 'scroll', 'hidden', 'clip'].includes(ps.overflowY) && !['auto', 'scroll', 'hidden', 'clip'].includes(ps.overflowX)) continue;
+        const pr = p.getBoundingClientRect();
+        r = { left: Math.max(r.left, pr.left), top: Math.max(r.top, pr.top), right: Math.min(r.right, pr.right), bottom: Math.min(r.bottom, pr.bottom) };
+      }
+      if (r.right <= r.left || r.bottom <= r.top) continue;
       if (r.right < 0 || r.left > W || r.bottom < 0 || r.top > H) continue;
       if (!inSafe(r, 0)) bad.push(`fixed stop ${el.tagName}.${el.className}#${el.id} ${[r.left, r.top, r.right, r.bottom].map(px)} outside the safe area`);
     }
@@ -6642,6 +6719,10 @@ chrome.runtime.onMessage.addListener(m => {
     const worst = Math.max(0, ...d), at = d.indexOf(worst);
     assert.ok(worst <= 1, `${what}: the 960×540 and 1920×1080 layouts differ by ${worst.toFixed(2)} px (at 960×540) at box ${at}: ${JSON.stringify([a[at], b[at]])}`);
   };
+  const tvChecks = { step, tvOpen, tvClose, tvGo, tvAudit, tvShot, back, TVSIZES, tvWalk, focusedInfo, calls, log, ACTS, T_FIRST, T_TOP, T_NEW, T_PAGE2, T_REP, incidents, telBatches };
+  await require('./tv-keyboard.cjs')(tvChecks);
+  await require('./tv-watch.cjs')(tvChecks);
+  await require('./tv-motion.cjs')(tvChecks);
   await step('TV browsing (960×540 and 1920×1080): rail, Home signed out and in, topic chips, the grid walk with its fixed row, Search screen and results, channel, playlist, a failed page; every screen inside the safe area, ≥ 22 px type, rings never clipped, no dead ends, Back rules', async () => {
     const tv = await tvOpen();
     const geo = {};
@@ -6735,7 +6816,7 @@ chrome.runtime.onMessage.addListener(m => {
           assert.deepEqual(await tvAudit(tv, `loading ${W}`), []);
         } finally { IMG.search = 0; }
 
-        // Search: the rail's Search opens its screen (the field focused, recent searches as a list).
+        // Search opens its own remote keyboard; Back reveals recent searches.
         await tvGo(tv, 'code', 'https://www.youtube.com/');
         await sw.evaluate(now => chrome.storage.local.set({ yourTubeHistoryV1: { version: 1, startedAt: now - 9e5, entries: [{ query: 'lofi', at: now }, { query: 'roblox tycoon tutorial', at: now - 1000 }, { query: 'rain sounds', at: now - 2000 }] } }), Date.now());
         await tv.reload({ waitUntil: 'commit' });
@@ -6743,12 +6824,14 @@ chrome.runtime.onMessage.addListener(m => {
         await tv.waitForTimeout(300);
         await tv.focus('#ytc-side .rl[data-nav=search]');
         await tv.keyboard.press('Enter');
-        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-q');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-tvk .tvk-keys button'));
         assert.equal(await tv.getAttribute('#ytc', 'data-tvq'), '1');
         await tv.waitForTimeout(300);
-        { const q = await tv.evaluate(() => document.getElementById('ytc-q').getBoundingClientRect().height); assert.ok(q >= W / 60 * 2.95, `the large field (${q} px)`); }
+        { const q = await tv.evaluate(() => document.getElementById('ytc-tvquery').getBoundingClientRect().height); assert.ok(q >= W / 60 * 2.95, `the large query control (${q} px)`); }
         assert.deepEqual(await tvAudit(tv, `search ${W}`), []);
         await tvShot(tv, 'search');
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-tvquery');
         await tv.keyboard.press('ArrowDown');
         assert.ok(await tv.evaluate(() => document.activeElement.closest('#ytc-sug') !== null), '↓ from the field walks the list');
         const sugTop = (await focusedInfo(tv)).y;
@@ -6757,8 +6840,8 @@ chrome.runtime.onMessage.addListener(m => {
         await tv.keyboard.press('ArrowDown');
         assert.ok((await focusedInfo(tv)).y > sugTop, 'the next row');
         await tv.keyboard.press('ArrowUp'); await tv.keyboard.press('ArrowUp');
-        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-q');
-        // Typing (the TV keyboard) shows YouTube's suggestions under the recent searches.
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-tvquery');
+        // A physical keyboard can also type, with suggestions under the recent searches.
         await tv.keyboard.type('rob');
         await tv.waitForSelector('#ytc-sug .sg:not(.hs)', { timeout: 5000 });
         await tvShot(tv, 'search-typed');
@@ -6770,8 +6853,9 @@ chrome.runtime.onMessage.addListener(m => {
         assert.equal((await focusedInfo(tv)).nav, 'search');
         // A search from the screen: the results grid takes the focus; the query stays on top as the field.
         await tv.keyboard.press('Enter');
-        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-q');
-        await tv.fill('#ytc-q', 'lofi');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-tvk .tvk-keys button'));
+        for (let i = 0; i < 3; i++) await tv.keyboard.press('Backspace');
+        await tv.keyboard.type('lofi');
         await tv.keyboard.press('Enter');
         await tv.waitForFunction(() => location.pathname === '/results');
         await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
@@ -6780,7 +6864,7 @@ chrome.runtime.onMessage.addListener(m => {
         assert.deepEqual(await tvAudit(tv, `results ${W}`), []);
         await tvShot(tv, 'search-results');
         await tv.keyboard.press('ArrowUp');
-        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-q', '↑ from the results reaches the field');
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-tvquery', '↑ from the results reaches the query');
         assert.equal(await tv.getAttribute('#ytc', 'data-tvq'), '1', 'the field opens the search screen');
         await back(tv);
 
@@ -7184,7 +7268,7 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
         assert.ok(lay.time.b <= lay.seek.t && lay.rem.r <= W * 0.95 + 1 && lay.rem.l > W / 2, `elapsed / remaining over the bar ends: ${JSON.stringify([lay.time, lay.rem])}`);
         assert.ok(lay.seek.h >= H * 0.0074 - 0.5, `a thick bar (${lay.seek.h})`);
         assert.ok(lay.play.w >= H * 0.088 && Math.abs(lay.play.w - lay.play.h) < 1, `large round buttons (${lay.play.w})`);
-        assert.deepEqual(lay.row, ['Play/pause', 'Captions', 'Speed', 'Quality', 'I like this', 'Save to Watch later', 'More info'], JSON.stringify(lay.row));
+        assert.deepEqual(lay.row, ['Play/pause', 'Captions', 'Speed', 'Quality', 'I like this', 'Save to Watch later', 'Comments', 'More info'], JSON.stringify(lay.row));
         assert.deepEqual(await tvAudit(tv, `overlay ${W}`), []);
         const wk = await tvWalk(tv, '#ytc-seek,#ytc-player .prow :is(.pb,.wl)', 20);
         assert.deepEqual([wk.dead, wk.missing], [[], []], `overlay walk ${W}`);
@@ -7231,8 +7315,9 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
         await tv.waitForSelector('#ytc-player.cctext .pcw', { timeout: 8000 });
         await tv.focus('#ytc-seek'); await tv.keyboard.press('ArrowUp');
         await tv.waitForTimeout(300);
-        const ccOn = await tv.evaluate(() => { const c = document.getElementById('ytc-cc').getBoundingClientRect(), s = document.querySelector('#ytc-seek').getBoundingClientRect(); return { cx: (c.left + c.right) / 2, b: c.bottom, seek: s.top, fs: parseFloat(getComputedStyle(document.getElementById('ytc-cc')).fontSize) }; });
+        const ccOn = await tv.evaluate(() => { const c = document.getElementById('ytc-cc').getBoundingClientRect(), s = document.querySelector('#ytc-seek').getBoundingClientRect(), t = document.querySelector('#ytc-player .ptr').getBoundingClientRect(); return { cx: (c.left + c.right) / 2, b: c.bottom, seek: s.top, time: t.top, fs: parseFloat(getComputedStyle(document.getElementById('ytc-cc')).fontSize) }; });
         assert.ok(Math.abs(ccOn.cx - W / 2) < W * 0.01 && ccOn.b < ccOn.seek - 10, `captions centred above the bar: ${JSON.stringify(ccOn)}`);
+        assert.ok(ccOn.b <= ccOn.time - W / 120, `captions clear the elapsed time and chapter row: ${JSON.stringify(ccOn)}`);
         assert.ok(ccOn.fs >= H * 0.035, `large captions (${ccOn.fs})`);
         await tvShot(tv, 'player-captions-overlay');
         await tv.waitForFunction(() => document.getElementById('ytc-player').classList.contains('idle'), null, { timeout: 6000 });

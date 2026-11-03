@@ -64,9 +64,9 @@ impl App {
     /// A click is about to navigate: pointer clicks on a video's card remember
     /// its thumbnail (one layout read, before the swap); keyboard ones are instant.
     pub(super) fn mo_click(&mut self, kbd: bool, route: &Route) {
-        self.mo.kbd_nav = kbd;
+        self.mo.kbd_nav = kbd || crate::tv::on();
         self.mo.src = None;
-        if !kbd && matches!(route, Route::Watch { .. }) {
+        if !self.mo.kbd_nav && matches!(route, Route::Watch { .. }) {
             let r = bridge::click_rect(SRC_SCOPE, SRC_THUMB);
             if r.len() == 4 {
                 self.mo.src = Some(r);
@@ -76,7 +76,7 @@ impl App {
 
     /// Start of a navigation (before anything is written).
     pub(super) fn mo_nav(&mut self, pop: bool) {
-        self.mo.instant = pop || std::mem::take(&mut self.mo.kbd_nav);
+        self.mo.instant = pop || std::mem::take(&mut self.mo.kbd_nav) || crate::tv::on();
         self.mo.calm = self.mo.instant;
         self.mo.info_sk = false;
         if self.mo.instant {
@@ -116,7 +116,9 @@ impl App {
     /// open the description's lines and the related cards settle in as a short staggered wave (the title
     /// a card already showed never moves); after a keyboard or back/forward open only a short fade.
     pub(super) fn mo_settle(&mut self) {
-        if self.mo.instant {
+        // TV controls are remote-first: an asynchronous response must not start the
+        // desktop's entrance wave after the key's first-frame gate has expired.
+        if self.mo.instant || crate::tv::on() {
             return;
         }
         if self.mo.calm {
