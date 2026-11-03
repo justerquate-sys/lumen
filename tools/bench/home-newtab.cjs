@@ -1,12 +1,16 @@
 // Live: how fast a NEW TAB (or window) shows Home, vs going from a video back to Home, vs YouTube's own new tab.
 // Talks to the real youtube.com (signed out, seeded profile: tools/bench/profile.cjs); run by hand, rarely.
 //
-//   node tools/bench/home-newtab.cjs [--n=10] [--modes=ready,fresh,video,yt]
+//   node tools/bench/home-newtab.cjs [--n=10] [--modes=ready,fresh,playing,video,yt]
 //
 //   ready  another tab is on Home (its ready Home response is in memory): open a new tab to youtube.com
 //   fresh  another tab is on a watch page (watching discards the ready response): open a new tab
+//   playing another tab plays a video (a new one from Home each time) for --play seconds (default 70: the ready
+//          response refills at most once a minute): open a new tab
 //   video  in one tab, a watch page → click the logo (Lumen's video → Home)
 //   yt     YouTube's own page in a new tab (a separate run without the extension)
+//   --noready  no ready responses at all (localStorage ytc-test-noready): every Home takes the network path
+//   --nokeep   Home's network path fetches YouTube's Home document instead of reading the tab's own (ytc-test-nokeep)
 //   YTC_EXT  the extension folder (default extension/; a development build gives the boot marks)
 //
 // "Home painted" = the first frame whose Home grid shows video cards, measured in the page (performance.now():
@@ -16,7 +20,7 @@
 const { extensionDir } = require('../../tests/browser.cjs');
 const { seeded, launch } = require('./profile.cjs');
 const arg = (k, d) => { const a = process.argv.find(x => x.startsWith(`--${k}=`)); return a ? a.slice(k.length + 3) : d; };
-const N = +arg('n', 10), MODES = arg('modes', 'ready,fresh,video,yt').split(',');
+const N = +arg('n', 10), MODES = arg('modes', 'ready,fresh,playing,video,yt').split(','), PLAY = +arg('play', 70);
 const EXT = extensionDir();
 const pct = (a, p) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
 const fmt = a => a.length ? `p50 ${pct(a, .5).toFixed(0)} ms, p90 ${pct(a, .9).toFixed(0)} ms (n=${a.length})` : 'n=0';
@@ -41,7 +45,7 @@ async function newTab(ctx) {
       const H = window.__nt; if (!H || H.first === null) return null;
       const nav = performance.getEntriesByType('navigation')[0] || {};
       const d = document.documentElement.dataset;
-      return { first: H.first, resp: nav.responseStart, script: +d.ytcScript || NaN, shell: +d.ytcShell || NaN, src: d.ytcHomeSrc || '' };
+      return { first: H.first, resp: nav.responseStart, script: +d.ytcScript || NaN, shell: +d.ytcShell || NaN, src: (d.ytcHomeSrc || '') + (d.ytcHomeDoc ? '/' + d.ytcHomeDoc : '') + (d.ytcHedge ? '/hedge:' + d.ytcHedge : '') };
     }).catch(() => null);
     if (r) return { p, r };
   }
@@ -54,6 +58,9 @@ async function runLumen(mode) {
   const base = ctx.pages()[0] || await ctx.newPage();
   const rows = [];
   // The base tab: Home (ready) or a watch page (fresh / video).
+  await base.goto('https://www.youtube.com/results?search_query=lumen', { waitUntil: 'commit' });
+  await base.evaluate(f => { for (const [k, on] of Object.entries(f)) on ? localStorage.setItem(k, '1') : localStorage.removeItem(k); },
+    { 'ytc-test-noready': process.argv.includes('--noready'), 'ytc-test-nokeep': process.argv.includes('--nokeep') });
   await base.goto('https://www.youtube.com/', { waitUntil: 'commit' });
   await base.waitForSelector('#ytc-list .c[data-v]', { timeout: 30000 });
   await base.mouse.move(300, 300);
@@ -77,6 +84,18 @@ async function runLumen(mode) {
       console.log(`${mode} #${i}: ${r ? r.first.toFixed(0) + ' ms ' + r.src : 'none'}`);
       await base.waitForTimeout(2000);
       continue;
+    }
+    if (mode === 'playing') {
+      // A new video in the base tab (the related list, else Home's), playing for PLAY s.
+      await base.bringToFront();
+      // (Home's i-th card: opening it discards whatever Home fetched ahead, as watching does.)
+      await base.click('#ytc-logo');
+      await base.waitForSelector('#ytc-list .c[data-v]');
+      await base.locator('#ytc-list .c[data-v] a.t[href^="/watch"]').nth(2 + i).click();
+      await base.waitForSelector('#ytc-info h1.wt', { timeout: 20000 });
+      await base.waitForTimeout(PLAY * 1000);
+      const st = await base.evaluate(() => { const v = document.querySelector('video'); return v ? `${v.currentTime.toFixed(0)} s played` : 'no video'; });
+      process.stdout.write(`  (${st}) `);
     }
     const { p, r } = await newTab(ctx);
     rows.push(r);

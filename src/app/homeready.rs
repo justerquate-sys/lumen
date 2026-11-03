@@ -38,10 +38,30 @@ use serde_json::json;
 
 /// Lazy refills (after a personalizing event or expiry) at most this often.
 const LAZY_MIN_MS: f64 = 60_000.0;
+/// A watch page refills once its playback is healthy: playing this long since the first frame…
+const WATCH_PLAYED_MS: f64 = 8_000.0;
+/// …with this much buffered ahead (both tracks, or up to the end), so the video never competes with it.
+const WATCH_AHEAD_S: f64 = 20.0;
 /// A refill waits for an idle main thread at most this long.
 const FILL_IDLE_MS: u32 = 2000;
 /// The dimmed old Home while YouTube has not answered (client.css `#ytc-main[data-upd]`).
 const UPD: &str = "data-upd";
+
+/// The request id that stands for the tab's own navigation document while Home waits for it.
+const NAV_DOC: u32 = u32::MAX - 7;
+
+/// The tab's own document (YouTube's Home, streaming in; `bridge::doc_hold`).
+#[derive(Default, Debug, PartialEq)]
+pub(super) enum NavDoc {
+    #[default]
+    None,
+    /// Held while the shared ready response is read.
+    Held,
+    /// It answered before that read did (its scripts' text; "" without Home data).
+    Got(String),
+    /// Home's request: it stands in for the first Home request (`NAV_DOC` in `pending`).
+    Waiting,
+}
 
 #[derive(Default)]
 pub(super) struct HomeReady {
@@ -72,6 +92,11 @@ pub(super) struct HomeReady {
     pub(super) fill_wait: bool,
     /// The country YouTube placed this browser in (`INNERTUBE_CONTEXT_GL` of its Home document).
     pub(super) doc_gl: Option<String>,
+    /// The tab's own document (`NavDoc`).
+    pub(super) nav_doc: NavDoc,
+    /// The watch page (navigation) that last refilled, and when (epoch ms).
+    watch_nav: u32,
+    watch_at: f64,
 }
 
 impl App {
@@ -145,10 +170,22 @@ impl App {
         }
         // This document's first Home (taken: gone for every tab).
         self.perf.hit("home-ready", r.is_some());
+        let nav_doc = std::mem::take(&mut self.hr.nav_doc);
         if self.route == Route::Home && self.nav == 1 && !self.rendered {
-            match r {
-                Some(r) => self.ready_show(r),
-                None => self.start_route(),
+            match (r, nav_doc) {
+                (Some(r), d) => {
+                    // The tab's own document is not needed: stopped before anything of ours goes out.
+                    if d != NavDoc::None {
+                        bridge::page_stop();
+                    }
+                    self.ready_show(r);
+                }
+                (None, NavDoc::Held) => self.nav_doc_wait(),
+                (None, NavDoc::Got(text)) => {
+                    self.nav_doc_wait();
+                    self.on_doc_script(&text);
+                }
+                (None, _) => self.start_route(),
             }
         } else if let Some(r) = r {
             // (Navigated away within the few ms of the read: it stays for the next Home.)
@@ -232,6 +269,31 @@ impl App {
         self.ready_fill(false);
     }
 
+    /// A watch page (`Out::Position`, every 10 s while playing): once the video plays well, the next Home
+    /// is fetched for a new window or the way back (3 Nov 2026: a new window while a video plays was the
+    /// slow case). Opening the video already counted as a personalizing event, so YouTube's answer now is
+    /// what it would show; the next one (a like, another video) discards it as everywhere. One request
+    /// (no continuation), low priority, once per watch page (again once it expired), at most once a minute.
+    pub(super) fn ready_watch_check(&mut self) {
+        if !matches!(self.route, Route::Watch { .. }) || self.hr.fill.is_some() || self.tv.hold || bridge::local_flag("ytc-test-noready") {
+            return;
+        }
+        let (now, at) = (bridge::now(), bridge::epoch());
+        if (self.hr.watch_nav == self.nav && at - self.hr.watch_at < ready::MAX_AGE_MS) || (self.hr.last_lazy > 0.0 && now - self.hr.last_lazy < LAZY_MIN_MS) {
+            return;
+        }
+        if self.ready_waiting() || self.imp_first_pending() || !self.player.as_ref().is_some_and(|p| p.healthy(WATCH_PLAYED_MS, WATCH_AHEAD_S)) {
+            return;
+        }
+        self.hr.watch_nav = self.nav;
+        self.hr.watch_at = at;
+        self.hr.last_lazy = now;
+        let generation = ready::generation();
+        let acct = self.ready_acct();
+        let id = self.send(Req::Browse { id: "FEwhat_to_watch".into(), params: None }, Purpose::Ready { generation, acct }, true);
+        self.hr.fill = Some(id);
+    }
+
     fn ready_fill(&mut self, lazy: bool) {
         // `ytc-test-noready` (localStorage, tests only): no ready responses.
         // TV: nothing ahead before the first page has its account (the token held at a cold start).
@@ -312,8 +374,9 @@ impl App {
         };
         self.ready_keep(&r);
         self.hr.slot = Some((r, generation));
-        // Its first continuation too (as the page would preload it), so a reload has both.
-        if let Some(token) = f.cont {
+        // Its first continuation too (as the page would preload it), so a reload has both (not while a video
+        // plays: one request there; the Home that paints it preloads the continuation itself).
+        if let Some(token) = f.cont.filter(|_| !matches!(self.route, Route::Watch { .. })) {
             let id = self.send(Req::Cont { ep: "browse", token }, Purpose::ReadyCont { generation, acct }, true);
             self.hr.fill = Some(id);
         }
@@ -329,21 +392,88 @@ impl App {
 
     /// The Home request just went out (`id`): the hedge and the slow fallback are armed.
     pub(super) fn home_sent(&mut self, id: u32) {
+        self.home_sent_at(id, bridge::now());
+    }
+
+    /// The Home request `id` went out at `sent` (performance.now ms; 0 = the navigation's own document).
+    fn home_sent_at(&mut self, id: u32, sent: f64) {
         if self.route != Route::Home {
             return;
         }
         crate::telemetry::nav_field("path", json!("network"));
         bridge::mark_val("ytcHomeSrc", "network");
         bridge::mark_val("ytcHedge", "");
-        self.hr.hedge = Some((self.nav, id, None, bridge::now(), 0.0));
+        self.hr.hedge = Some((self.nav, id, None, sent, 0.0));
         let times = ready::times_from(&bridge::session_get(ready::TIMES_KEY));
+        let gone = (bridge::now() - sent).max(0.0);
         // `ytc-test-nohedge` (localStorage, measurements only): no second request.
         if !bridge::local_flag("ytc-test-nohedge") {
             let t = self.timer(Timer::HomeHedge { nav: self.nav });
-            bridge::timer(t, ready::hedge_ms(&times).round() as u32);
+            bridge::timer(t, (ready::hedge_ms(&times) - gone).max(50.0).round() as u32);
         }
         let t = self.timer(Timer::HomeSlow { nav: self.nav });
-        bridge::timer(t, ready::SLOW_MS);
+        bridge::timer(t, (ready::SLOW_MS as f64 - gone).max(50.0) as u32);
+    }
+
+    // ------------------------------------------------------- the tab's own document
+
+    /// Nothing ready: the tab's own document (YouTube's Home, requested by the browser at navigation start) is
+    /// Home's first request. Its hedge and slow fallback count from when its response started (as the request
+    /// sent from here would have gone out then).
+    fn nav_doc_wait(&mut self) {
+        self.hr.nav_doc = NavDoc::Waiting;
+        self.mark("request");
+        let sent = bridge::nav_response_start().clamp(0.0, bridge::now());
+        self.pending.insert(NAV_DOC, super::Pending { purpose: Purpose::Page { nav: self.nav }, sent, ep: super::HOME_DOC });
+        self.home_sent_at(NAV_DOC, sent);
+        crate::telemetry::nav_field("doc", json!("navigation"));
+    }
+
+    /// The tab's own document gave its Home data (`text`: its scripts; without the data when it had none).
+    pub fn on_doc_script(&mut self, text: &str) {
+        match std::mem::take(&mut self.hr.nav_doc) {
+            NavDoc::Held => {
+                self.hr.nav_doc = NavDoc::Got(text.to_string());
+                return;
+            }
+            NavDoc::Waiting => {}
+            _ => return,
+        }
+        // (Gone when a hedge won or the page changed.)
+        let Some(p) = self.pending.remove(&NAV_DOC) else { return };
+        let ms = bridge::now() - p.sent;
+        let Purpose::Page { nav } = p.purpose else { return };
+        if nav != self.nav || self.route != Route::Home {
+            return;
+        }
+        match homedoc::split(text.as_bytes()) {
+            Some((range, meta)) => {
+                self.perf.req(super::HOME_DOC, ms, true);
+                if !self.home_answered(NAV_DOC, 200) {
+                    return;
+                }
+                bridge::mark_val("ytcHomeDoc", "navigation");
+                self.doc_learn(&meta);
+                self.hr.doc_meta = Some(meta);
+                self.on_page_body(200, &text.as_bytes()[range]);
+            }
+            None => {
+                // No Home data in it: Home's request, as without it. A YouTube page without it (a consent page, a
+                // changed format) would answer a fetch the same: `browse` for the rest of this document.
+                if text.contains("ytcfg.set(") {
+                    self.hr.doc_off = true;
+                    self.incident("home-doc", "YouTube's Home document (the tab's own) had no Home data; using browse", None);
+                }
+                // The hedge, when it is on its way already, is the request.
+                if let Some(second) = self.hr.hedge.take().and_then(|h| h.2).filter(|s| self.pending.contains_key(s)) {
+                    self.hr.hedge = Some((nav, second, None, bridge::now(), 0.0));
+                    return;
+                }
+                if let Some(req) = self.page_req(&Route::Home) {
+                    self.page_request(req);
+                }
+            }
+        }
     }
 
     /// The first Home request is late: the identical request again; the first answer wins.

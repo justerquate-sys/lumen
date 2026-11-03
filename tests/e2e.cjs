@@ -326,7 +326,7 @@ function googlevideo(route, url) {
 }
 // ---- signed-in-like Home: real channel lockups as page 1, then five browse
 // continuations with fresh video ids (HOMECONT1…5) = 180 videos.
-const HOME = { rich: false, delay: 0, latency: 0, stamp: false, served: 0, stall: 0, aborted: 0, docs: 0, doc: 'home' };
+const HOME = { rich: false, delay: 0, latency: 0, stamp: false, served: 0, stall: 0, aborted: 0, docs: 0, doc: 'home', nav: false };
 // YouTube's Home document (what a reload of its page gets; src/homedoc.rs): the Home data the browse fixture
 // would answer, inside the page's ytcfg head and its ytInitialData script. HOME.doc: 'home' | 'consent' (a page
 // without Home data) | 'redirect' (to the consent site).
@@ -574,6 +574,14 @@ async function handle(route) {
   if (p.startsWith('/s/')) { log.assets.push(req.url()); return route.fulfill({ status: 200, contentType: p.endsWith('.css') ? 'text/css' : 'text/javascript', body: p.endsWith('.css') ? '' : 'window.__nativeBundle=(window.__nativeBundle||0)+1;' }); }
   if (req.resourceType() === 'document') {
     log.docs.push(req.url());
+    // HOME.nav: the tab's own Home document is YouTube's Home page ('home') or a YouTube page without Home data
+    // ('nodata'), as a navigation answers (the client reads it instead of asking again; src/app/homeready.rs).
+    if (HOME.nav && p === '/' && !url.searchParams.has('yt-native')) {
+      const docN = ++HOME.docs;
+      log.api.push({ ep: 'browse', body: { browseId: 'FEwhat_to_watch' }, headers: req.headers(), t: Date.now(), url: req.url(), doc: HOME.nav === 'home' ? 'navigation' : HOME.nav, eid: 'e2eHomeEvent' + String(docN).padStart(4, '0') });
+      const html = HOME.nav === 'home' ? homeDoc(apiFixture('browse', { browseId: 'FEwhat_to_watch' }), docN) : homeDoc('{}', docN).replace(/<script nonce="n1">var ytInitialData = [\s\S]*?<\/script>/, '');
+      return route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP }, body: html });
+    }
     if (url.searchParams.get('v') === 'ntvfixture1' && url.searchParams.get('yt-native') === '1') return route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP }, body: NATIVE_PAGE });
     return route.fulfill({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': CSP }, body: STUB });
   }
@@ -1328,6 +1336,95 @@ chrome.runtime.onMessage.addListener(m => {
     } finally {
       for (const t of tabs) await t.close().catch(() => {});
       await sw.evaluate(c => chrome.storage.local.set(c), cfg);
+      await page.bringToFront();
+      HOME.rich = wasRich;
+    }
+  });
+
+  await step('nothing ready: Home is read from the tab\'s own document (no second request): held out of the page while it streams (its scripts never run, nothing of it renders, one head and body: the client\'s), its answer id for the "shown" signals; a YouTube page without Home data → browse at once; a ready response stops the document', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    const state = () => page.evaluate(() => ({ doc: document.documentElement.dataset.ytcHomeDoc || '', src: document.documentElement.dataset.ytcHomeSrc, ran: window.__ytAppRan, ytd: document.querySelectorAll('ytd-app').length, bodies: document.querySelectorAll('body').length, heads: document.querySelectorAll('head').length, cards: document.querySelectorAll('#ytc-list .c[data-v]').length }));
+    try {
+      await readyDel();
+      await page.evaluate(() => localStorage.setItem('ytc-test-noready', '1'));
+      HOME.nav = 'home';
+      const a0 = log.api.length;
+      log.imp.length = 0;
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      const reqs = log.api.slice(a0).filter(a => a.body?.browseId === 'FEwhat_to_watch');
+      assert.deepEqual(reqs.map(a => a.doc), ['navigation'], 'the tab\'s own document is the only Home request');
+      const st = await state();
+      assert.deepEqual({ ...st, cards: st.cards > 10 }, { doc: 'navigation', src: 'network', ran: undefined, ytd: 0, bodies: 1, heads: 1, cards: true }, 'its scripts never ran, nothing of it is in the page');
+      assert.equal(await page.getAttribute('#ytc-list .c[data-v]', 'data-v'), HOME_ID0, 'its ytInitialData is the page');
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 60, null, { timeout: 8000 });
+      assert.ok(log.api.slice(a0).some(a => a.body?.continuation === 'HOMECONT1'), 'its continuation');
+      await until(() => log.imp.length >= 1, 4000, 'the first "shown" batch');
+      assert.equal(log.imp[0].body.events[0].screenCreated.pageVe.youtubeData.servletData.serializedServletEventId, reqs[0].eid, 'the signals name its answer');
+      // A YouTube page without Home data: browse at once (a fetch of the same page would not have it either).
+      HOME.nav = 'nodata';
+      const a1 = log.api.length;
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      assert.deepEqual(log.api.slice(a1).filter(a => a.body?.browseId === 'FEwhat_to_watch' && !a.body.continuation).map(a => a.doc || 'browse'), ['nodata', 'browse']);
+      assert.equal((await state()).ran, undefined);
+      // A ready response: painted at once; the document is stopped and nothing of it ran.
+      HOME.nav = 'home';
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noready'));
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await readyWait();
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await page.waitForTimeout(300);
+      const s3 = await state();
+      assert.deepEqual([s3.src, s3.doc, s3.ran, s3.ytd, s3.bodies], ['ready', '', undefined, 0, 1]);
+    } finally {
+      HOME.nav = false; HOME.rich = wasRich;
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noready')).catch(() => {});
+    }
+  });
+
+  await step('a playing video: once playback is healthy (8 s played, 20 s or the rest buffered ahead) one low-priority Home request refills the ready response (no continuation), once per watch page; a new window paints it; the next video discards it for every tab', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true;
+    const tabs = [];
+    try {
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await page.mouse.move(700, 450);
+      await page.click('#ytc-list a.t[href^="/watch"]');
+      await page.waitForFunction(() => document.documentElement.dataset.ytcFirstFrame);
+      assert.equal(await readyGet(), null, 'opening the video discarded Home\'s');
+      const a0 = log.api.length, t0 = Date.now();
+      prio.length = 0;
+      await until(async () => (await readyGet()) !== null, 30000, 'refilled while the video plays');
+      const reqs = log.api.slice(a0).filter(a => a.body?.browseId === 'FEwhat_to_watch');
+      assert.equal(reqs.length, 1, 'one request');
+      assert.ok(reqs[0].t - t0 >= 7000, `after the video played a while (${reqs[0].t - t0} ms)`);
+      assert.equal(prio.filter(x => x.post.startsWith('FEwhat_to_watch')).at(-1)?.p, 'Low', 'low priority');
+      assert.equal(await page.evaluate(() => document.querySelector('video') && !document.querySelector('video').paused), true, 'still playing');
+      await page.waitForTimeout(1500);
+      assert.ok(!log.api.slice(a0).some(a => a.body?.continuation?.startsWith('HOME')), 'no continuation while a video plays');
+      // A new window while it plays: the ready response on its first frame.
+      const r = await readyGet();
+      const t = await ctx.newPage(); tabs.push(t);
+      await t.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await t.waitForFunction(() => document.querySelector('#ytc-list .c[data-v]') && document.documentElement.dataset.ytcHomeSrc);
+      assert.equal(await t.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
+      assert.equal(await t.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), r.i[0].t);
+      // Once per watch page: used, it is not fetched again here (refills are at most once a minute anyway).
+      const a1 = log.api.length;
+      await page.waitForTimeout(11000);
+      assert.equal(log.api.slice(a1).filter(a => a.body?.browseId === 'FEwhat_to_watch' && a.t > 0 && !a.body.continuation && a.headers.referer?.includes('watch')).length, 0, 'not again on this page');
+      // The next video is a personalizing event: what the new window fetched since is discarded for every tab.
+      await readyWait(10, 8000);
+      await page.bringToFront();
+      await page.locator('#ytc-main a.t[href^="/watch"]').first().click();
+      await until(async () => (await readyGet()) === null, 3000, 'discarded by the next video');
+    } finally {
+      for (const t of tabs) await t.close().catch(() => {});
       await page.bringToFront();
       HOME.rich = wasRich;
     }

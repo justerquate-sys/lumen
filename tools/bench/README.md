@@ -26,6 +26,6 @@ script's own fixed ones.
 
 Home (each script's header has its options): `home-reload.cjs` (reload → YouTube's answer painted, Lumen vs YouTube's
 own page; `--yt --parity` for the overlap with YouTube's own reloads, `--nodoc` / `--noimp` to switch off the Home
-document or the "shown" signals), `home-newtab.cjs` (a new tab → Home painted, vs video → Home, vs YouTube's own new
+document or the "shown" signals), `home-newtab.cjs` (a new tab → Home painted: another tab on Home, on a video, playing a video; `--noready`, `--nokeep`; vs video → Home, vs YouTube's own new
 tab), `home-parity.cjs` (how the request's shape changes the answer), `home-drift.cjs` (how fast YouTube's answer
 drifts), `home-session.cjs` (a realistic session: where each Home paint came from).

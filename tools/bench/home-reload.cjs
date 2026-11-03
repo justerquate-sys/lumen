@@ -14,6 +14,7 @@
 //   --nohedge  no hedge request (localStorage ytc-test-nohedge)
 //   --nodoc    Home from the browse API instead of YouTube's Home document (localStorage ytc-test-nodoc)
 //   --noimp    no "shown" signals (localStorage ytc-test-noimp)
+//   --nokeep   the network path fetches YouTube's Home document instead of reading the tab's own (ytc-test-nokeep)
 //   --cap      give up on a reload after this many ms (default 30000)
 //   --profile  the seeded profile's name (default main)
 //   YTC_EXT    the extension folder (default extension/)
@@ -82,7 +83,8 @@ async function run(label, withExt, opts = {}) {
   page.on('requestfinished', async req => {
     try {
       const u = new URL(req.url());
-      const doc = u.pathname === '/' && req.resourceType() === 'fetch';
+      // (The tab's own document is Home's answer too since 0.12.0 when nothing is ready.)
+      const doc = u.pathname === '/' && (req.resourceType() === 'fetch' || req.resourceType() === 'document');
       if (u.pathname !== '/youtubei/v1/browse' && !doc) return;
       const b = doc ? { browseId: 'FEwhat_to_watch' } : req.postDataJSON() || {};
       if (b.browseId !== 'FEwhat_to_watch') return;
@@ -99,7 +101,7 @@ async function run(label, withExt, opts = {}) {
   const rows = [], shown = new Set();
   const url = withExt ? 'https://www.youtube.com/' : 'https://www.youtube.com/';
   await page.goto(url, { waitUntil: 'commit' });
-  if (withExt) await page.evaluate(f => { for (const [k, on] of Object.entries(f)) on ? localStorage.setItem(k, '1') : localStorage.removeItem(k); }, { 'ytc-test-noready': flag('noready'), 'ytc-test-nohedge': flag('nohedge'), 'ytc-test-nodoc': flag('nodoc'), 'ytc-test-noimp': flag('noimp') }).catch(() => {});
+  if (withExt) await page.evaluate(f => { for (const [k, on] of Object.entries(f)) on ? localStorage.setItem(k, '1') : localStorage.removeItem(k); }, { 'ytc-test-noready': flag('noready'), 'ytc-test-nohedge': flag('nohedge'), 'ytc-test-nodoc': flag('nodoc'), 'ytc-test-noimp': flag('noimp'), 'ytc-test-nokeep': flag('nokeep') }).catch(() => {});
   await page.waitForTimeout(6000);
   for (let i = 0; i <= N; i++) {
     // Everything this document showed counts as shown.

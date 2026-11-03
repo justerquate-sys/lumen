@@ -30,7 +30,7 @@ const YTC = (() => {
     depth++;
     try { return wasm_bindgen[name](...args); } catch (e) { console.error('[Lumen]', name, e); } finally { depth--; }
   };
-  let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null, shownWatch = null;
+  let io = null, lastHover = null, lastCls = null, hoverEl = null, clicked = null, shownWatch = null, held = null;
   const insert = (el, html) => {
     if (policy) el.insertAdjacentHTML('beforeend', policy.createHTML(html));
     else try { el.insertAdjacentHTML('beforeend', html); } catch { setHTML(el, el.innerHTML + html); }
@@ -163,6 +163,47 @@ const YTC = (() => {
       try { history.scrollRestoration = 'manual'; } catch {}
       listen();
     },
+    // The page's own document, still streaming in, kept out of the page (the loader does not stop it; `page_stop`
+    // does). Every node the HTML parser inserts at the top of the document is detached at once, before anything of it
+    // renders, and watched where it lies; a detached script never runs (the parser runs a script only while it is in
+    // the document). `doc_hold(prefix, keep)`: once a <script> whose text starts with `prefix` is complete (the parser
+    // has inserted something after it), on_doc_script(text): `<script>…</script>` for every earlier script whose text
+    // contains `keep`, then that one; only the earlier ones when the document ended without it. Call after `doc` (its
+    // nodes are ours).
+    doc_hold(prefix, keep) {
+      const root = d.documentElement, tops = [], checked = [], kept = [];
+      let done = false;
+      const complete = (s, i) => { if (i < tops.length - 1) return true; for (let n = s; n && n !== tops[i]; n = n.parentNode) if (n.nextSibling) return true; return false; };
+      const scan = all => {
+        for (let i = 0; i < tops.length && !done; i++) {
+          const list = tops[i].getElementsByTagName('script');
+          for (; checked[i] < list.length && !done; checked[i]++) {
+            const sc = list[checked[i]];
+            if (!all && !complete(sc, i)) break;
+            const t = sc.textContent;
+            if (t.startsWith(prefix)) { done = true; sub.disconnect(); root.dataset.ytcDocData = perf.now().toFixed(1); call('on_doc_script', kept.join('') + '<script>' + t + '</script>'); }
+            else if (t.includes(keep)) kept.push('<script>' + t + '</script>');
+          }
+        }
+      };
+      const sub = new MutationObserver(() => scan(false));
+      const top = new MutationObserver(rs => {
+        for (const r of rs) for (const n of r.addedNodes) {
+          if (n.parentNode !== root) continue;
+          n.remove();
+          if (n.nodeType !== 1 || done) continue;
+          tops.push(n); checked.push(0);
+          sub.observe(n, { childList: true, subtree: true });
+        }
+        scan(false);
+      });
+      top.observe(root, { childList: true });
+      const end = () => { scan(true); top.disconnect(); sub.disconnect(); if (!done) { done = true; call('on_doc_script', kept.join('')); } held = null; };
+      held = { top, sub, end };
+      d.addEventListener('DOMContentLoaded', () => { if (held) end(); }, { once: true });
+    },
+    // Stops the page's own document (its download and parsing); a `doc_hold` ends without answering.
+    page_stop() { if (held) { held.top.disconnect(); held.sub.disconnect(); held = null; } try { window.stop(); } catch {} },
     html(id, html) { const el = byId(id); if (el) setHTML(el, html); },
     append(id, html) { const el = byId(id); if (el) insert(el, html); },
     // Appends into the closest `sel` ancestor of the element under the pointer.
@@ -562,6 +603,8 @@ const YTC = (() => {
     shown_scan() { if (shownWatch) shownWatch.scan(); },
     shown_stop() { if (shownWatch) { shownWatch.ob.disconnect(); shownWatch = null; } },
     nav_type() { try { return performance.getEntriesByType('navigation')[0].type; } catch { return 'navigate'; } },
+    // When this document's response started arriving (performance.now ms; 0 when unknown).
+    nav_response_start() { try { return performance.getEntriesByType('navigation')[0].responseStart || 0; } catch { return 0; } },
     width: () => innerWidth,
     // The window as a web app describes it to its server: size, pixel ratio, dark preference, Web Share.
     viewport: () => JSON.stringify({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1, dark: matchMedia('(prefers-color-scheme: dark)').matches, share: typeof navigator.share === 'function' }),

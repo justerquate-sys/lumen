@@ -427,6 +427,20 @@ pub fn boot() {
     // first request goes out now; chrome.storage only refines later requests.
     let mirror = bridge::session_get(CFG_SESSION);
     let cfg = if mirror.is_empty() { Config::default() } else { Config::from_json(&mirror) };
+    // YouTube's own document for this tab (the extension's loader leaves it running): when it is the Home answer
+    // the client would fetch anyway (a Home load from YouTube's document, `homeready::on_doc_script`), it keeps
+    // streaming with its nodes held out of the page; else it stops now, before any request of ours goes out (a
+    // stop aborts the document's requests).
+    let keep_doc = route == Route::Home
+        && bridge::nav_type() != "back_forward"
+        && !crate::tv::on()
+        && crate::ready::shared()
+        && cfg.auth_user == 0
+        && !bridge::local_flag("ytc-test-nodoc")
+        && !bridge::local_flag("ytc-test-nokeep");
+    if !keep_doc {
+        bridge::page_stop();
+    }
     let mut app = App {
         cfg_ready: false,
         cfg,
@@ -552,6 +566,10 @@ pub fn boot() {
     let main = snap.map(|s| app.adopt_snap(s, trim));
     app.side_at = render::side_index(app.route.nav_key()).unwrap_or(0);
     bridge::doc(&render::shell(&app.route, &app.url, main.as_deref()));
+    if keep_doc {
+        bridge::doc_hold("var ytInitialData = ", "ytcfg.set(");
+        app.hr.nav_doc = homeready::NavDoc::Held;
+    }
     bridge::mark("ytcShell");
     app.marks.push(("shell", bridge::now()));
     app.acts.boot();
@@ -2733,6 +2751,9 @@ impl App {
                 Out::Position { t, dur, ended } => {
                     let v = self.player.as_ref().map(|p| p.v.clone()).unwrap_or_default();
                     self.fx_position(&v, t, dur, ended, false);
+                    if !ended {
+                        self.ready_watch_check();
+                    }
                     if !ended && dur > 0.0 && dur - t <= UP_PREFETCH_S {
                         self.up_prefetch();
                     }

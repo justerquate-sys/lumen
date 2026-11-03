@@ -261,6 +261,15 @@ extern "C" {
     pub fn session_set(key: &str, value: &str) -> bool;
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn session_del(key: &str);
+    /// Keeps the page's own document streaming with its nodes held out of the page; once a script starting with
+    /// `prefix` is complete, `on_doc_script(text)` (the earlier scripts containing `keep`, then it; without it when
+    /// the document ended without one).
+    /// Call after `doc`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn doc_hold(prefix: &str, keep: &str);
+    /// `window.stop()`: the page's own document stops (and a `doc_hold` with it, without an answer).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn page_stop();
     /// The extension's memory-only storage shared by its tabs (`chrome.storage.session`) is there.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn shared_ok() -> bool;
@@ -283,6 +292,9 @@ extern "C" {
     pub fn shown_scan();
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn shown_stop();
+    /// When this document's response started arriving (performance.now ms; 0 when unknown).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn nav_response_start() -> f64;
     /// Navigation timing type: `navigate`, `reload` or `back_forward`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn nav_type() -> String;

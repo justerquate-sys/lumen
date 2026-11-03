@@ -13,9 +13,13 @@ loader and a generic bridge (`browser/bridge.js`).
 `build.sh` compiles the crate for `wasm32-unknown-unknown` (`--features dev` for the development build), runs
 `wasm-bindgen` into `target/pkg/`, then `browser/build.cjs` writes the loadable extension:
 
-- `extension/content.js`: `window.stop()`, the bridge, the wasm-bindgen glue and the Wasm bytes (base64 inside a
-  block comment, read back with `Function.prototype.toString`), then `boot()` (or `boot_native()` on `?yt-native=1`
-  pages). A boot failure falls back to YouTube's own page.
+- `extension/content.js`: the bridge, the wasm-bindgen glue and the Wasm bytes (base64 inside a block comment, read
+  back with `Function.prototype.toString`), then `boot()` (or `boot_native()` on `?yt-native=1` pages). YouTube's
+  document is stopped first (`window.stop()`), except Home's (`/`): there `boot()` stops it (`bridge::page_stop`,
+  before any request of ours, since a stop aborts the document's requests) unless it is the Home answer the client
+  reads (`bridge::doc_hold`, "Home reload" below); the HTML parser cannot run while the content script does, so
+  nothing of the document runs or renders in between. A boot failure stops it and falls back to YouTube's own page.
+  (The TV bundle stops the document in its loader as before.)
 - `extension/background.js` and `extension/manifest.json` from `browser/background.js` and the manifest template
   `browser/manifest.json`. The public build drops every `/* @dev-start */ … /* @dev-end */` block; the development
   build keeps them and adds the debug-center host permission, a "(dev)" name and a build id (`version_name` and
@@ -425,8 +429,34 @@ never shown first and then flipped (the only exception is a YouTube that has not
   "now" as YouTube's own next reload, at 20 min it is not.
 - **Refills** after a personalizing event or expiry are lazy: on a page that is not a watch page, in idle time,
   at most once a minute, only while the tab is in use (input in the last 5 min) and visible; when the tab is
-  shown again, at once. Nothing is fetched ahead on watch pages. (The old 2-min background refresh of Home is
-  gone; Subscriptions keeps it.)
+  shown again, at once. (The old 2-min background refresh of Home is gone; Subscriptions keeps it.)
+- **While a video plays** (3 Nov 2026: a new window opened while watching was the slow case): a watch page refills
+  once its playback is healthy (`Own::healthy`: 8 s played since the first frame, not paused, stuck or failed, and
+  20 s buffered ahead in both tracks or up to the end; checked with each 10-s position report), so the video never
+  competes for bandwidth: one request (no continuation: the Home that paints it preloads that itself), low
+  priority, once per watch page (again once it expired), at most once a minute. Opening the video already counted
+  as a personalizing event, so the answer is what YouTube would show now; the next one (another video, a like, …)
+  discards it as everywhere. Measured live (`home-newtab.cjs --modes=playing`, another tab plays a video 70 s, n = 7
+  each, side by side): a new window → Home painted p50 1627 → 193 ms, p90 1835 → 241 ms (7 of 7 from the ready
+  response).
+- **The tab's own document** (3 Nov 2026; extension, Home with nothing ready). The browser already asks for exactly
+  the Home document at navigation; instead of stopping it and asking again, `boot()` keeps it streaming
+  (`bridge::doc_hold`): every node the HTML parser inserts at the top of the document is detached in the same task,
+  before anything of it renders, and watched where it lies (a detached script never runs: the parser runs a script
+  only while it is in the document, after a microtask checkpoint, where the observer has already detached it). A
+  response header from the request rules (rules.json 20, Home's main frame only, outranked by the `yt-native=1`
+  allow rule) adds `script-src 'wasm-unsafe-eval'; style-src 'unsafe-inline'; object-src 'none'`: YouTube's scripts
+  and stylesheets are not even downloaded (also not by the preload scanner: live, 0 JS / 0 CSS requests), while the
+  client's Wasm still compiles (the page CSP governs a content script's Wasm: `script-src 'none'` broke the boot) and
+  its inline styles apply. When `ytInitialData`'s script is complete (the parser has inserted a node after it), its
+  text and the `ytcfg.set` scripts before it go to Rust (`on_doc_script`) and Home paints from them like a fetched
+  document: one Home request per load, as on YouTube's own page (before: the stopped one plus the fetch). A ready
+  response (read a few ms after boot) stops the document first. A YouTube page without Home data (`ytcfg` but no
+  `ytInitialData`): `browse` at once; any other page (the e2e stub): the document fetch. The hedge and the 4 s
+  fallback count from the document's response start. Measured live, interleaved (n = 20 per path, hedge off):
+  reload with nothing ready p50 1590 → 1372 ms (mean 1724 → 1432); a new tab with nothing ready p50 1567 → 1582 ms
+  (mean 1554 → 1563, no difference; a first round of n = 16: p50 1677 → 1487). The data arrives with the document's
+  last bytes (response end 1076 ms → data 1077 → painted 1097): YouTube's server time dominates either way.
 - **Without a ready response** (after watching, expired, used by another tab): the skeleton in its final geometry
   and the request at once (the Home document needs no stored config). If the request
   has not answered by this tab's p90 Home time (`ready::hedge_ms`: the last 20 durations in `ytc:bt`, clamped
@@ -849,9 +879,9 @@ created. Importing twice is harmless (the second run merges into the same record
 | `manifest.json` | MV3; `storage` + `declarativeNetRequest`; host `https://www.youtube.com/*` (plus `*.googlevideo.com` for the player and `https://sponsor.ajay.app/*` for SponsorBlock; `https://api.deepgram.com/*` for voice search's key check); two `document_start` content scripts: the client (with exclusions) and native mode (`*yt-native=1*`: `native.css` + `content.js`). |
 | `native.css` | YouTube's own pages only: the old extension's hiding/theming rules (see "YouTube's own pages keep the client's setup"). |
 | `src/native/` | Native pages: `mod.rs` returns to the client when leaving the fallback video; `clean.rs` the cleanup logic (captions, keys, CC, promotions, Shorts switch). |
-| `content.js` (generated) | `window.stop()` first, then the bridge, the wasm-bindgen glue and the Wasm bytes (base64 in a block comment, read via `Function.prototype.toString`), `initSync`, `boot()`. |
+| `content.js` (generated) | `window.stop()` first (except Home's document: `boot()` stops or holds it), then the bridge, the wasm-bindgen glue and the Wasm bytes (base64 in a block comment, read via `Function.prototype.toString`), `initSync`, `boot()`. |
 | `bridge.js` | Generic primitives only: replace the document, set/append HTML/text by id, attributes, CSS variables, history, `location.assign`, scroll, fetch (bytes back to Rust, optional init options; `progress: 1` also reports headers and bytes so far), abort, `chrome.storage`, timers, IntersectionObserver, postMessage, fullscreen, element size, `fade_imgs` (images still loading fade in when they land; cached ones are never hidden); media objects by numeric handle (bind a `<video>` and forward its events, `MediaSource`, `addSourceBuffer`, `appendBuffer`, `remove`, `changeType`, `buffered`, get/set/call properties, `isTypeSupported`); delegated click/dblclick/submit/pointerover/pointermove/keydown/input/drag/popstate/pagehide; voice: microphone → 16 kHz PCM chunks with a level custom property, a WebSocket relayed by the background worker (a stored secret appended there), a held bare key, contextmenu on `[data-ctx]`, secrets (only whether one is set; saved straight from an input). No YouTube or player knowledge: every decision is in Rust. |
-| `rules.json` | Static DNR. YouTube's site bundles are not blocked (YouTube's service worker fetches them outside the page frame, so a block broke the native fallback; `window.stop()` keeps them from running on client pages). `allowAllRequests` for `yt-native=1` and the native paths at priority 2; block `log_event`, `/pagead/`, `csi_204` and doubleclick (from youtube.com) at priority 3, so telemetry stays blocked even on native pages; rule 50 sets `Access-Control-Allow-Origin: *` on googlevideo responses to youtube.com, because googlevideo randomly redirects chunk requests to another node and the redirected request carries `Origin: null`. `/s/player/` and `/api/stats/` are never blocked. `background.js` handles auto-update, debug-center delivery and the voice socket relay. |
+| `rules.json` | Static DNR. YouTube's site bundles are not blocked (YouTube's service worker fetches them outside the page frame, so a block broke the native fallback; `window.stop()` keeps them from running on client pages). `allowAllRequests` for `yt-native=1` and the native paths at priority 2; rule 20 (priority 1) adds a script-free CSP to Home's own document (read by the client, never run); block `log_event`, `/pagead/`, `csi_204` and doubleclick (from youtube.com) at priority 3, so telemetry stays blocked even on native pages; rule 33 lets Lumen's own "shown" batches (`log_event?alt=json&prettyPrint=false`) through; rule 50 sets `Access-Control-Allow-Origin: *` on googlevideo responses to youtube.com, because googlevideo randomly redirects chunk requests to another node and the redirected request carries `Origin: null`. `/s/player/` and `/api/stats/` are never blocked. `background.js` handles auto-update, debug-center delivery and the voice socket relay. |
 | `client.css` | The whole look (charcoal/mint tokens, layout, player), injected by the manifest (no flash). 15 KB (4.7 KB gzip). |
 | `src/route.rs` | URL → page. |
 | `src/config.rs` | Replaces the stopped page's `ytcfg`: client version + visitor data from `/sw.js_data` (2.7 KB, the endpoint YouTube's own service worker uses), cached in `chrome.storage.local` key `ytcConfigV1` for 24 h; fallback version `2.20261030.01.00`; session index `au` (default 0); SAPISID cookies → `SAPISIDHASH`/`SAPISID1PHASH`/`SAPISID3PHASH`. |
@@ -1037,10 +1067,11 @@ but use the same rules), Shorts-style looping, storyboard thumbnails on the seek
   latency; `YTC_EXT=<another extension folder> YTC_TIMING_ONLY=1` runs the same table on another build.
 - Since the `/s/desktop` DNR block was removed (0.2.1), the stopped YouTube document's bundles can still
   be *downloaded* (not run) when its first bytes arrive before `window.stop()`; the e2e check "site
-  bundles never requested" fails about 1 run in 4, on `main`'s build as well.
+  bundles never requested" fails about 1 run in 4, on `main`'s build as well. (Home's own document carries a CSP
+  that keeps them from being fetched at all: rules.json 20.)
 - Suggestions come from YouTube's `/complete/search` with your cookies (like YouTube's own box).
-- The YouTube HTML document is still requested (and stopped at the first bytes); the shell appears at
-  roughly time-to-first-byte of that document.
+- The YouTube HTML document is still requested (and stopped at the first bytes, except Home with nothing ready,
+  which reads it); the shell appears at roughly time-to-first-byte of that document.
 - After `window.stop()` the document's `load` event does not fire (readyState is `complete`); no effect
   seen, but noted.
 

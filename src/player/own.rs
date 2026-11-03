@@ -2510,6 +2510,19 @@ impl Own {
         (self.first_frame.is_some() && !self.failed && self.duration > 0.0 && self.live.is_none()).then(|| (self.time(), self.duration))
     }
 
+    /// Playback is going well enough that one background request cannot hurt it: playing for at least
+    /// `played_ms` since its first frame, not stuck or failed, and at least `ahead_s` buffered ahead in both
+    /// tracks (or up to the end; a live stream: 6 s, about what it keeps behind the edge).
+    pub fn healthy(&self, played_ms: f64, ahead_s: f64) -> bool {
+        let Some(ff) = self.first_frame else { return false };
+        if self.failed || self.paused || self.stuck.is_some() || bridge::now() - (self.nav_start + ff) < played_ms {
+            return false;
+        }
+        let t = self.time();
+        let need = if self.live.is_some() { ahead_s.min(6.0) } else { ahead_s.min((self.duration - t).max(0.0)) };
+        [V, A].iter().all(|&k| sched::ahead(&pairs(bridge::media_ranges(self.tracks[k].sb)), t) >= need - 0.5)
+    }
+
     fn report_position(&mut self, now: f64, ended: bool) {
         self.pos_at = now;
         if let Some((t, dur)) = self.position() {

@@ -153,6 +153,26 @@
     }
   },
   {
+    "id": 20,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "content-security-policy",
+          "operation": "append",
+          "value": "script-src 'wasm-unsafe-eval'; style-src 'unsafe-inline'; object-src 'none'"
+        }
+      ]
+    },
+    "condition": {
+      "regexFilter": "^https://www\\.youtube\\.com/(\\?[^#]*)?$",
+      "resourceTypes": [
+        "main_frame"
+      ]
+    }
+  },
+  {
     "id": 30,
     "priority": 3,
     "action": {

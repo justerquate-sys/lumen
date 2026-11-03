@@ -348,6 +348,12 @@ pub fn on_visible(id: &str) {
     app::with(|a| a.on_visible(id));
 }
 
+/// The page's own document gave the script `bridge::doc_hold` waits for ("" when it ended without it).
+#[wasm_bindgen]
+pub fn on_doc_script(text: &str) {
+    app::with(|a| a.on_doc_script(text));
+}
+
 /// `bridge::shared_get` / `shared_take` answered (`value` "" when missing).
 #[wasm_bindgen]
 pub fn on_shared(key: &str, value: &str) {
