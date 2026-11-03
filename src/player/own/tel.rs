@@ -57,7 +57,20 @@ pub(super) struct PTel {
     drops: Vec<(u32, f64, f64)>,
     dq: (f64, f64),
     done: bool,
+    /// Slow YouTube (`hedge.rs`): the VISIONOS hedge (fired, won), googlevideo mirror hedges
+    /// fired / won, throttled requests, and the recovery path taken ("mirror", "refresh",
+    /// "drop", "back" = the cap lapsed, ≥ 1080p again).
+    vhedge: (bool, bool),
+    /// Hover media prefetch used for the start: "hit" (finished), "inflight" (taken over), per track.
+    pre: [&'static str; 2],
+    hedges: u32,
+    hedges_won: u32,
+    throttled: u32,
+    path: Vec<&'static str>,
 }
+
+/// Throttle events reported per video.
+const THROTTLE_MAX: u32 = 30;
 
 /// The host a request went to (from the request log's description).
 fn host(what: &str) -> &str {
@@ -201,6 +214,8 @@ impl Own {
             "mse_rebuilt": self.mse_rebuilt,
             "live": self.live.is_some(),
             "since_created_ms": tel::round1(now - self.created),
+            "slow": self.tel_slow(),
+            "media_pre": {"v": self.pt.pre[V], "a": self.pt.pre[A]},
         })
     }
 
@@ -370,7 +385,61 @@ impl Own {
                 "audio_itag": self.tracks[A].rep,
                 "bw_kbps": self.bw.bps.map_or(0.0, |b| (b / 1000.0).round()),
                 "live": self.live.is_some(),
+                "slow": self.tel_slow(),
             }),
         );
+    }
+
+    /// The slow-YouTube breakdown: `vision_hedge` fired/won, googlevideo `hedge_fired` /
+    /// `hedge_won`, `throttle_detected` and the recovery `path`.
+    fn tel_slow(&self) -> Value {
+        json!({
+            "vision_hedge": {"fired": self.pt.vhedge.0, "won": self.pt.vhedge.1},
+            "hedge_fired": self.pt.hedges,
+            "hedge_won": self.pt.hedges_won,
+            "throttle_detected": self.pt.throttled,
+            "path": self.pt.path,
+        })
+    }
+
+    pub(super) fn tel_pre(&mut self, kind: usize, how: &'static str) {
+        self.pt.pre[kind] = how;
+    }
+
+    pub(super) fn tel_vision_hedge(&mut self, won: bool) {
+        if won { self.pt.vhedge.1 = true } else { self.pt.vhedge.0 = true }
+    }
+
+    pub(super) fn tel_hedge_fired(&mut self) {
+        self.pt.hedges += 1;
+    }
+
+    pub(super) fn tel_hedge_won(&mut self) {
+        self.pt.hedges_won += 1;
+    }
+
+    /// A googlevideo request judged throttled and the step taken: `video.throttle` (`v` = how
+    /// long it had run).
+    pub(super) fn tel_throttle(&mut self, kind: usize, itag: u32, why: &str, step: crate::player::throttle::Step, rate: Option<f64>, elapsed: f64) {
+        self.pt.throttled += 1;
+        let step = match step {
+            crate::player::throttle::Step::Mirror => "mirror",
+            crate::player::throttle::Step::Refresh => "refresh",
+            crate::player::throttle::Step::Drop => "drop",
+        };
+        if self.pt.path.len() < 12 {
+            self.pt.path.push(step);
+        }
+        if !self.pt.on || self.pt.throttled > THROTTLE_MAX {
+            return;
+        }
+        let p = self.format(self.tracks[V].rep, V).map(|f| f.p).unwrap_or(0);
+        tel::emit("video.throttle", elapsed, json!({"vid": self.v, "kind": if kind == V { "v" } else { "a" }, "itag": itag, "why": why, "step": step, "kbps": rate.map_or(0.0, |r| (r / 1000.0).round()), "bw_kbps": self.bw.bps.map_or(0.0, |b| (b / 1000.0).round()), "p": p, "started": self.pt.started, "mirror": self.mirror}));
+    }
+
+    pub(super) fn tel_throttle_back(&mut self) {
+        if self.pt.path.len() < 12 {
+            self.pt.path.push("back");
+        }
     }
 }

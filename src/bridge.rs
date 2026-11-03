@@ -200,6 +200,9 @@ extern "C" {
     /// `prefers-reduced-motion: reduce`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn reduced_motion() -> bool;
+    /// `matchMedia(query).matches`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn matches(query: &str) -> bool;
     /// Calls `on_timer(id)` once the next frame has rendered.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn frame(id: u32);

@@ -341,6 +341,63 @@ cipher, `n` or PO token, found by research on 1 Nov 2026), requested at navigati
 with `next` and prefetched on hover. A second, normal `WEB` `player` call with your session supplies
 captions and the watch-history URLs.
 
+**Start path** (3 Nov 2026, measured live with `tools/bench/video.cjs`, numbers under "Speed" below):
+- *Straight to the target rung* (≥ 1080p when the screen allows; 1080p is the floor): no low start rung.
+  The old ≤ 360p start rung was replaced before its first frame showed anyway (live 2 Nov 2026: every
+  start reported 360 → 1080 with HD at the first frame), so its 0.3–0.6 MB only took bandwidth from the
+  1080p data.
+- *Index + the start of segment 0 in one request*: the index range plus up to **128 KB** (video;
+  audio 11 s of its bit rate, ≤ 128 KB). First segments are 33 KB … 4.4 MB at 1080p and their size is
+  unknown until the index is parsed, so the guess is bounded; what of segment 0 came along is kept
+  (`Track::prefix`) and only the rest is asked for. (512 KB cost ~150 ms on cold connections still in TCP
+  slow start; a bit-rate-sized guess of up to 3 MB made the first frame wait for bytes past segment 0.)
+- *decodingInfo before the first request*: answers are cached for the page (`CAPS`, memory) and asked
+  as soon as a VISIONOS response is prefetched (`warm_caps`); a first video whose answers are missing
+  waits for them at most 150 ms (seen: 2–55 ms), so no request goes to a codec that is about to be
+  ruled out (before: up to 4 video heads in parallel, two of them wasted).
+- *Hover media prefetch* (`own/pre.rs`): when the pointer has rested on a video link 150 ms past its
+  VISIONOS answer, the index + up to 1 MB of segment 0 of exactly the formats the player will choose
+  (same ladder, decodingInfo, size cap and ABR) are fetched; the click then appends at once (a body still
+  loading becomes the player's own request). One video at a time, cancelled when the pointer leaves the
+  link before it finished, kept in memory 5 min (last 3 videos). Live: ~1.2 MB per rested-on link.
+  Focus counts like a resting pointer (the TV remote, keyboard focus): the bridge reports a link's
+  `focusin` as intent in a microtask, since focus moved by Rust itself (`spatial_focus`) fires inside
+  that call; a link whose VISIONOS response is already cached starts the dwell at once.
+- *HDR only on an HDR screen*: HDR formats count as not smooth unless `(dynamic-range: high)`
+  matches, so an SDR screen gets the SDR format of each rung (decodingInfo is also asked with an HDR
+  format's transfer function and BT.2020). Live 3 Nov 2026 on the Android TV emulator decodingInfo
+  called 1440p60 HDR AV1 smooth even so, and no picture came (7.6 s, MediaSource rebuilt); with the
+  rule the same video starts in 1.2–1.5 s on 1080p60 SDR.
+- *TV app*: googlevideo goes through the shell (Kotlin `HttpURLConnection` in `Host.kt`, the CORS
+  header of rule 50), so `<link rel=preconnect>` would warm only the WebView's unused connection: on TV
+  the warm-up is a `GET <host>/generate_204` (what YouTube's player warms with) through the shell. The
+  shell keeps up to 16 keep-alive connections per host (Android's default is 5) and gives a host 6 s to
+  connect / 15 s per read (was 15 / 30 s): `shouldInterceptRequest` holds a WebView request thread until
+  the headers come, even after the page gave the request up (a hedge won elsewhere). Ranges are URL
+  parameters, bodies stream through, aborts close the stream once headers are in.
+
+**Slow YouTube** (2 Nov 2026: "if requests to YouTube would slow down like 100 times, we should have a
+workaround, but still connecting with YouTube"; `player/throttle.rs` decides, `own/hedge.rs` acts; nothing
+here leaves the player):
+- *Player request hedge*: no VISIONOS answer after **400 ms** → the same request again; the first usable
+  answer plays, the other is aborted (an error from one waits for the other). 400 ms ≈ 2 × the owner's
+  p90 (205 ms) and above p99 (348 ms) of 158 answers: it fires on ~1 % of starts and turns a hung request
+  into ~0.5 s instead of the 8 s timeout. Racing another client is not done: no other client gives direct
+  URLs that play past ~60 s without a PO token (see "Bot check recovery").
+- *googlevideo requests stream* (the bridge's generic `progress` fetch option: headers, then bytes so far
+  every 100 ms), so a slow host shows early. A request is *throttled* when no headers came after **700 ms**
+  before the first frame (the slowest cold connection seen: 639 ms) or 1.5 s while playing with < 12 s
+  buffered, or when after ≥ 0.5 s of body it runs **6× slower than the measured bandwidth**, or (before
+  the first frame / with < 12 s buffered) at **under half the media's bit rate**, with > 0.8 s left.
+- *Recovery, in the owner's order*: (1) the same range on the next mirror the URL lists (`mn`/`fvip`,
+  `fallback_count`, as YouTube's player does); both run, the first full answer wins, and later requests
+  go to the winner's host; (2) when the mirror twin is slow too (or there is no mirror): fresh URLs (a new
+  player response); (3) another client: none qualifies (above); (4) only with a measured rate: the highest
+  rung that rate sustains (70 %), held 15 s (then 30, 60, 120 s if it comes back), after which Auto goes
+  back to ≥ 1080p by itself. A host that sends nothing at all is left to the stuck schedule ("Stalls are
+  not failures"). A cached player response whose URLs hang still gets fresh URLs at 0.8 s instead of a
+  mirror (those URLs are the usual culprit).
+
 Controls (24 px outline icons): play/pause, mute + volume, time, then the shortcuts **CC** (thin outline
 when off, filled cut-out letters when on: the old extension's artwork), **Speed** (shows the rate as text:
 `1×`, `1.25×`), **Quality** (shows the rung playing now in a small frame: `360`, `1440`, `4K`), theater,
@@ -598,7 +655,7 @@ created. Importing twice is harmless (the second run merges into the same record
 | `native.css` | YouTube's own pages only: the old extension's hiding/theming rules (see "YouTube's own pages keep the client's setup"). |
 | `src/native/` | Native pages: `mod.rs` returns to the client when leaving the fallback video; `clean.rs` the cleanup logic (captions, keys, CC, promotions, Shorts switch). |
 | `content.js` (generated) | `window.stop()` first, then the bridge, the wasm-bindgen glue and the Wasm bytes (base64 in a block comment, read via `Function.prototype.toString`), `initSync`, `boot()`. |
-| `bridge.js` | Generic primitives only: replace the document, set/append HTML/text by id, attributes, CSS variables, history, `location.assign`, scroll, fetch (bytes back to Rust, optional init options), abort, `chrome.storage`, timers, IntersectionObserver, postMessage, fullscreen, element size, `fade_imgs` (images still loading fade in when they land; cached ones are never hidden); media objects by numeric handle (bind a `<video>` and forward its events, `MediaSource`, `addSourceBuffer`, `appendBuffer`, `remove`, `changeType`, `buffered`, get/set/call properties, `isTypeSupported`); delegated click/dblclick/submit/pointerover/pointermove/keydown/input/drag/popstate/pagehide; voice: microphone → 16 kHz PCM chunks with a level custom property, a WebSocket relayed by the background worker (a stored secret appended there), a held bare key, contextmenu on `[data-ctx]`, secrets (only whether one is set; saved straight from an input). No YouTube or player knowledge: every decision is in Rust. |
+| `bridge.js` | Generic primitives only: replace the document, set/append HTML/text by id, attributes, CSS variables, history, `location.assign`, scroll, fetch (bytes back to Rust, optional init options; `progress: 1` also reports headers and bytes so far), abort, `chrome.storage`, timers, IntersectionObserver, postMessage, fullscreen, element size, `fade_imgs` (images still loading fade in when they land; cached ones are never hidden); media objects by numeric handle (bind a `<video>` and forward its events, `MediaSource`, `addSourceBuffer`, `appendBuffer`, `remove`, `changeType`, `buffered`, get/set/call properties, `isTypeSupported`); delegated click/dblclick/submit/pointerover/pointermove/keydown/input/drag/popstate/pagehide; voice: microphone → 16 kHz PCM chunks with a level custom property, a WebSocket relayed by the background worker (a stored secret appended there), a held bare key, contextmenu on `[data-ctx]`, secrets (only whether one is set; saved straight from an input). No YouTube or player knowledge: every decision is in Rust. |
 | `rules.json` | Static DNR. YouTube's site bundles are not blocked (YouTube's service worker fetches them outside the page frame, so a block broke the native fallback; `window.stop()` keeps them from running on client pages). `allowAllRequests` for `yt-native=1` and the native paths at priority 2; block `log_event`, `/pagead/`, `csi_204` and doubleclick (from youtube.com) at priority 3, so telemetry stays blocked even on native pages; rule 50 sets `Access-Control-Allow-Origin: *` on googlevideo responses to youtube.com, because googlevideo randomly redirects chunk requests to another node and the redirected request carries `Origin: null`. `/s/player/` and `/api/stats/` are never blocked. `background.js` handles auto-update, debug-center delivery and the voice socket relay. |
 | `client.css` | The whole look (charcoal/mint tokens, layout, player), injected by the manifest (no flash). 15 KB (4.7 KB gzip). |
 | `src/route.rs` | URL → page. |
@@ -609,8 +666,8 @@ created. Importing twice is harmless (the second run merges into the same record
 | `src/description.rs` | Pure port of the old extension's description rules (`resource`, line walk, bare-link labels), unit-tested case for case against the old extension's cases. |
 | `src/render.rs` | HTML strings; every text/attribute escaped; one `innerHTML` per region; event delegation on the document. |
 | `src/player.rs` | The player boundary (the app only talks to this): markup for the player box, the manual Open on YouTube URL, and `Own`; `player/fail.rs` the failure panel, its messages and the stuck episodes' retry schedule. |
-| `src/player/own.rs` | Our player's state machine: VISIONOS + WEB `player` calls, format choice, index fetch (with the first segment in the same request), per-track fetch/append queues, seek, quality/codec switch (`changeType`), eviction, end of stream, 403 → one refresh, retries, stall/first-frame watchdogs, captions, pings, controls and keys. |
-| `src/player/{formats,index,sched,stats,captions,storyboard,ui}.rs` | Pure, unit-tested parts: storyboard spec parsing, level choice and frame/cell math (real WEB spec fixture `player_web_storyboard.json`); format ladder (codec order by `isTypeSupported`, size cap = player height × devicePixelRatio with 20 % slack, ≤ 360p start rung, throughput ABR at 70 %); MP4 `sidx` and WebM `Cues` parsing; buffer decisions (30 s ahead, evict 60 s behind, seek resume, gap-free switch cut); history ping URLs as base.js `Q4a` builds them (`s.youtube.com` → `www.youtube.com` like the web player's `vss_host`); json3 captions; control markup, the three menus and the hover-menu state machine (`MenuCtl`). |
+| `src/player/own.rs` | Our player's state machine: VISIONOS + WEB `player` calls, format choice, index fetch (with the start of the first segment in the same request), hover media prefetch (`own/pre.rs`), hedging and throttle recovery (`own/hedge.rs`), per-track fetch/append queues, seek, quality/codec switch (`changeType`), eviction, end of stream, 403 → one refresh, retries, stall/first-frame watchdogs, captions, pings, controls and keys. |
+| `src/player/{formats,index,sched,stats,captions,storyboard,throttle,ui}.rs` | Pure, unit-tested parts: when YouTube is slow (hedge deadlines, the throttle verdict, escalation order, the drop rung and its hold); storyboard spec parsing, level choice and frame/cell math (real WEB spec fixture `player_web_storyboard.json`); format ladder (codec order by `isTypeSupported`, size cap = player height × devicePixelRatio with 20 % slack, throughput ABR at 70 % with a 1080p floor; the ≤ 360p start rung is used by live streams only); MP4 `sidx` and WebM `Cues` parsing; buffer decisions (30 s ahead, evict 60 s behind, seek resume, gap-free switch cut); history ping URLs as base.js `Q4a` builds them (`s.youtube.com` → `www.youtube.com` like the web player's `vss_host`); json3 captions; control markup, the three menus and the hover-menu state machine (`MenuCtl`). |
 | `src/app.rs` | State: navigation (pushState/popstate), request lifecycle (stale responses dropped, aborts), feed queue (shown / preloaded / continuation, generation-checked), idle preloading, snapshots (stale-while-revalidate), hover prefetch, previews, suggestions, in-memory caches. |
 | `src/actions/` | Watch-page actions, comments, chapters, notifications, account menu: `watch.rs` (like/subscribe/comment-token/chapter data from `next`, row markup), `comments.rs` (both comment formats, markup), `save.rs` (playlist membership from `get_add_to_playlist`, chooser), `notify.rs` (topbar count/avatar, notification list, account menu), `req.rs` (request bodies, outcome/reason), `toggle.rs` (optimistic state: one request in flight, queue a change of mind, roll back on failure), `mod.rs` (state, popovers, timers, responses). Unknown comment items are counted (debug overlay line `acts`). |
 | `src/telemetry.rs`, `src/app/telglue.rs`, `src/player/own/tel.rs` | Speed telemetry (see "Speed telemetry" below): the batched event buffer, its gate and frame spans (`telemetry.rs`, unit-tested); the app's hooks (navigations, InnerTube requests, flushes) and the player's (start breakdown, googlevideo requests, seeks, switches, stalls, drops, menus, toasts, session summary). The bridge only observes (`tel_*`), buffers and forwards. |
@@ -747,6 +804,11 @@ closes; YouTube's own pages in the same tab share that origin storage).
   stalls, actions, features, voice search against a local WebSocket stand-in (`ws-mock.cjs`), SponsorBlock, motion
   and pixel checks, speed timings. Nothing reaches the network.
 - `tests/live-*.cjs`: a few real requests against live YouTube / Deepgram, run by hand and sparingly.
+- `tools/bench/video.cjs`: the live video-path benchmark (development build, signed out, real youtube.com
+  and googlevideo, by hand): first frame, ≥ 1080p, seek and quality-switch times from the client's own
+  telemetry for cold loads, SPA clicks with and without hover, and slow YouTube (a drip-feeding googlevideo
+  proxy 10×/100× slower per node, per URL or for everything; a hung player request). Several builds are
+  interleaved per round (`--ext a,b`): live timings drift ±30 % within a quarter of an hour.
 
 ## Known gaps / next steps
 

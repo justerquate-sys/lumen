@@ -198,6 +198,10 @@ and the streams (VISIONOS) stay anonymous WEB calls as on desktop. History pings
   them, update them there (new APK).
 - googlevideo is fetched by the shell (Kotlin `HttpURLConnection`) to add the CORS header the
   extension's rule adds; on very slow TVs this costs some throughput. The rule can be dropped from
-  `rules.json` (a bundle update) if it ever hurts.
+  `rules.json` (a bundle update) if it ever hurts. Each such request holds one of the WebView's request
+  threads until its headers arrive, even if the page gave it up (a hedged request won on a mirror):
+  hence 6 s to connect / 15 s per read. The client warms the shell's connection with
+  `/generate_204` (a `<link rel=preconnect>` would warm only the WebView's own). Up to 16 keep-alive
+  connections per host.
 - Android TV WebView versions differ by device; the client needs a recent one (Chrome 120+; the
   emulator ran 143). Very old Android TV 8/9 sets with an outdated WebView may misbehave.

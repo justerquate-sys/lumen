@@ -65,6 +65,8 @@ pub struct Format {
     pub len: u64,
     pub dur: f64,
     pub hdr: bool,
+    /// HDR with the HLG transfer (else PQ, SMPTE ST 2084).
+    pub hlg: bool,
     /// A DRC (dynamic range compressed) audio variant per its `xtags`. Other
     /// xtags (dub language/content tags) are normal: on auto-dubbed videos
     /// every audio format, the original included, carries them.
@@ -163,6 +165,7 @@ pub fn parse(player: &Value) -> Vec<Format> {
             fps: num(f.get("fps").unwrap_or(&Value::Null)) as u32,
             p: if video { label_p(&label, width, height) } else { 0 },
             hdr: label.contains("HDR") || f.pointer("/colorInfo/transferCharacteristics").and_then(Value::as_str).is_some_and(|t| t.contains("SMPTEST2084") || t.contains("HLG")),
+            hlg: f.pointer("/colorInfo/transferCharacteristics").and_then(Value::as_str).is_some_and(|t| t.contains("HLG")),
             label,
             bitrate: num(&f["bitrate"]),
             init_end: num(init.get("end").unwrap_or(&Value::Null)),
@@ -248,6 +251,19 @@ fn ladder_by<'a>(formats: &'a [Format], codecs: &[Codec], supported: &dyn Fn(&st
         }
     }
     out
+}
+
+/// decodingInfo answers with HDR formats counted as not smooth when the screen is not HDR
+/// (`hdr_screen`): the SDR format of a rung then wins. An SDR screen gains nothing from HDR, and
+/// decoders answer "smooth" for HDR they cannot show (live 3 Nov 2026, Android TV emulator: 1440p60
+/// HDR AV1 "smooth" even when asked with its transfer function, then no picture).
+pub fn caps_for_screen<'a>(formats: &'a [Format], hdr_screen: bool, caps: &'a dyn Fn(u32) -> Option<(bool, bool)>) -> impl Fn(u32) -> Option<(bool, bool)> + 'a {
+    move |i| {
+        if !hdr_screen && formats.iter().any(|f| f.itag == i && f.video && f.hdr) {
+            return Some((false, false));
+        }
+        caps(i)
+    }
 }
 
 /// Best audio: Opus, then AAC; highest bitrate; default track only.
@@ -544,6 +560,22 @@ mod tests {
         assert_eq!(audio(&fs, &all).unwrap().itag, 251);
         assert_eq!(audio(&fs, &all).unwrap().bitrate, 143_000);
         assert_eq!(audio(&fs, &|m: &str| !m.contains("opus")).unwrap().itag, 140);
+    }
+
+    #[test]
+    fn hdr_only_on_an_hdr_screen() {
+        let f = parse(&json!({"streamingData": {"adaptiveFormats": [
+            fmt(700, "video/mp4; codecs=\"av01.0.12M.10.0.110.09.16.09.0\"", "1440p60 HDR", 1440, 9_000_000),
+            fmt(299, "video/mp4; codecs=\"avc1.64002A\"", "1080p60", 1080, 6_900_000),
+            fmt(699, "video/mp4; codecs=\"av01.0.09M.10.0.110.09.16.09.0\"", "1080p60 HDR", 1080, 5_000_000),
+        ]}}));
+        let all = |_: &str| true;
+        let none = |_: u32| None;
+        let sdr = caps_for_screen(&f, false, &none);
+        let l = ladder_with(&f, &DEFAULT_ORDER, &all, &sdr);
+        assert_eq!(l.iter().map(|x| x.itag).collect::<Vec<_>>(), vec![299], "SDR screen: the HDR rungs go, 1080p SDR stays");
+        let hdr = caps_for_screen(&f, true, &none);
+        assert_eq!(ladder_with(&f, &DEFAULT_ORDER, &all, &hdr)[0].itag, 700, "HDR screen keeps HDR");
     }
 
     #[test]

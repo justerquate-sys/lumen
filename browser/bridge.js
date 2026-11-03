@@ -77,7 +77,9 @@ const YTC = (() => {
       const a = e.button === 0 && e.target.closest && e.target.closest('a[href]'); if (a) call('on_intent', a.getAttribute('href'));
     }, { passive: true, capture: true });
     // Keyboard focus on a link is intent too (prefetch before Enter).
-    d.addEventListener('focusin', e => { const a = e.target.closest && e.target.closest('a[href]'); if (a) call('on_intent', a.getAttribute('href')); });
+    // A microtask later: focus moved by Rust itself (the TV remote's spatial_focus) fires focusin inside
+    // that Rust call, where a nested call would be dropped.
+    d.addEventListener('focusin', e => { const a = e.target.closest && e.target.closest('a[href]'); if (a) { const h = a.getAttribute('href'); queueMicrotask(() => call('on_intent', h)); } });
     d.addEventListener('visibilitychange', () => { if (d.visibilityState === 'hidden') call('on_hide'); });
     d.addEventListener('keydown', e => {
       if (e.altKey) return;
@@ -439,6 +441,7 @@ const YTC = (() => {
     // Opacity 0 → 1 on `id` (content just written; never on content that was already visible).
     fade_in(id, easing, ms) { const el = byId(id); if (el) el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: ms, easing }); },
     reduced_motion: () => matchMedia('(prefers-reduced-motion: reduce)').matches,
+    matches: q => { try { return matchMedia(q).matches; } catch { return false; } },
     // Calls on_timer(id) once the next frame has rendered (styles of content written now are computed).
     frame(id) { requestAnimationFrame(() => setTimeout(() => call('on_timer', id), 0)); },
     title(t) { d.title = t; },
@@ -448,13 +451,34 @@ const YTC = (() => {
     scroll_to(y) { scrollTo(0, y); },
     fetch(id, method, url, body, headers) { YTC.fetch_opts(id, method, url, body, headers, '{}'); },
     // `opts` (JSON) is merged into the fetch init, e.g. {"credentials":"omit"} or {"keepalive":true}.
+    // `progress: 1` in `opts` also reports on_fetch_progress(id, status, bytes so far): once when the
+    // response headers arrive (0 bytes), then at most every 100 ms while the body streams in.
     fetch_opts(id, method, url, body, headers, opts) {
       const c = new AbortController();
       ctl.set(id, c);
-      const init = { method, headers: JSON.parse(headers), credentials: 'same-origin', signal: c.signal, ...JSON.parse(opts) };
+      const o = JSON.parse(opts), prog = o.progress; delete o.progress;
+      const init = { method, headers: JSON.parse(headers), credentials: 'same-origin', signal: c.signal, ...o };
       if (body) init.body = body;
+      const done = (status, b) => { ctl.delete(id); call('on_fetch', id, status, b); };
       gfetch(url, init)
-        .then(r => r.arrayBuffer().then(b => { ctl.delete(id); call('on_fetch', id, r.status, new Uint8Array(b)); }))
+        .then(r => {
+          if (!prog || !r.body) return r.arrayBuffer().then(b => done(r.status, new Uint8Array(b)));
+          call('on_fetch_progress', id, r.status, 0);
+          const rd = r.body.getReader(), parts = [];
+          let n = 0, last = perf.now();
+          const next = () => rd.read().then(({ done: end, value }) => {
+            if (end) {
+              const b = new Uint8Array(n); let at = 0;
+              for (const p of parts) { b.set(p, at); at += p.length; }
+              return done(r.status, b);
+            }
+            parts.push(value); n += value.length;
+            const t = perf.now();
+            if (t - last >= 100) { last = t; call('on_fetch_progress', id, r.status, n); }
+            return next();
+          });
+          return next();
+        })
         .catch(e => { ctl.delete(id); if (!e || e.name !== 'AbortError') call('on_fetch', id, 0, new Uint8Array(0)); });
     },
     abort(id) { const c = ctl.get(id); if (c) { ctl.delete(id); c.abort(); } },
@@ -531,7 +555,8 @@ const YTC = (() => {
       let fake = null; try { fake = JSON.parse(localStorage.getItem('ytc-test-caps') || 'null'); } catch {}
       if (fake) { Promise.resolve().then(() => call('on_caps', JSON.stringify(list.map(c => ({ i: c.i, ok: true, s: fake[c.i] ? fake[c.i].s : true, e: fake[c.i] ? fake[c.i].e : true }))))); return; }
       if (!mc || !list.length) { call('on_caps', '[]'); return; }
-      Promise.all(list.map(c => mc.decodingInfo({ type: 'media-source', video: { contentType: c.mime, width: c.w, height: c.h, bitrate: c.b, framerate: c.f } })
+      // `tf` (an HDR format's transfer function: 'pq' / 'hlg') also asks for BT.2020 colour.
+      Promise.all(list.map(c => mc.decodingInfo({ type: 'media-source', video: { contentType: c.mime, width: c.w, height: c.h, bitrate: c.b, framerate: c.f, ...(c.tf ? { transferFunction: c.tf, colorGamut: 'rec2020' } : {}) } })
         .then(r => ({ i: c.i, ok: r.supported, s: r.smooth, e: r.powerEfficient }), () => ({ i: c.i, ok: false }))))
         .then(r => call('on_caps', JSON.stringify(r)));
     },
