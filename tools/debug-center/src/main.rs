@@ -9,6 +9,7 @@
 
 mod json;
 mod perf;
+mod timeline;
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -79,6 +80,10 @@ fn handle(mut stream: TcpStream, file: &Path) -> std::io::Result<()> {
         ("OPTIONS", _) => respond(&mut stream, "204 No Content", "text/plain", b""),
         ("GET", "/perf") => {
             let page = perf::dashboard(file, &perf::query(path));
+            respond(&mut stream, "200 OK", "text/html; charset=utf-8", page.as_bytes())
+        }
+        ("GET", "/timeline") => {
+            let page = timeline::page(file, &perf::query(path));
             respond(&mut stream, "200 OK", "text/html; charset=utf-8", page.as_bytes())
         }
         ("GET", "/perf.json") => {

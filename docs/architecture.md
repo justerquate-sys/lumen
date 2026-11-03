@@ -331,6 +331,23 @@ folds back into it when it expires.
   shell 0.8. Script start does not move with `content.js` size (a doubled payload started as fast), so size
   cuts do not buy startup; `wasm-opt` (binaryen 133: −8.6 % with `-Oz`) changed neither startup nor the Wasm
   CPU per flow beyond noise and is not used. Splitting rarely used parts would not help either.
+  Live (signed out, youtube.com, 3 Nov 2026, `tools/bench`): a boot's `handler_ms` (navigation start → the
+  app) is YouTube's own document request (`response_start` 130–260 ms p50) + ~20 ms until the browser runs
+  the content script + ~9 ms of ours (decode + compile 2.3, app setup 2, shell 1–2, first request ~2); eager
+  Wasm compilation (`--no-wasm-lazy-compilation`) changed neither startup nor the first watch page. So the
+  owner's 210–440 ms `handler_ms` is mostly YouTube's document; every boot event now carries that breakdown
+  (`boot`, docs/debug-center.md) to confirm it on real data.
+- **Hedged reads** (3 Nov 2026; `src/hedge.rs`): a `browse` / `next` / `search` / `resolve_url` request (and
+  its continuation) that someone waits for and that has not answered by its deadline (≈ the session's p90 per
+  endpoint, 0.7–2.5 s; 1.3 / 1.3 / 1.2 s for next / browse / search until 8 answers are in) goes out once more,
+  identically; the first good answer wins, the other is aborted. Actions (like, subscribe, comment, save,
+  playlists) never go out twice, background requests and Home's first page are not hedged. Measured with the
+  live benchmark's injected slowness (`tools/bench`): see docs/debug-center.md "Hedged reads".
+- **No layout reads per card.** The speculative prefetch of the cards in view (idle time after every paint and
+  scroll chunk) measures each card's own box (`bridge::visible_hrefs(list, ".c", "a.t", n)`), never an element
+  inside it: inside a `content-visibility:auto` card a measurement lays that card out on its own, one forced
+  layout per card (125 layouts + 350 style recalcs, 40–130 ms blocking idle tasks at 4× CPU on a scrolled
+  Home; 3 Nov 2026), which were most of Home's long frames after the first paint.
 - **Restored pages** (back to a feed) lay all cards out for the scroll jump (`.rs`, 1 s): cards are
   `content-visibility:auto` with a 240 px placeholder, so a freshly written page would otherwise land on other
   cards and then be moved by scroll anchoring.
@@ -614,6 +631,7 @@ created. Importing twice is harmless (the second run merges into the same record
 | `src/app.rs` | State: navigation (pushState/popstate), request lifecycle (stale responses dropped, aborts), feed queue (shown / preloaded / continuation, generation-checked), idle preloading, snapshots (stale-while-revalidate), hover prefetch, previews, suggestions, in-memory caches. |
 | `src/actions/` | Watch-page actions, comments, chapters, notifications, account menu: `watch.rs` (like/subscribe/comment-token/chapter data from `next`, row markup), `comments.rs` (both comment formats, markup), `save.rs` (playlist membership from `get_add_to_playlist`, chooser), `notify.rs` (topbar count/avatar, notification list, account menu), `req.rs` (request bodies, outcome/reason), `toggle.rs` (optimistic state: one request in flight, queue a change of mind, roll back on failure), `mod.rs` (state, popovers, timers, responses). Unknown comment items are counted (debug overlay line `acts`). |
 | `src/telemetry.rs`, `src/app/telglue.rs`, `src/player/own/tel.rs` | Speed telemetry (see "Speed telemetry" below): the batched event buffer, its gate and frame spans (`telemetry.rs`, unit-tested); the app's hooks (navigations, InnerTube requests, flushes) and the player's (start breakdown, googlevideo requests, seeks, switches, stalls, drops, menus, toasts, session summary). The bridge only observes (`tel_*`), buffers and forwards. |
+| `src/hedge.rs` | Hedged InnerTube reads (pure state: which requests may go out twice, the per-endpoint deadline from the session's latencies, which answer wins); the app sends, times and aborts (`App::send`, `hedge_fire`, the top of `on_fetch`). See "Speed". |
 | `src/snap.rs` | Feed snapshots ↔ JSON for `sessionStorage`: compact item records, re-validated on read (ids, hrefs, image hosts), size caps (150 items, 400 KB, 6 pages). |
 | `src/features/*.rs`, `src/app/fxglue.rs` | The extension's features rebuilt natively (see "Features" below): pure, unit-tested logic per feature (`filters`, `history`, `progress`, `websites`, `watch_later`, `topics`, `search_filters`, `home_chips`, `upnext`); `fxglue.rs` (a child module of `app`) wires them in with one-line hooks in `app.rs`; `app/upglue.rs` owns what's next on watch pages, `app/speed.rs` the speculative/background prefetch and the perf report (`src/perf.rs`). Cards get the Watch later button through `render::set_card_hook`; the filter bar fills `#ytc-filters`. |
 

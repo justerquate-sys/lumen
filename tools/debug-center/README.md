@@ -9,7 +9,8 @@ has no collector code and never talks to it.
 |---|---|
 | `POST /incident` | Append a report (≤ 512 KB): `{"received": <epoch ms>, "report": <the JSON>}` per line. |
 | `GET /` | The latest 30 incidents (telemetry batches are only counted). |
-| `GET /perf?since=<7d>&version=<build>&metric=<prefix*>` | Speed dashboard: per metric count/p50/p90/p99/max, p50 trend per build, incidents per build, the 20 slowest events per metric with their breakdown. |
+| `GET /perf?since=<7d>&version=<build>&metric=<prefix*>` | Speed dashboard: per metric count/p50/p90/p99/max, interactions per action (p50/p90/max, slowest with timeline links), hedged-request rates, p50 trend per build, incidents per build, the 20 slowest events per metric with their breakdown. |
+| `GET /timeline` · `GET /timeline?page=<id>` | The documents seen (newest first) · one document's every event (interactions, navigations, requests, long frames…) in order with ms. |
 | `GET /perf.json?metric=<name or prefix*>&since=<epoch ms, ms ago, 30m/6h/7d, all>&version=<build>&limit=<n>` | Raw telemetry rows (JSON array, oldest first): the event plus `received`, `version`, `page`. |
 | `GET /health` | `ok` |
 

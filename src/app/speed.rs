@@ -25,7 +25,7 @@ impl App {
         if !bridge::visible() {
             return;
         }
-        let hrefs = bridge::visible_hrefs(LIST, "a.t", SPEC_CARDS);
+        let hrefs = bridge::visible_hrefs(LIST, ".c", "a.t", SPEC_CARDS);
         for h in hrefs.lines() {
             if let Some(Route::Watch { v, list, .. }) = route::parse(h) {
                 if self.spec_queue.len() < SPEC_CARDS as usize && !self.spec_queue.iter().any(|(x, l)| *x == v && *l == list) {
@@ -67,7 +67,7 @@ impl App {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            bridge::abort(id);
+            self.abort_req(id);
             match self.pending.remove(&id) {
                 Some(Pending { purpose: Purpose::Prefetch { v, list, .. }, .. }) => {
                     self.prefetching.remove(&wkey(&v, list.as_deref()));

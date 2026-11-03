@@ -2332,12 +2332,14 @@ impl Own {
                     bridge::class_all(&format!("#{} .dw", ui::MENU), "dw", false);
                     // The row the pointer rests on wins over a value the wheel left pending.
                     self.wheel_q = None;
+                    crate::telemetry::act_label("player.dwell", Some("hover"), "watch");
                     self.on_act("p-set", &arg, false);
                 }
             }
             Tm::WheelQ(g) if g == self.wheel_gen => {
                 if let Some(q) = self.wheel_q.take() {
                     if q != self.prefs.quality {
+                        crate::telemetry::act_label("player.quality.wheel", Some("wheel"), "watch");
                         self.on_act("p-set", &format!("q:{q}"), false);
                     } else {
                         self.sync_menu();

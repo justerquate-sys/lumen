@@ -8,6 +8,7 @@ mod bridge;
 mod native;
 pub mod config;
 pub mod description;
+pub mod hedge;
 pub mod json;
 pub mod features;
 pub mod parse;
@@ -134,13 +135,39 @@ pub fn on_timer(id: u32) {
     if native::active() {
         return native::clean::on_timer(id);
     }
+    // A timer is no input; a handler that acts on a hover dwell names it (`telemetry::act_label`).
+    let tel = telemetry::enabled();
+    if tel {
+        telemetry::act_begin(String::new(), "dwell".into(), "hover", app::route_now(), true);
+    }
     app::with(|a| a.on_timer(id));
+    if tel {
+        telemetry::act_end(true);
+    }
 }
 
 /// Returns true when the click was handled (the bridge then prevents default).
 #[wasm_bindgen]
 pub fn on_click(href: &str, act: &str, arg: &str, mods: u32) -> bool {
-    app::with_ret(|a| a.on_click(href, act, arg, mods))
+    let tel = telemetry::enabled() && !act.starts_with("tv-");
+    if tel {
+        let (tg, pt) = telemetry::target();
+        let to = (!href.is_empty()).then(|| route::parse(href).map(|r| app::route_kind(&r)).unwrap_or("other"));
+        let (name, kind) = telemetry::click_action(act, arg, &tg, to);
+        let input = if mods & 32 != 0 { "keyboard" } else if pt.starts_with("touch") { "touch" } else { "pointer" };
+        telemetry::act_begin(name, kind, input, app::route_now(), false);
+        if let Some(to) = to {
+            telemetry::act_field("to", to.into());
+        }
+        if let Some(v) = href.strip_prefix("/watch?v=").map(|v| &v[..v.len().min(11)]).filter(|v| util::is_video_id(v)) {
+            telemetry::act_field("vid", v.into());
+        }
+    }
+    let r = app::with_ret(|a| a.on_click(href, act, arg, mods));
+    if tel {
+        telemetry::act_end(r);
+    }
+    r
 }
 
 /// Pointer press or keyboard focus on a link: prefetch it now.
@@ -151,7 +178,17 @@ pub fn on_intent(href: &str) {
 
 #[wasm_bindgen]
 pub fn on_submit(form: &str, value: &str) -> bool {
-    app::with_ret(|a| a.on_submit(form, value))
+    let tel = telemetry::enabled();
+    if tel {
+        let (_, pt) = telemetry::target();
+        let name = if form.starts_with("ytc-search") { "search.submit".to_string() } else { format!("submit.{}", telemetry::area(form)) };
+        telemetry::act_begin(name, "form".into(), if pt.ends_with("|click") { "pointer" } else { "keyboard" }, app::route_now(), false);
+    }
+    let r = app::with_ret(|a| a.on_submit(form, value));
+    if tel {
+        telemetry::act_end(r);
+    }
+    r
 }
 
 #[wasm_bindgen]
@@ -179,12 +216,28 @@ pub fn on_hide() {
 
 #[wasm_bindgen]
 pub fn on_key(key: &str, editable: bool) -> bool {
-    app::with_ret(|a| a.on_key(key, editable))
+    let name = if telemetry::enabled() { telemetry::key_action(key, editable) } else { None };
+    let tel = name.is_some();
+    if let Some(n) = name {
+        telemetry::act_begin(n, if editable { "field" } else { "key" }.into(), "keyboard", app::route_now(), false);
+    }
+    let r = app::with_ret(|a| a.on_key(key, editable));
+    if tel {
+        telemetry::act_end(r);
+    }
+    r
 }
 
 #[wasm_bindgen]
 pub fn on_pop() {
+    let tel = telemetry::enabled();
+    if tel {
+        telemetry::act_begin("history.pop".into(), "history".into(), "history", app::route_now(), false);
+    }
     app::with(|a| a.on_pop());
+    if tel {
+        telemetry::act_end(true);
+    }
 }
 
 /// `MediaCapabilities.decodingInfo` results for the player.
@@ -207,25 +260,48 @@ pub fn on_track(name: &str, fx: f64) {
 /// Wheel over a `[data-wheel]` zone (`bridge::wheel_take`): vertical pixels and mouse-wheel clicks (+ = down).
 #[wasm_bindgen]
 pub fn on_wheel(name: &str, dy: f64, notches: i32) {
+    let tel = telemetry::wheel_begin(name);
     app::with(|a| a.on_wheel(name, dy, notches));
+    if tel {
+        telemetry::act_end(true);
+    }
 }
 
 /// A wheel notch over an element bound with `bridge::wheel` (−1 up, 1 down, 0 partial); true = handled.
 #[wasm_bindgen]
 pub fn on_wheel_step(name: &str, dir: i32) -> bool {
-    app::with_ret(|a| a.on_wheel_step(name, dir))
+    let tel = telemetry::wheel_begin(name);
+    let r = app::with_ret(|a| a.on_wheel_step(name, dir));
+    if tel {
+        telemetry::act_end(r);
+    }
+    r
 }
 
 /// Pointer drag on `[data-drag]`: fractions across its box, phase 0 down / 1 move / 2 up.
 #[wasm_bindgen]
 pub fn on_drag(name: &str, fx: f64, fy: f64, phase: u32) {
+    let tel = phase == 2 && telemetry::enabled();
+    if tel {
+        telemetry::act_begin(format!("drag.{}", telemetry::area(name)), "drag".into(), "pointer", app::route_now(), false);
+    }
     app::with(|a| a.on_drag(name, fx, fy, phase));
+    if tel {
+        telemetry::act_end(true);
+    }
 }
 
 /// The hover zone (`[data-hov]` name + `data-arg`, '' = none) changed; `held` = a button is down.
 #[wasm_bindgen]
 pub fn on_hov(zone: &str, arg: &str, held: bool) {
+    let tel = telemetry::enabled();
+    if tel {
+        telemetry::act_begin(String::new(), format!("hover@{}", telemetry::area(zone)), "hover", app::route_now(), true);
+    }
     app::with(|a| a.on_hov(zone, arg, held));
+    if tel {
+        telemetry::act_end(true);
+    }
 }
 
 /// A pointer press, with the `data-pop` it is inside ("" = outside).
@@ -276,5 +352,13 @@ pub fn on_secret(key: &str, set: bool, changed: bool) {
 /// contextmenu on a `[data-ctx]` element; true = handled (no browser menu).
 #[wasm_bindgen]
 pub fn on_ctx(name: &str, arg: &str) -> bool {
-    app::with_ret(|a| a.on_ctx(name, arg))
+    let tel = telemetry::enabled();
+    if tel {
+        telemetry::act_begin(format!("ctx.{}", telemetry::area(name)), "contextmenu".into(), "pointer", app::route_now(), false);
+    }
+    let r = app::with_ret(|a| a.on_ctx(name, arg));
+    if tel {
+        telemetry::act_end(r);
+    }
+    r
 }

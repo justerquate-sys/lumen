@@ -54,6 +54,36 @@ pub struct NavSpan {
     /// Navigation start in the app (after the input handler began).
     pub t_nav: f64,
     pub reqs: Vec<Value>,
+    /// The interaction that started it (`ui.act` name), if one did.
+    pub act: Option<String>,
+    /// More breakdown (the boot's document timings).
+    pub extra: Map<String, Value>,
+}
+
+/// Interactions waiting for their frame (a lost callback must not grow the list).
+const ACTS_MAX: usize = 16;
+
+/// One user interaction being handled or waiting for its frame (`ui.act`).
+#[derive(Default, Clone, Debug)]
+pub struct Act {
+    pub name: String,
+    /// What was used, without any content: `a@list`, `button@player`, `key`, `field`…
+    pub kind: String,
+    /// pointer / touch / keyboard / wheel / hover / history.
+    pub input: &'static str,
+    pub route: &'static str,
+    /// Input time and the handler's start (performance.now ms).
+    pub t0: f64,
+    pub h: f64,
+    /// Only reported when a handler names it (`act_label`): timers, hover zones, wheels.
+    pub quiet: bool,
+    nav_before: u32,
+    token: u32,
+    /// The navigation it started (completed by that navigation's frame).
+    nav: Option<u32>,
+    dom: Option<f64>,
+    paint: Option<f64>,
+    pub fields: Map<String, Value>,
 }
 
 #[derive(Default)]
@@ -90,6 +120,15 @@ pub struct Tel {
     spans: Vec<Span>,
     token: u32,
     overhead: f64,
+    /// The interaction being handled now, and those waiting for their frames.
+    cur: Option<Act>,
+    acts: Vec<Act>,
+    /// The last navigation's DOM write: (id, performance.now ms, src, request ms).
+    nav_ins: Option<(u32, f64, &'static str, f64)>,
+    act_seq: u32,
+    /// A (performance.now, epoch) pair taken by the glue, to date interactions.
+    clock: (f64, f64),
+    wheel_at: f64,
 }
 
 impl Tel {
@@ -176,7 +215,16 @@ impl Tel {
     pub fn nav_start(&mut self, route: &'static str, mode: &'static str, now: f64) -> u32 {
         let (input, t0) = if mode == "boot" { ("boot", 0.0) } else if mode == "pop" { ("history", self.cause(now).1) } else { self.cause(now) };
         self.nav_seq += 1;
-        self.nav = Some(NavSpan { id: self.nav_seq, route, mode, input, src: "network", t0, t_nav: now, reqs: Vec::new() });
+        // An interaction still waiting for an earlier navigation's content: that content never comes.
+        let superseded: Vec<usize> = self.acts.iter().enumerate().filter(|(_, a)| a.nav.is_some_and(|n| n < self.nav_seq)).map(|(i, _)| i).collect();
+        for i in superseded.into_iter().rev() {
+            let mut a = self.acts.remove(i);
+            a.fields.insert("superseded".into(), true.into());
+            a.nav = None;
+            self.act_emit(a);
+        }
+        let act = self.cur.as_ref().filter(|a| !a.quiet).map(|a| a.name.clone());
+        self.nav = Some(NavSpan { id: self.nav_seq, route, mode, input, src: "network", t0, t_nav: now, reqs: Vec::new(), act, extra: Map::new() });
         self.nav_t0 = Some(t0);
         self.waits.clear();
         self.nav_visible = None;
@@ -219,6 +267,17 @@ impl Tel {
         }
         if !n.reqs.is_empty() {
             f.insert("reqs".into(), Value::Array(n.reqs.clone()));
+        }
+        if let Some(a) = &n.act {
+            f.insert("act".into(), a.as_str().into());
+        }
+        for (k, v) in &n.extra {
+            f.entry(k.as_str()).or_insert_with(|| v.clone());
+        }
+        let req_ms = n.reqs.iter().filter_map(|r| r.get("ms").and_then(Value::as_f64)).fold(0.0, f64::max);
+        self.nav_ins = Some((n.id, now, n.src, req_ms));
+        for a in self.acts.iter_mut().filter(|a| a.nav == Some(n.id)) {
+            a.dom = Some(now);
         }
         Some((self.next_token(), n, f))
     }
@@ -287,11 +346,244 @@ impl Tel {
         }
     }
 
+    // ------------------------------------------------------------ interactions (`ui.act`)
+
+    /// An input reached the app at `now` (input time `t0`): it becomes a `ui.act` event when its
+    /// handler says it was handled (`act_end`). `quiet` ones only count when a handler names them.
+    pub fn act_begin(&mut self, name: String, kind: String, input: &'static str, route: &'static str, t0: f64, now: f64, quiet: bool) {
+        if !self.enabled() {
+            return;
+        }
+        self.cur = Some(Act { name, kind, input, route, t0: t0.min(now), h: now, quiet, nav_before: self.nav_seq, ..Default::default() });
+    }
+
+    /// A handler names what the current input did (a dwell on the logo went Home, a wheel chose a
+    /// speed); `input` overrides how it was given. Starts an interaction when none is open.
+    pub fn act_label(&mut self, name: &str, input: Option<&'static str>, route: &'static str, now: f64) {
+        if !self.enabled() {
+            return;
+        }
+        let a = self.cur.get_or_insert_with(|| Act { route, t0: now, h: now, nav_before: self.nav_seq, input: "auto", ..Default::default() });
+        a.name = name.to_string();
+        a.quiet = false;
+        if let Some(i) = input {
+            a.input = i;
+        }
+    }
+
+    /// Adds a breakdown field to the current interaction.
+    pub fn act_field(&mut self, k: &str, v: Value) {
+        if let Some(a) = self.cur.as_mut() {
+            a.fields.insert(k.into(), v);
+        }
+    }
+
+    /// The handler returned at `now`: a handled, named interaction waits for its frame (the
+    /// returned token goes to `tel_frame`); one that started a navigation also waits for that
+    /// navigation's content.
+    pub fn act_end(&mut self, handled: bool, now: f64) -> Option<u32> {
+        let mut a = self.cur.take()?;
+        if !handled || a.quiet || a.name.is_empty() {
+            return None;
+        }
+        if self.nav_seq > a.nav_before {
+            a.nav = Some(self.nav_seq);
+            if let Some(n) = self.nav.as_mut().filter(|n| n.id == self.nav_seq) {
+                n.act.get_or_insert_with(|| a.name.clone());
+            }
+            // Written already (memory / cache): the DOM time is the navigation's.
+            if let Some((_, t, ..)) = self.nav_ins.filter(|x| x.0 == self.nav_seq) {
+                a.dom = Some(t);
+            }
+        } else {
+            a.dom = Some(now);
+        }
+        if self.acts.len() >= ACTS_MAX {
+            let old = self.acts.remove(0);
+            if old.paint.is_some() {
+                self.act_emit(old);
+            } else {
+                self.dropped += 1;
+            }
+        }
+        self.act_seq += 1;
+        a.token = self.next_token();
+        let token = a.token;
+        self.acts.push(a);
+        Some(token)
+    }
+
+    /// The frame after an interaction's handler rendered at `t`: emitted now unless it waits for
+    /// its navigation's content. True when `token` was an interaction's.
+    pub fn act_frame(&mut self, token: u32, t: f64) -> bool {
+        let Some(i) = self.acts.iter().position(|a| a.token == token) else { return false };
+        self.acts[i].paint = Some(t);
+        let waiting = self.acts[i].nav.is_some_and(|n| self.nav_visible.map(|v| v.0) != Some(n));
+        if !waiting {
+            let a = self.acts.remove(i);
+            self.act_emit(a);
+        }
+        true
+    }
+
+    /// Navigation `id`'s content became visible at `t`: the interactions waiting for it complete.
+    pub fn act_nav_visible(&mut self, id: u32, t: f64) {
+        let ins = self.nav_ins.filter(|x| x.0 == id);
+        let mut i = 0;
+        while i < self.acts.len() {
+            if self.acts[i].nav != Some(id) {
+                i += 1;
+                continue;
+            }
+            let mut a = self.acts.remove(i);
+            a.fields.insert("content_ms".into(), json!(round1(t - a.t0)));
+            if let Some((_, it, src, req)) = ins {
+                a.dom = Some(it);
+                a.fields.insert("wait".into(), src.into());
+                if req > 0.0 {
+                    a.fields.insert("req_ms".into(), json!(round1(req)));
+                }
+            }
+            if a.paint.is_none() {
+                // Its own frame is this one.
+                a.paint = Some(t);
+            }
+            self.act_emit(a);
+        }
+    }
+
+    fn act_emit(&mut self, a: Act) {
+        let paint = a.paint.unwrap_or(a.h);
+        let mut f = a.fields;
+        f.insert("act".into(), a.name.into());
+        if !a.kind.is_empty() {
+            f.insert("kind".into(), a.kind.into());
+        }
+        f.insert("input".into(), a.input.into());
+        f.insert("route".into(), a.route.into());
+        f.insert("handler_ms".into(), json!(round1(a.h - a.t0)));
+        if let Some(d) = a.dom {
+            f.insert("dom_ms".into(), json!(round1((d - a.t0).max(0.0))));
+        }
+        f.insert("nav".into(), a.nav.is_some().into());
+        f.entry("wait").or_insert_with(|| "none".into());
+        // The document's own clock, so a timeline orders events closer than 1 ms apart.
+        f.insert("t".into(), json!(round1(a.t0)));
+        let at = self.epoch_of(a.t0);
+        self.push("ui.act", paint - a.t0, at, f);
+    }
+
+    /// Epoch ms of a performance.now time (from the last known pair).
+    fn epoch_of(&self, t: f64) -> f64 {
+        let (now, epoch) = self.clock;
+        if epoch > 0.0 { epoch - (now - t) } else { t }
+    }
+
     pub fn add_overhead(&mut self, ms: f64) {
         if ms.is_finite() && ms > 0.0 {
             self.overhead += ms;
         }
     }
+}
+
+/// A code-defined name made safe for the log: lowercase letters, digits, `-`, `.`, `_`, at most
+/// `max` characters (anything else → "").
+fn ident(s: &str, max: usize) -> String {
+    if s.is_empty() || s.len() > max || !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'.' | b'_')) {
+        return String::new();
+    }
+    s.to_string()
+}
+
+/// An element id as an area name: `ytc-` dropped, at most two short letter-only segments (so ids
+/// that carry a video id or an index, like `ytc-wl-<id>` or `ytc-rp-3`, become `wl` / `rp`).
+pub fn area(id: &str) -> String {
+    let id = id.strip_prefix("ytc-").unwrap_or(id);
+    let mut out = Vec::new();
+    for seg in id.split('-').take(2) {
+        if seg.is_empty() || seg.len() > 8 || !seg.bytes().all(|b| b.is_ascii_lowercase()) {
+            break;
+        }
+        out.push(seg);
+    }
+    out.join("-")
+}
+
+/// A `data-act` value as an action name: its family prefix spelled out (`p-q` → `player.q`).
+pub fn act_name(act: &str) -> String {
+    let act = ident(act, 32);
+    if act.is_empty() {
+        return "other".into();
+    }
+    for (p, fam) in [("p-", "player."), ("fx-", "fx."), ("vk-", "voice."), ("a-", "action."), ("up-", "upnext."), ("tv-", "tv.")] {
+        if let Some(rest) = act.strip_prefix(p) {
+            return format!("{fam}{}", rest.replace('-', "."));
+        }
+    }
+    act.replace('-', ".")
+}
+
+/// The player's `p-set` choices by their `data-arg` key (`q:720` → `player.quality`).
+fn player_set(arg: &str) -> String {
+    let key = arg.split_once(':').map(|x| x.0).unwrap_or("");
+    match key {
+        "q" => "player.quality".into(),
+        "rate" => "player.speed".into(),
+        "cc" => "player.captions".into(),
+        "au" => "player.audio".into(),
+        "codec" => "player.codec".into(),
+        "sb" => "player.sponsorblock".into(),
+        k if !ident(k, 8).is_empty() => format!("player.set.{k}"),
+        _ => "player.set".into(),
+    }
+}
+
+/// The interaction log's name and target kind for a click (`target` from `bridge::tel_target`:
+/// `tag#id[data-act]`; `to` the link's route kind; `arg` only to tell the player's choices
+/// apart by their key). No text, URL, query or value is used.
+pub fn click_action(act: &str, arg: &str, target: &str, to: Option<&'static str>) -> (String, String) {
+    let tag: String = target.split('#').next().unwrap_or("").chars().take(8).collect();
+    let tag = ident(&tag, 8);
+    let id = target.split_once('#').map(|x| x.1).unwrap_or("").split('[').next().unwrap_or("");
+    let ar = area(id);
+    let kind = if ar.is_empty() { tag.clone() } else { format!("{tag}@{ar}") };
+    if act == "p-set" {
+        return (player_set(arg), kind);
+    }
+    if !act.is_empty() {
+        return (act_name(act), kind);
+    }
+    let Some(to) = to else { return ("link.other".into(), kind) };
+    let name = match (ar.as_str(), to) {
+        ("logo", _) => "logo.home".to_string(),
+        ("list" | "main" | "grid", "watch") => "card.open".into(),
+        ("list" | "main" | "grid", "channel") => "card.channel".into(),
+        ("list" | "main" | "grid", "playlist") => "card.playlist".into(),
+        ("side", t) => format!("side.{t}"),
+        ("", t) => format!("link.{t}"),
+        (a, t) => format!("{a}.{t}"),
+    };
+    (name, kind)
+}
+
+/// A handled key as an action name (`key.k`, `key.arrowleft`, `mod.arrowright`); None for a key
+/// typed into a text field (the log never learns what was typed).
+pub fn key_action(key: &str, editable: bool) -> Option<String> {
+    let (m, k) = match key.strip_prefix("Mod+") {
+        Some(k) => ("mod", k),
+        None => ("key", key),
+    };
+    let one = k.chars().count() == 1;
+    if editable && one {
+        return None;
+    }
+    let k = if k == " " { "space".to_string() } else { k.to_ascii_lowercase() };
+    let k = if one && !k.chars().all(|c| c.is_ascii_graphic()) { "char".to_string() } else { k };
+    let k = if one { k } else { ident(&k, 16) };
+    if k.is_empty() {
+        return None;
+    }
+    Some(format!("{}{m}.{k}", if editable { "field." } else { "" }))
 }
 
 pub fn round1(v: f64) -> f64 {
@@ -410,6 +702,15 @@ mod glue {
         timed(|t| t.nav_start(route, mode, now));
     }
 
+    /// A breakdown field for the open navigation.
+    pub fn nav_extra(k: &str, v: Value) {
+        timed(|t| {
+            if let Some(n) = t.nav.as_mut() {
+                n.extra.insert(k.into(), v);
+            }
+        });
+    }
+
     pub fn nav_src(src: &'static str) {
         timed(|t| t.nav_src(src));
     }
@@ -436,13 +737,83 @@ mod glue {
     pub fn on_frame(token: u32, t: f64) {
         let epoch = bridge::epoch();
         timed(|tel| {
+            tel.clock = (t, epoch);
             if let Some((m, at)) = tel.frame_done(token, t, epoch) {
                 if m.starts_with("nav.") {
                     let id = tel.nav_seq;
                     tel.nav_visible = Some((id, at));
+                    tel.act_nav_visible(id, at);
                 }
+            } else {
+                tel.act_frame(token, t);
             }
         });
+    }
+
+    /// An input reaches the app (`name` its action, `kind` what was used): see `Tel::act_begin`.
+    /// The input time is the event's own timestamp when the bridge has one.
+    pub fn act_begin(name: String, kind: String, input: &'static str, route: &'static str, quiet: bool) {
+        if !enabled() {
+            return;
+        }
+        let now = bridge::now();
+        // History moves and timers have no input event of their own.
+        let t0 = if quiet || input == "history" { now } else { event_t() };
+        timed(|t| t.act_begin(name, kind, input, route, t0, now, quiet));
+    }
+
+    /// Names what the current input did (see `Tel::act_label`).
+    pub fn act_label(name: &str, input: Option<&'static str>, route: &'static str) {
+        if !enabled() {
+            return;
+        }
+        let now = bridge::now();
+        timed(|t| t.act_label(name, input, route, now));
+    }
+
+    pub fn act_field(k: &str, v: Value) {
+        timed(|t| t.act_field(k, v));
+    }
+
+    /// The input's handler returned (`handled`): a named interaction completes at its frame.
+    pub fn act_end(handled: bool) {
+        if !enabled() {
+            with(|t| t.cur = None);
+            return;
+        }
+        let now = bridge::now();
+        let epoch = bridge::epoch();
+        if let Some(token) = timed(|t| {
+            t.clock = (now, epoch);
+            t.act_end(handled, now)
+        })
+        .flatten()
+        {
+            bridge::tel_frame(token);
+        }
+    }
+
+    /// A wheel event over `name`: one interaction per gesture (a pause of 400 ms starts a new one).
+    pub fn wheel_begin(name: &str) -> bool {
+        if !enabled() {
+            return false;
+        }
+        let now = bridge::now();
+        let first = with(|t| {
+            let first = now - t.wheel_at > 400.0;
+            t.wheel_at = now;
+            first
+        })
+        .unwrap_or(false);
+        act_begin(format!("wheel.{}", area(name)), "wheel".into(), "wheel", crate::app::route_now(), !first);
+        true
+    }
+
+    /// What the last input event was on (`tag#area[data-act]`, no text) and `pointerType|type`.
+    pub fn target() -> (String, String) {
+        let s = bridge::tel_target();
+        let (tg, pt) = s.split_once('|').unwrap_or((s.as_str(), ""));
+        (tg.to_string(), pt.to_string())
     }
 
     /// Input time of the current page's navigation.
@@ -619,5 +990,90 @@ mod tests {
         }
         assert_eq!(t.spans.len(), SPANS_MAX);
         assert!(t.frame_done(1, 5.0, 1.0).is_none(), "the oldest was dropped");
+    }
+
+    #[test]
+    fn interaction_names_carry_no_content() {
+        assert_eq!(click_action("", "", "a#ytc-list[]", Some("watch")), ("card.open".into(), "a@list".into()));
+        assert_eq!(click_action("", "", "a#ytc-logo[]", Some("home")).0, "logo.home");
+        assert_eq!(click_action("", "", "a#ytc-side[]", Some("subs")).0, "side.subs");
+        assert_eq!(click_action("p-q", "", "button#ytc-player[p-q]", None), ("player.q".into(), "button@player".into()));
+        assert_eq!(click_action("fx-chip", "", "button#ytc-filters[fx-chip]", None).0, "fx.chip");
+        assert_eq!(click_action("p-set", "q:1080", "li#ytc-m-q[p-set]", None).0, "player.quality");
+        assert_eq!(click_action("p-set", "rate:1.5", "li#ytc-m[p-set]", None).0, "player.speed");
+        assert_eq!(click_action("p-set", "<x>:1", "li#ytc-m[p-set]", None).0, "player.set");
+        assert_eq!(click_action("Evil\"<x>", "", "b#x[]", None).0, "other");
+        // Ids carrying a video id or an index keep only their area.
+        assert_eq!(area("ytc-wl-abcdefghijk"), "wl");
+        assert_eq!(area("ytc-rp-3"), "rp");
+        assert_eq!(area("ytc-fx-shorts"), "fx-shorts");
+        assert_eq!(area("ytc-Q9x"), "");
+        // Keys: names only; never what is typed into a field.
+        assert_eq!(key_action("k", false).as_deref(), Some("key.k"));
+        assert_eq!(key_action(" ", false).as_deref(), Some("key.space"));
+        assert_eq!(key_action("ArrowLeft", false).as_deref(), Some("key.arrowleft"));
+        assert_eq!(key_action("Mod+ArrowRight", false).as_deref(), Some("mod.arrowright"));
+        assert_eq!(key_action("ArrowDown", true).as_deref(), Some("field.key.arrowdown"));
+        assert_eq!(key_action("a", true), None);
+        assert_eq!(key_action("é", false).as_deref(), Some("key.char"));
+    }
+
+    #[test]
+    fn interactions_complete_at_their_frame_or_their_content() {
+        let mut t = on();
+        t.clock = (0.0, 1_000_000.0);
+        // A toggle: handled, written in the handler, painted at the next frame.
+        t.act_begin("player.cc".into(), "button@player".into(), "pointer", "watch", 100.0, 102.0, false);
+        let tok = t.act_end(true, 105.0).expect("token");
+        assert!(t.buf.is_empty());
+        assert!(t.act_frame(tok, 120.0));
+        let e = &t.buf[0];
+        assert_eq!((e["m"].as_str(), e["v"].as_f64(), e["handler_ms"].as_f64(), e["dom_ms"].as_f64()), (Some("ui.act"), Some(20.0), Some(2.0), Some(5.0)));
+        assert_eq!(e["wait"], "none");
+        assert_eq!(e["at"], 1_000_100.0);
+        // Not handled, or a quiet one nobody named: nothing.
+        t.act_begin("key.x".into(), "key".into(), "keyboard", "home", 1.0, 1.0, false);
+        assert!(t.act_end(false, 2.0).is_none());
+        t.act_begin(String::new(), "dwell".into(), "hover", "home", 1.0, 1.0, true);
+        assert!(t.act_end(true, 2.0).is_none());
+        // A click that navigates waits for the page's content.
+        t.input("pointer", 200.0);
+        t.act_begin("card.open".into(), "a@list".into(), "pointer", "home", 200.0, 201.0, false);
+        let id = t.nav_start("watch", "push", 202.0);
+        let tok = t.act_end(true, 204.0).expect("token");
+        assert_eq!(t.nav.as_ref().and_then(|n| n.act.as_deref()), Some("card.open"));
+        assert!(t.act_frame(tok, 220.0), "its own frame (the skeleton)");
+        assert_eq!(t.buf.len(), 1, "still waiting for the content");
+        t.nav_src("network");
+        t.nav_req(json!({"ep": "next", "ms": 300.0}));
+        let (ntok, n, f) = t.nav_inserted(520.0, &[]).expect("nav");
+        assert_eq!(f["act"], "card.open");
+        t.span_with(ntok, "nav.watch", n.t0, f);
+        t.frame_done(ntok, 540.0, 0.0);
+        t.nav_visible = Some((id, 540.0));
+        t.act_nav_visible(id, 540.0);
+        let e = t.buf.iter().find(|e| e["m"] == "ui.act" && e["act"] == "card.open").expect("act");
+        assert_eq!((e["v"].as_f64(), e["content_ms"].as_f64(), e["dom_ms"].as_f64(), e["req_ms"].as_f64()), (Some(20.0), Some(340.0), Some(320.0), Some(300.0)));
+        assert_eq!((e["wait"].as_str(), e["nav"].as_bool()), (Some("network"), Some(true)));
+        // A handler naming a dwell (logo → Home); a newer navigation supersedes a waiting one.
+        t.act_begin(String::new(), "dwell".into(), "hover", "watch", 600.0, 600.0, true);
+        t.act_label("logo.home", Some("hover"), "", 600.0);
+        t.nav_start("home", "push", 601.0);
+        let tok = t.act_end(true, 602.0).expect("named");
+        t.act_frame(tok, 610.0);
+        t.act_begin("side.subs".into(), "a@side".into(), "pointer", "home", 700.0, 700.0, false);
+        t.nav_start("subs", "push", 701.0);
+        let e = t.buf.iter().find(|e| e["act"] == "logo.home").expect("superseded one reported");
+        assert_eq!((e["superseded"].as_bool(), e["input"].as_str()), (Some(true), Some("hover")));
+    }
+
+    #[test]
+    fn waiting_interactions_are_capped() {
+        let mut t = on();
+        for i in 0..(ACTS_MAX + 4) {
+            t.act_begin("x".into(), String::new(), "pointer", "home", i as f64, i as f64, false);
+            t.act_end(true, i as f64);
+        }
+        assert_eq!(t.acts.len(), ACTS_MAX);
     }
 }

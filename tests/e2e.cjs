@@ -100,6 +100,8 @@ const PNG = (() => {
 })();
 const IMG = { delay: 0, search: 0 }; // motion step: late thumbnails / a slow search (skeleton geometry)
 const NET = { down: false, probes: 0 };
+// Hedged reads: the first matching InnerTube request never answers (`{ ep, q | v, n }`).
+const HEDGE = { stall: null };
 const FX = { bot: null, homeChips: false, wlMock: false, wl: new Set(), wlFail: false, linked: new Set(), checkDelay: 0, checksInFlight: 0, checksMax: 0, homeLabels: false, homeShorts: false };
 // ---- SponsorBlock (sponsor.ajay.app): the k-anonymity API answers a whole sha256-prefix bucket. Our fixture video
 // sits in the real bucket 671e (its other entries, 2 Nov 2026, are the decoys; aqz-KE-bpKQ hashes there too).
@@ -483,6 +485,13 @@ async function handle(route) {
     const ep = p.slice('/youtubei/v1/'.length);
     const body = req.postDataJSON() || {};
     log.api.push({ ep, body, headers: req.headers(), t: Date.now(), url: req.url() });
+    const hs = HEDGE.stall;
+    if (hs && hs.n > 0 && ep === hs.ep && !body.continuation && !url.searchParams.has('fields') && (hs.home ? body.browseId === 'FEwhat_to_watch' : hs.q ? body.query === hs.q : body.videoId === hs.v)) {
+      hs.n--;
+      await new Promise(r => setTimeout(r, 6000));
+      try { await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }); } catch {}
+      return;
+    }
     const masked = ep === 'next' && url.searchParams.has('fields') && body.videoId && !body.continuation;
     if (masked && FX.checkDelay) {
       const home = /H\dz$/.test(body.videoId); // Home fixture ids (counted apart from other pages' checks)
@@ -617,6 +626,8 @@ chrome.runtime.onMessage.addListener(m => {
   };
   // Incidents since `from`, without the tab's `perf` timing reports: those are sent when a
   // document is left (at most once a minute) and can land during any later step.
+  // Speed telemetry (development builds): schema-2 event batches (src/telemetry.rs).
+  const telBatches = from => incidents.slice(from).filter(x => x.kind === 'perf' && x.schema === 2);
   const problems = from => incidents.slice(from).filter(x => x.kind !== 'perf').map(x => x.kind + ': ' + x.reason);
   const ds = () => page.evaluate(() => ({ ...document.documentElement.dataset }));
   const apiCount = ep => log.api.filter(a => a.ep === ep && !a.body?.continuation).length;
@@ -2144,9 +2155,11 @@ chrome.runtime.onMessage.addListener(m => {
       // Later videos in this session: the fresh visitor, no new visitor_id, no bot check.
       const v = await relatedPlay();
       assert.ok(visCalls(v, mark).some(a => a.body.context.client.visitorData === FRESH_VD), 'the next video goes by the fresh visitor');
-      // Calls sent after the recovery's answer (+ a few ms to apply it); earlier prefetches may still go anonymous.
+      // Calls sent after the recovery's answer (+ a few ms to apply it); earlier prefetches may still go anonymous,
+      // and one the page sent just before the answer reached it can land here up to ~150 ms later under load.
       const late = log.api.slice(mark).filter(a => a.ep === 'player' && a.body.context.client.clientName === 'VISIONOS' && a.body.videoId !== 'botfresh001' && a.t > vis[1].done + 30);
-      assert.ok(late.length && late.every(a => a.body.context.client.visitorData === FRESH_VD), 'every later VISIONOS call (prefetches too) uses it: ' + late.map(a => a.body.videoId + (a.body.context.client.visitorData === FRESH_VD ? '' : ' (old)')));
+      const settled = late.filter(a => a.t > vis[1].done + 150 || a.body.context.client.visitorData === FRESH_VD);
+      assert.ok(settled.length && settled.every(a => a.body.context.client.visitorData === FRESH_VD), 'every later VISIONOS call (prefetches too) uses it: ' + late.map(a => a.body.videoId + (a.body.context.client.visitorData === FRESH_VD ? '' : ' (old)')));
       assert.equal(log.api.slice(mark).filter(a => a.ep === 'visitor_id').length, 1, 'no second visitor_id');
       await page.keyboard.press('Backquote');
       await page.waitForSelector('#ytc-debug.on');
@@ -3592,6 +3605,67 @@ chrome.runtime.onMessage.addListener(m => {
     await page.waitForFunction(() => document.getElementById('ytc-like').className === 'ya-b');
     assert.equal(calls('like/removelike').length, 1);
     ACTS.delay = 0;
+  });
+
+  await step('hedged reads: a stalled search / next is sent once more at its deadline, identically; the page renders from the copy, the stalled request is aborted; a slow Like is never sent twice', async () => {
+    const failed = [], from = incidents.length;
+    const onFail = r => { if (r.url().includes('/youtubei/v1/')) failed.push({ url: r.url(), err: r.failure()?.errorText || '', post: r.postData() || '' }); };
+    page.on('requestfailed', onFail);
+    try {
+      log.api.length = 0;
+      HEDGE.stall = { ep: 'search', q: 'hedge stall', n: 1 };
+      const t0 = Date.now();
+      await page.goto('https://www.youtube.com/results?search_query=hedge+stall', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]', { timeout: 5000 });
+      const ms = Date.now() - t0;
+      const sent = calls('search').filter(a => a.body.query === 'hedge stall');
+      assert.equal(sent.length, 2, 'the stalled search went out once more (not more)');
+      assert.equal(JSON.stringify(sent[1].body), JSON.stringify(sent[0].body), 'identical body (same context, visitor, query)');
+      assert.equal(sent[1].headers.authorization, sent[0].headers.authorization, 'same session');
+      const gap = sent[1].t - sent[0].t;
+      assert.ok(gap >= 1000 && gap < 1700, `copy at the search deadline (1.2 s): ${gap} ms`);
+      assert.ok(ms < 2500, `rendered from the copy: ${ms} ms`);
+      for (let i = 0; i < 30 && !failed.some(f => f.post.includes('hedge stall')); i++) await page.waitForTimeout(100);
+      assert.ok(failed.some(f => f.post.includes('hedge stall') && /ABORTED/.test(f.err)), 'the stalled request was aborted: ' + JSON.stringify(failed.map(f => f.err)));
+      // A watch page whose `next` stalls: the copy fills it.
+      log.api.length = 0;
+      HEDGE.stall = { ep: 'next', v: '-Bxc4gJluC0', n: 1 };
+      await page.goto('https://www.youtube.com/watch?v=-Bxc4gJluC0', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-like', { timeout: 5000 });
+      const nx = calls('next').filter(a => a.body.videoId === '-Bxc4gJluC0' && !a.body.continuation && !a.url.includes('fields='));
+      assert.equal(nx.length, 2, 'next hedged once');
+      assert.equal(JSON.stringify(nx[1].body), JSON.stringify(nx[0].body));
+      // Home's first page is the Home path's own: never hedged here.
+      log.api.length = 0;
+      HEDGE.stall = { ep: 'browse', home: true, n: 1 };
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForTimeout(2000);
+      assert.equal(calls('browse').filter(a => a.body.browseId === 'FEwhat_to_watch').length, 1, 'Home browse sent once');
+      HEDGE.stall = null;
+      await page.goto('https://www.youtube.com/watch?v=-Bxc4gJluC0', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-like');
+      // Actions are never hedged: a Like slower than every deadline goes out once.
+      log.api.length = 0;
+      ACTS.delay = 2600;
+      await page.click('#ytc-like');
+      await page.waitForTimeout(3200);
+      assert.equal(calls('like/like').length + calls('like/removelike').length, 1, 'one rating request');
+      ACTS.delay = 0;
+      if (DEV_BUILD) {
+        await page.goto('https://www.youtube.com/results?search_query=after+hedge', { waitUntil: 'commit' });
+        for (let i = 0; i < 50 && !telBatches(from).some(b => b.events.some(e => e.m === 'req.next' && e.hedge_fired)); i++) await page.waitForTimeout(100);
+        const ev = telBatches(from).flatMap(b => b.events);
+        const nev = ev.find(e => e.m === 'req.next' && e.hedge_fired);
+        assert.ok(nev && nev.hedge_won === true && nev.path === 'hedge' && nev.status === 200 && nev.v >= 1000, 'req.next records the hedge: ' + JSON.stringify(nev));
+        const nav = ev.find(e => e.m === 'nav.watch' && e.reqs?.some(r => r.hedge_won));
+        assert.ok(nav, 'the navigation breakdown names the hedged request');
+      }
+    } finally {
+      HEDGE.stall = null; ACTS.delay = 0; page.off('requestfailed', onFail);
+      // The next steps start on this watch page.
+      await page.goto('https://www.youtube.com/watch?v=-Bxc4gJluC0', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-sub button');
+    }
   });
 
   await step('subscribe/unsubscribe: channelIds, deliberate unsubscribe, rollback on failure', async () => {
@@ -5358,8 +5432,6 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(!/SAPISID|continuation|token|search_query|perf\+check/.test(str) && !str.includes(vid), str.slice(0, 300));
   });
 
-  // Speed telemetry (development builds): schema-2 event batches (src/telemetry.rs).
-  const telBatches = from => incidents.slice(from).filter(x => x.kind === 'perf' && x.schema === 2);
   await step('public build: no speed telemetry, nothing kept for a collector, no development permission or auto-reload', async () => {
     if (DEV_BUILD) return;
     assert.equal(telBatches(0).length, 0, 'no telemetry batch in the whole run');
@@ -5435,6 +5507,60 @@ chrome.runtime.onMessage.addListener(m => {
       await page.waitForTimeout(1500);
       assert.equal(telBatches(off).length, 0, 'switched off: no telemetry batch');
     } finally { await sw.evaluate(() => chrome.storage.local.remove('ytcTelemetryV1')); }
+  });
+
+  await step('dev build: interaction log: clicks, handled keys, the search box, back and a hover dwell become ui.act events (input → handler → DOM → paint, what they waited on), with no text or search terms', async () => {
+    const from = incidents.length;
+    await page.goto('https://www.youtube.com/results?search_query=act+log+secret', { waitUntil: 'commit' });
+    await page.waitForSelector('#ytc-list .c[data-v]');
+    await page.waitForTimeout(400);
+    const a = page.locator('#ytc-list a.th[href^="/watch"]').nth(1);
+    const vid = new URL(await a.getAttribute('href'), 'https://www.youtube.com').searchParams.get('v');
+    await a.click();
+    await page.waitForSelector('#ytc-player');
+    await page.waitForTimeout(600);
+    await page.keyboard.press('k'); // pause
+    await page.waitForTimeout(200);
+    await page.goBack({ waitUntil: 'commit' });
+    await page.waitForSelector('#ytc-list .c[data-v]');
+    await page.waitForTimeout(300);
+    await page.click('#ytc-q');
+    await page.keyboard.type('typed words', { delay: 10 });
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => location.search.includes('typed'));
+    await page.waitForSelector('#ytc-list .c[data-v]');
+    await page.waitForTimeout(300);
+    const box = await page.locator('#ytc-logo').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 2 });
+    await page.waitForFunction(() => location.pathname === '/', null, { timeout: 3000 });
+    await page.waitForTimeout(500);
+    await page.mouse.move(700, 600);
+    await page.goto('https://www.youtube.com/results?search_query=after+acts', { waitUntil: 'commit' });
+    for (let i = 0; i < 50 && !telBatches(from).some(b => b.events.some(e => e.m === 'ui.act' && e.act === 'logo.home')); i++) await page.waitForTimeout(100);
+    const ev = telBatches(from).flatMap(b => b.events), acts = ev.filter(e => e.m === 'ui.act');
+    console.log('     interactions: ' + acts.map(e => `${e.act} ${e.input} ${e.v}${e.content_ms != null ? '/' + e.content_ms : ''} ms (${e.wait})`).join(' · '));
+    for (const e of acts) {
+      assert.ok(e.v >= 0 && e.v < 5000 && e.handler_ms >= 0 && e.handler_ms <= e.v + 0.1 && e.t > 0 && e.at > 1.7e12 && e.route != null && typeof e.nav === 'boolean', 'numbers ' + JSON.stringify(e));
+      assert.ok(e.dom_ms == null || e.dom_ms >= e.handler_ms - 0.1, 'dom after the handler ' + JSON.stringify(e));
+      assert.ok(/^[a-z0-9.\-_\/?]+$/.test(e.act), 'a code name ' + e.act);
+    }
+    const card = acts.find(e => e.act === 'card.open');
+    assert.ok(card && card.input === 'pointer' && card.nav && card.vid === vid && card.to === 'watch' && card.kind === 'a@list' && card.route === 'search', 'card.open ' + JSON.stringify(card));
+    assert.ok(['cache', 'prefetch', 'inflight', 'network', 'memory'].includes(card.wait) && card.content_ms >= card.dom_ms - 0.1, 'card.open waited on ' + JSON.stringify(card));
+    assert.ok(ev.some(e => e.m === 'nav.watch' && e.act === 'card.open'), 'the navigation names its interaction');
+    const k = acts.find(e => e.act === 'key.k');
+    assert.ok(k && k.input === 'keyboard' && k.route === 'watch' && !k.nav && k.wait === 'none', 'key.k ' + JSON.stringify(k));
+    const back = acts.find(e => e.act === 'history.pop');
+    assert.ok(back && back.input === 'history' && back.nav && back.content_ms >= 0, 'history.pop ' + JSON.stringify(back));
+    const sub = acts.find(e => e.act === 'search.submit');
+    assert.ok(sub && sub.input === 'keyboard' && sub.nav, 'search.submit ' + JSON.stringify(sub));
+    const logo = acts.find(e => e.act === 'logo.home');
+    assert.ok(logo && logo.input === 'hover' && logo.nav, 'logo dwell ' + JSON.stringify(logo));
+    assert.ok(!acts.some(e => /^key\.[a-z]$/.test(e.act) && e.act !== 'key.k'), 'typed letters are not interactions');
+    const str = JSON.stringify(acts);
+    for (const secret of ['typed', 'act log', 'act+log', 'secret', 'search_query', '/watch?']) assert.ok(!str.includes(secret), 'no ' + secret + ' in the interaction log');
+    const boot = ev.find(e => e.m === 'nav.search' && e.mode === 'boot');
+    assert.ok(boot && boot.boot && boot.boot.response_start > 0 && boot.boot.script >= boot.boot.response_start && boot.boot.wasm >= boot.boot.script && boot.boot.app >= boot.boot.wasm, 'boot breakdown ' + JSON.stringify(boot && boot.boot));
   });
 
   await step('TV mode (the TV app\'s platform flag, here without its shell): D-pad walks the grid, OK opens our player, ↓ enters the control bar, no autofocus on Home', async () => {

@@ -180,13 +180,15 @@ const YTC = (() => {
       return true;
     },
     focus(id) { const el = byId(id); if (el) { el.focus(); if (el.select) el.select(); } },
-    // hrefs of the `sel` elements inside `id` that intersect the viewport (document order, at most `max`).
-    visible_hrefs(id, sel, max) {
+    // hrefs of the `link` descendants of the `sel` elements inside `id` that intersect the viewport (document
+    // order, at most `max`). Only the `sel` boxes are measured: measuring inside a content-visibility:auto box
+    // lays that box out on its own, one forced layout per box.
+    visible_hrefs(id, sel, link, max) {
       const el = byId(id); if (!el) return '';
       const out = [], h = innerHeight;
       for (const a of el.querySelectorAll(sel)) {
         const r = a.getBoundingClientRect();
-        if (r.bottom > 0 && r.top < h && r.width) { out.push(a.getAttribute('href') || ''); if (out.length >= max) break; }
+        if (r.bottom > 0 && r.top < h && r.width) { const l = a.querySelector(link); if (l) { out.push(l.getAttribute('href') || ''); if (out.length >= max) break; } }
         else if (out.length && r.top >= h) break;
       }
       return out.join('\n');
@@ -564,14 +566,23 @@ const YTC = (() => {
       }, { durationThreshold: 40 });
       po('layout-shift', e => { if (!e.hadRecentInput) T.cls += e.value; });
       po('resource', e => { if (e.name.includes('ytimg.com/sb/')) push({ k: 'res', t: e.startTime, ms: e.duration, bytes: e.transferSize, cached: e.transferSize === 0 }); });
-      const stamp = e => { T.ts = e.timeStamp; };
+      const stamp = e => { T.ts = e.timeStamp; T.tg = e.target; if (e.type !== 'submit') T.ty = e.type === 'click' && e.detail === 0 ? 'keyclick' : e.type; if (e.pointerType) T.pt = e.pointerType; };
       for (const t of ['pointerdown', 'click', 'keydown', 'submit']) addEventListener(t, stamp, { capture: true, passive: true });
+      // The interaction log's target: tag, the closest id (the area) and data-act; never text.
+      T.tgt = el => { if (!el || el.nodeType !== 1 || !el.closest) return ''; const a = el.closest('[id]'), c = el.closest('[data-act],a[href],button,input'); const k = c || el; return k.tagName.toLowerCase() + '#' + (a ? a.id : '') + '[' + ((c && c.dataset.act) || '') + ']'; };
     },
     tel_take() { const T = YTC._tel; if (!T) return '[]'; const q = T.q; T.q = []; if (T.drop) { q.push({ k: 'drop', n: T.drop }); T.drop = 0; } return JSON.stringify(q); },
     tel_cost() { const T = YTC._tel; if (!T) return 0; const c = T.cost; T.cost = 0; return c; },
     tel_cls() { const T = YTC._tel; if (!T) return -1; const v = T.cls; T.cls = 0; return v; },
     tel_frame(token) { requestAnimationFrame(() => setTimeout(() => call('on_tel_frame', token, perf.now()), 0)); },
     event_ts: () => (YTC._tel ? YTC._tel.ts : 0),
+    tel_target() { const T = YTC._tel; return T && T.tg ? T.tgt(T.tg) + '|' + (T.pt || '') + '|' + (T.ty || '') : '||'; },
+    nav_timing() {
+      const n = perf.getEntriesByType('navigation')[0];
+      if (!n) return '{}';
+      const r = x => Math.round(x * 10) / 10;
+      return JSON.stringify({ type: n.type, fetch: r(n.fetchStart), dns: r(n.domainLookupEnd - n.domainLookupStart), connect: r(n.connectEnd - n.connectStart), request: r(n.requestStart), response_start: r(n.responseStart), response_end: r(n.responseEnd), worker: r(n.workerStart), script: +d.documentElement.dataset.ytcScript || 0, wasm: +d.documentElement.dataset.ytcWasm || 0 });
+    },
     // Native fallback page: forward link clicks (capture, before YouTube's app)
     // and YouTube's own in-page navigations to Rust.
     native_listen() {

@@ -55,6 +55,13 @@ pub fn with(f: impl FnOnce(&mut App)) {
     });
 }
 
+pub use telglue::route_kind;
+
+/// The current route's kind for telemetry ("" before boot).
+pub fn route_now() -> &'static str {
+    with_ret(|a| route_kind(&a.route))
+}
+
 pub fn with_ret<R: Default>(f: impl FnOnce(&mut App) -> R) -> R {
     let mut out = R::default();
     with(|a| out = f(a));
@@ -181,6 +188,8 @@ enum Timer {
     TvPoll { generation: u32 },
     /// TV: a focus check after a paint (the old page may drop the focus while it goes).
     TvFocus,
+    /// Request `id` passed its hedge deadline (`crate::hedge`).
+    Hedge { id: u32 },
 }
 
 #[derive(PartialEq)]
@@ -319,6 +328,9 @@ pub struct App {
     bg_age: f64,
     /// Request/navigation timings for the `perf` debug-center report.
     perf: crate::perf::Perf,
+    /// Hedged reads (`crate::hedge`) and the hedge outcome of the answer being handled (fired, won).
+    hedge: crate::hedge::Hedger,
+    hedge_now: Option<(bool, bool)>,
     /// Navigation whose content-visible time was recorded.
     perf_nav: u32,
     /// Write time of each feed snapshot as read from sessionStorage (`None`:
@@ -457,6 +469,8 @@ pub fn boot() {
         side_at: 0,
         bg_age: bridge::session_get("ytc:bgage").parse::<f64>().ok().filter(|x| *x >= 1000.0).unwrap_or(BG_AGE_MS),
         perf: Default::default(),
+        hedge: crate::hedge::Hedger::new(bridge::local_flag("ytc-test-nohedge")),
+        hedge_now: None,
         perf_nav: 0,
         snap_at: HashMap::new(),
         voice: Default::default(),
@@ -539,9 +553,62 @@ impl App {
         // TV: the account's feeds go out as the TV client with the bearer, everything else anonymous.
         let auth = if self.auth.bearer.is_some() && !self.tv_account_req(&req) { crate::config::Auth::default() } else { self.auth.clone() };
         let (body, headers) = crate::tv::finish(&self.cfg, &auth, body, (bridge::epoch() / 1000.0) as u64);
-        bridge::fetch_opts(id, "POST", &req.url(), &body, &headers, if low { LOW } else { "{}" });
-        self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep: req.endpoint() });
+        let opts = if low { LOW } else { "{}" };
+        let url = req.url();
+        bridge::fetch_opts(id, "POST", &url, &body, &headers, opts);
+        let ep = req.endpoint();
+        // Background requests the user may come to wait for (a continuation, a speculative or background page prefetch).
+        let cont = matches!(purpose, Purpose::Cont { .. } | Purpose::Prefetch { .. } | Purpose::PagePrefetch { .. });
+        self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep });
+        // Reads someone waits for get a second copy past their deadline (never actions; a
+        // background continuation only once the user waits for it; Home's first page is the Home
+        // path's). The copy goes out at normal priority.
+        let home = matches!(&req, Req::Browse { id, .. } if id == "FEwhat_to_watch");
+        if (!low || cont) && !home && self.hedge.allowed(ep, bridge::now()) && crate::hedge::readable(ep) {
+            self.hedge.watch(id, crate::hedge::Stored { method: "POST".into(), url, body, headers, opts: "{}".into(), ep, copy: None, fired_at: 0.0, failed: false, armed: false });
+            if !low {
+                self.hedge_arm(id, 0.0);
+            }
+        }
         id
+    }
+
+    /// The user now waits for request `id` (a background one): its hedge deadline runs from its send.
+    fn hedge_waits(&mut self, id: u32) {
+        let waited = self.pending.get(&id).map(|p| bridge::now() - p.sent).unwrap_or(0.0);
+        self.hedge_arm(id, waited);
+    }
+
+    /// Starts request `id`'s hedge deadline (`waited`: ms it has already been out).
+    fn hedge_arm(&mut self, id: u32, waited: f64) {
+        let Some(ep) = self.pending.get(&id).map(|p| p.ep) else { return };
+        if self.hedge.arm(id) {
+            let ms = (self.hedge.deadline(ep) - waited).max(250.0);
+            let t = self.timer(Timer::Hedge { id });
+            bridge::timer(t, ms.round() as u32);
+        }
+    }
+
+    /// Request `id`'s hedge deadline passed: the same request once more, if it is still waited for.
+    fn hedge_fire(&mut self, id: u32) {
+        if !self.pending.contains_key(&id) {
+            if let Some(x) = self.hedge.forget(id) {
+                bridge::abort(x);
+            }
+            return;
+        }
+        let Some(c) = self.hedge.due(id) else { return };
+        let copy = next_id();
+        bridge::fetch_opts(copy, &c.method, &c.url, &c.body, &c.headers, &c.opts);
+        self.hedge.sent(id, copy, bridge::now());
+    }
+
+    /// Aborts request `id` (and its hedge copy).
+    fn abort_req(&mut self, id: u32) {
+        bridge::abort(id);
+        if let Some(x) = self.hedge.forget(id) {
+            bridge::abort(x);
+        }
     }
 
     fn page_request(&mut self, req: Req) {
@@ -571,7 +638,7 @@ impl App {
             .collect();
         for id in stale {
             self.pending.remove(&id);
-            bridge::abort(id);
+            self.abort_req(id);
         }
     }
 
@@ -914,10 +981,11 @@ impl App {
 
     fn load(&mut self) {
         if let Route::Watch { v, list, .. } = &self.route {
-            if self.prefetching.contains_key(&wkey(v, list.as_deref())) {
-                // The hover prefetch will render this page when it lands.
+            if let Some(&id) = self.prefetching.get(&wkey(v, list.as_deref())) {
+                // The hover prefetch will render this page when it lands (hedged from now on if it was a background one).
                 crate::telemetry::nav_src("inflight");
                 self.mark("request");
+                self.hedge_waits(id);
                 return;
             }
             let req = next_req(v, list.as_deref());
@@ -935,10 +1003,11 @@ impl App {
             self.on_page_body(200, &body);
             return;
         }
-        if self.page_prefetching.contains_key(&key) {
+        if let Some(&id) = self.page_prefetching.get(&key) {
             crate::telemetry::nav_src("inflight");
             self.mark("request");
             self.await_page = Some(key);
+            self.hedge_waits(id);
             return;
         }
         if let Some(req) = self.page_req(&self.route) {
@@ -1069,6 +1138,7 @@ impl App {
             Some(Timer::TvHold) => self.tv_release(),
             Some(Timer::TvPoll { generation }) => self.tv_poll(generation),
             Some(Timer::TvFocus) => self.tv_focus_check(),
+            Some(Timer::Hedge { id }) => self.hedge_fire(id),
             Some(Timer::Bg) => {
                 self.tv_tick();
                 self.bg_check();
@@ -1156,7 +1226,7 @@ impl App {
             if let Some(id) = oldest {
                 if let Some(Pending { purpose: Purpose::Prefetch { v, list, .. }, .. }) = self.pending.remove(&id) {
                     self.prefetching.remove(&wkey(&v, list.as_deref()));
-                    bridge::abort(id);
+                    self.abort_req(id);
                 }
             }
         }
@@ -1593,6 +1663,11 @@ impl App {
         } else if self.feed.cont.is_some() {
             self.want = true;
             crate::telemetry::wait_start("feed.more");
+            // The user now waits for a background continuation: it may be hedged from here on.
+            let waiting: Vec<u32> = self.pending.iter().filter(|(_, p)| matches!(p.purpose, Purpose::Cont { .. })).map(|(id, _)| *id).collect();
+            for id in waiting {
+                self.hedge_waits(id);
+            }
         }
         self.pump();
     }
@@ -1725,6 +1800,27 @@ impl App {
     // ------------------------------------------------------------ responses
 
     pub fn on_fetch(&mut self, id: u32, status: u32, body: &[u8]) {
+        // Hedged reads: the first good answer of the two copies is handled as the original.
+        let pending = &self.pending;
+        let id = match self.hedge.answer(id, status == 200, |p| pending.contains_key(&p)) {
+            crate::hedge::Answer::Plain => {
+                self.hedge_now = None;
+                id
+            }
+            crate::hedge::Answer::First { abort, fired } => {
+                if let Some(x) = abort {
+                    bridge::abort(x);
+                }
+                self.hedge_now = Some((fired, false));
+                id
+            }
+            crate::hedge::Answer::Copy { primary } => {
+                bridge::abort(primary);
+                self.hedge_now = Some((true, true));
+                primary
+            }
+            crate::hedge::Answer::Wait | crate::hedge::Answer::Drop => return,
+        };
         if self.fx_fetch(id, status, body) {
             return;
         }
@@ -1744,6 +1840,15 @@ impl App {
         let ok = status == 200;
         if status != 0 {
             self.perf.req(p.ep, bridge::now() - p.sent, ok);
+        }
+        // The original's own latency (also when a copy went out and lost): the deadlines learn a slow YouTube.
+        if let Some((fired, won)) = self.hedge_now {
+            if ok && !won {
+                self.hedge.record(p.ep, bridge::now() - p.sent);
+            }
+            if fired {
+                self.hedge.outcome(p.ep, won, bridge::now());
+            }
         }
         self.tel_req(&p, status, body.len());
         if !ok && status != 0 && self.api_incident_nav != self.nav && matches!(p.purpose, Purpose::Page { .. } | Purpose::Cont { .. } | Purpose::Resolve { .. }) {

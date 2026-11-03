@@ -62,6 +62,9 @@ impl App {
                     bridge::timer(id, ms.max(1.0).ceil() as u32);
                 }
                 Act::Start(h, src) => {
+                    if src == Src::Hover {
+                        crate::telemetry::act_label("voice.hover", Some("hover"), "");
+                    }
                     self.voice_panel(false, None);
                     self.voice.before = bridge::input_value("ytc-q");
                     self.voice.src = Some(src);

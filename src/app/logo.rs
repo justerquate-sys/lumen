@@ -134,6 +134,7 @@ impl App {
         if self.logo_busy() {
             return;
         }
+        crate::telemetry::act_label("logo.home", Some("hover"), "");
         self.last_input = bridge::now();
         if self.home_in_place() {
             self.home_again();

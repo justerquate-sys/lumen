@@ -171,6 +171,15 @@ fn scan(file: &Path, from: f64, version: &str, mut f: impl FnMut(Line)) -> (usiz
     (lines, bytes)
 }
 
+/// Every telemetry batch received since `from`, with its version.
+pub fn scan_batches(file: &Path, from: f64, mut f: impl FnMut(&J, &str)) {
+    scan(file, from, "", |line| {
+        if let Line::Batch { r, v, .. } = line {
+            f(r, v);
+        }
+    });
+}
+
 /// `GET /perf.json?metric=<name|prefix*>&since=<ms|6h>&version=<v>&limit=<n>`: a JSON array of
 /// event rows (oldest first): `{received, version, page, m, v, at, …breakdown}`.
 pub fn rows_json(file: &Path, q: &[(String, String)]) -> String {
@@ -228,6 +237,7 @@ struct Ver {
     metrics: HashMap<String, Vec<f32>>,
 }
 
+#[derive(Clone, Copy)]
 pub struct Stats {
     pub p50: f64,
     pub p90: f64,
@@ -275,6 +285,7 @@ pub fn dashboard(file: &Path, q: &[(String, String)]) -> String {
     let mut vers: HashMap<String, Ver> = HashMap::new();
     let mut seen_versions: HashMap<String, f64> = HashMap::new();
     let (mut batches, mut events) = (0u64, 0u64);
+    let mut acts = crate::timeline::Acts::default();
     let (lines, bytes) = scan(file, from, &version, |line| {
         let (rec, v) = match &line {
             Line::Batch { rec, v, .. } | Line::Other { rec, v } | Line::Incident { rec, v, .. } => (*rec, *v),
@@ -315,6 +326,7 @@ pub fn dashboard(file: &Path, q: &[(String, String)]) -> String {
                         continue;
                     }
                     ver.events += 1;
+                    acts.add(ev, r.s("page").unwrap_or(""));
                     if m.starts_with("nav.") && m != "nav.fresh" {
                         ver.navs += 1;
                     }
@@ -362,7 +374,7 @@ details{margin:4px 0}summary{cursor:pointer;color:#b7ebca}pre{white-space:pre-wr
     for (v, _) in sv {
         let _ = write!(h, "<option value=\"{0}\"{1}>{0}</option>", esc(v), if *v == version { " selected" } else { "" });
     }
-    let _ = write!(h, "</select></label><label>Metric <input name=metric size=14 placeholder=\"nav.* or video.start\" value=\"{}\"></label><button>Show</button> <a href=/>incidents</a></form>", esc(&metric));
+    let _ = write!(h, "</select></label><label>Metric <input name=metric size=14 placeholder=\"nav.* or video.start\" value=\"{}\"></label><button>Show</button> <a href=/>incidents</a> <a href=#interactions>interactions</a> <a href=#hedges>hedges</a> <a href=/timeline>timeline</a></form>", esc(&metric));
     let _ = write!(
         h,
         "<p class=dim>{events} events in {batches} batches · {lines} lines ({:.1} MB) read in {} ms · raw rows: <a href=\"/perf.json?since={}&metric={}&version={}\">/perf.json</a></p>",
@@ -400,6 +412,7 @@ details{margin:4px 0}summary{cursor:pointer;color:#b7ebca}pre{white-space:pre-wr
         );
     }
     h.push_str("</table>");
+    acts.html(&mut h);
 
     // Trend per version.
     if !shown.is_empty() {

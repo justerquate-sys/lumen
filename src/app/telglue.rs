@@ -48,6 +48,15 @@ impl App {
         let page = format!("{:x}{:04x}", bridge::epoch() as u64, (bridge::now() * 1000.0) as u64 & 0xffff);
         tel::boot(&page);
         tel::nav_start(route_kind(&self.route), "boot");
+        if tel::enabled() {
+            // Where the boot's handler_ms went: the document's own request (navigation timing), the
+            // content script's start, the Wasm instantiated, the app's boot (performance.now ms).
+            let mut b = serde_json::from_str::<serde_json::Value>(&bridge::nav_timing()).unwrap_or_else(|_| json!({}));
+            if let Some(o) = b.as_object_mut() {
+                o.insert("app".into(), json!(tel::round1(bridge::now())));
+            }
+            tel::nav_extra("boot", b);
+        }
     }
 
     /// Navigation begins (the page being left reports its layout shift).
@@ -78,10 +87,22 @@ impl App {
             _ => false,
         };
         let via = purpose(&p.purpose);
-        if mine {
-            tel::nav_req(json!({"ep": p.ep, "ms": tel::round1(ms), "bytes": bytes, "status": status, "via": via}));
+        let mut r = json!({"ep": p.ep, "ms": tel::round1(ms), "bytes": bytes, "status": status, "via": via});
+        let mut e = json!({"bytes": bytes, "status": status, "via": via, "nav": mine, "route": route_kind(&self.route)});
+        if let Some((fired, won)) = self.hedge_now {
+            // Hedged read (`crate::hedge`): whether the second copy went out and answered first.
+            for o in [&mut r, &mut e] {
+                o["hedge_fired"] = fired.into();
+                if fired {
+                    o["hedge_won"] = won.into();
+                    o["path"] = if won { "hedge" } else { "primary" }.into();
+                }
+            }
         }
-        tel::emit(&format!("req.{}", p.ep), ms, json!({"bytes": bytes, "status": status, "via": via, "nav": mine, "route": route_kind(&self.route)}));
+        if mine {
+            tel::nav_req(r);
+        }
+        tel::emit(&format!("req.{}", p.ep), ms, e);
     }
 
     /// A page response was parsed and rendered (`t0` before): a snapshot or cached page shown

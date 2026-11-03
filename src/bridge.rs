@@ -49,6 +49,14 @@ extern "C" {
     /// `timeStamp` of the last click/keydown/pointerdown/submit (performance.now ms; 0 = none).
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn event_ts() -> f64;
+    /// The last input event's target as `tag#closest-id[data-act]|pointerType|event type` (no text).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn tel_target() -> String;
+    /// The document's navigation timing (JSON: `type`, `fetch`, `dns`, `connect`, `request`,
+    /// `response_start`, `response_end`, and the loader's marks `script` / `wasm`, performance.now ms; `{}` when
+    /// missing).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn nav_timing() -> String;
     /// `location.replace(url)`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn replace_doc(url: &str);
@@ -95,7 +103,7 @@ extern "C" {
     pub fn focus_grid(id: &str, sel: &str, delta: i32) -> bool;
     /// hrefs (newline-separated) of the `sel` elements in `id` that intersect the viewport, at most `max`.
     #[wasm_bindgen(js_namespace = YTC)]
-    pub fn visible_hrefs(id: &str, sel: &str, max: u32) -> String;
+    pub fn visible_hrefs(id: &str, sel: &str, link: &str, max: u32) -> String;
     /// `document.visibilityState === 'visible'`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn visible() -> bool;
