@@ -122,6 +122,12 @@ pub fn on_fetch_progress(id: u32, status: u32, bytes: f64) {
     app::with(|a| a.on_fetch_progress(id, status, bytes));
 }
 
+/// A streaming fetch (`chunks` option): the next piece of a successful body as it arrives.
+#[wasm_bindgen]
+pub fn on_fetch_chunk(id: u32, status: u32, bytes: &[u8]) {
+    app::with(|a| a.on_fetch_chunk(id, status, bytes));
+}
+
 #[wasm_bindgen]
 pub fn on_storage(key: &str, json: &str) {
     if telemetry::on_storage(key, json) {

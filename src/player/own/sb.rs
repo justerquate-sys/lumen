@@ -148,6 +148,11 @@ impl Own {
     }
 
     /// A seek (the `seeking` event): ours is ignored, the user's marks where they went.
+    /// A seek the player makes itself (the instant quality switch): not the user's.
+    pub(super) fn sb_own_seek(&mut self, t: f64) {
+        self.sb.own = Some(t);
+    }
+
     pub(super) fn sb_seeking(&mut self) {
         let t = self.time();
         if let Some(to) = self.sb.own.take() {

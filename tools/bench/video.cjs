@@ -25,8 +25,11 @@
 //   spa    videos[i+1] a click from Home on a link that was never hovered (no prefetch)
 //   hover  videos[i+2] a click from Home after the pointer rested on the link for 1 s (prefetched)
 //   quick  videos[i+3] a click from Home 120 ms after the pointer came onto the link (prefetch in flight)
-// In each: first frame, ≥ 1080p on screen, then a seek to the middle (a click on the seek bar), then
-// Quality → 720 and back to Auto (each `video.switch`: decision → the new resolution on screen).
+// In each: first frame, ≥ 1080p on screen, then three seeks (`video.seek`, input → playing): to the
+// middle (a click on the seek bar: outside the buffer), 6 s ahead (inside it), and to a quarter after
+// the pointer rested there for 0.6 s (outside the buffer, the seek bar's hover known in advance),
+// then Quality → 720 and back to Auto (each `video.switch`: decision → the new resolution on screen).
+// `play` = first frame (`loadeddata`) → the picture moving (a presented frame 50 ms of media later); `stall_ms` = the session's time waiting for data.
 // YouTube's HTML documents are stubbed (Google rate-limits page loads; the client never needs them);
 // InnerTube, googlevideo and i.ytimg go to the network untouched; stats pings and SponsorBlock are
 // answered locally. Telemetry goes to a collector inside this script, never to the debug center.
@@ -148,6 +151,13 @@ async function browser(col) {
   await ctx.addInitScript(() => {
     const pics = window.__benchPics = [];
     for (const ev of ['loadeddata', 'resize']) document.addEventListener(ev, e => { const v = e.target; if (v && v.id === 'ytc-video') pics.push({ ev, t: performance.now(), h: v.videoHeight }); }, true);
+    // The picture first moving after the first frame: a presented frame 50 ms of media past the first one.
+    document.addEventListener('loadstart', e => {
+      const v = e.target; if (!v || v.id !== 'ytc-video' || v.__benchRvfc || !v.requestVideoFrameCallback) return;
+      v.__benchRvfc = true; let m0 = null;
+      const cb = (now, md) => { if (m0 == null) m0 = md.mediaTime; if (md.mediaTime > m0 + 0.05) { window.__benchMove = window.__benchMove || now; return; } v.requestVideoFrameCallback(cb); };
+      v.requestVideoFrameCallback(cb);
+    }, true);
   });
   const sw = ctx.serviceWorkers()[0] || await ctx.waitForEvent('serviceworker');
   await sw.evaluate(u => chrome.storage.local.set({ ytcCollectorV1: u }), col.url);
@@ -180,11 +190,26 @@ async function interact(page, ev) {
   await page.waitForFunction(() => (window.__benchPics || []).some(p => p.h >= 1080), null, { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
   const box = await page.locator('#ytc-seek').boundingBox().catch(() => null);
-  if (box) {
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.down(); await page.mouse.up();
+  const settle = async () => {
     await page.waitForFunction(() => { const v = document.getElementById('ytc-video'); return v && !v.seeking && v.readyState >= 3 && !v.paused; }, null, { timeout: 8000 }).catch(() => {});
     await page.waitForTimeout(1500);
+  };
+  if (box) {
+    const y = box.y + box.height / 2;
+    // Outside the buffer: the middle.
+    await page.mouse.move(box.x + box.width / 2, y);
+    await page.mouse.down(); await page.mouse.up();
+    await settle();
+    // Inside the buffer: 6 s ahead.
+    const f = await page.evaluate(() => { const v = document.getElementById('ytc-video'); return v && v.duration > 0 ? (v.currentTime + 6) / v.duration : 0.55; });
+    await page.mouse.move(box.x + box.width * Math.min(0.98, f), y);
+    await page.mouse.down(); await page.mouse.up();
+    await settle();
+    // Outside the buffer after the pointer rested on the spot.
+    await page.mouse.move(box.x + box.width * 0.25, y, { steps: 4 });
+    await page.waitForTimeout(600);
+    await page.mouse.down(); await page.mouse.up();
+    await settle();
   }
   for (const q of ['720', '0']) {
     await page.mouse.move(5, 5);
@@ -226,6 +251,7 @@ async function scenario(b, col, kind, vid) {
   else if (ok && !flag('starts')) await interact(page, out);
   else if (ok) await page.waitForTimeout(2500);
   out.pics = await page.evaluate(() => window.__benchPics || []).catch(() => []);
+  out.move_at = await page.evaluate(() => window.__benchMove || null).catch(() => null);
   out.failed = await page.locator('#ytc-player.failed, .pfail').count().catch(() => 0) > 0;
   // Leaving sends the batch.
   await page.goto('https://www.youtube.com/hashtag/bench', { waitUntil: 'commit' }).catch(() => {});
@@ -238,7 +264,10 @@ async function scenario(b, col, kind, vid) {
   const hd = one('video.1080')?.v;
   out.first = start?.v; out.hd = hd != null && start ? Math.max(hd, start.v) : hd; out.target = one('video.target')?.v;
   out.start = start && { media_pre: start.media_pre, slow: start.slow, streams_ms: start.streams_ms, start_p: start.start_p, target_p: start.target_p, vision: start.vision, caps_ms: start.caps_ms, mse_open_ms: start.mse_open_ms, gv: start.gv };
-  out.seek = ev.filter(e => e.m === 'video.seek').map(e => e.v)[0];
+  const seeks = ev.filter(e => e.m === 'video.seek').map(e => e.v);
+  [out.seek, out.seek_in, out.seek_hov] = seeks;
+  const ld = out.pics.find(p => p.ev === 'loadeddata')?.t;
+  out.play = out.move_at != null && ld != null ? out.move_at - ld : undefined;
   const sw = ev.filter(e => e.m === 'video.switch');
   out.sw_down = sw.find(e => e.to_p === 720)?.v; out.sw_up = sw.find(e => e.from_p === 720)?.v;
   out.stalls = ev.filter(e => e.m === 'video.stall').length;
@@ -275,7 +304,7 @@ async function scenario(b, col, kind, vid) {
           x.run = r; x.label = LABEL;
           res.push(x);
           if (THROTTLE || HANG) console.log(`${LABEL} ${r}.${i} ${kind.padEnd(5)} ${vid} first ${x.first?.toFixed(0)} hd ${x.hd?.toFixed(0)} stall_ms ${x.stall_ms} h ${x.min_h}..${x.last_h} slow ${JSON.stringify(x.slow)} ${x.throttle?.join(' ')} vision ${JSON.stringify(x.start?.vision)} ${x.notes.join('; ')}`);
-          else console.log(`${LABEL} ${r}.${i} ${kind.padEnd(5)} ${vid} first ${x.first?.toFixed(0)} hd ${x.hd?.toFixed(0)} seek ${x.seek?.toFixed(0)} sw↓ ${x.sw_down?.toFixed(0)} sw↑ ${x.sw_up?.toFixed(0)} first_h ${x.first_h} streams ${x.start?.streams_ms} vision ${x.start?.vision?.src} gv ${x.start?.gv?.length} ${x.notes.join('; ')}`);
+          else console.log(`${LABEL} ${r}.${i} ${kind.padEnd(5)} ${vid} first ${x.first?.toFixed(0)} play ${x.play?.toFixed(0)} hd ${x.hd?.toFixed(0)} seek ${x.seek?.toFixed(0)}/${x.seek_in?.toFixed(0)}/${x.seek_hov?.toFixed(0)} stall ${x.stall_ms} sw↓ ${x.sw_down?.toFixed(0)} sw↑ ${x.sw_up?.toFixed(0)} first_h ${x.first_h} streams ${x.start?.streams_ms} vision ${x.start?.vision?.src} gv ${x.start?.gv?.length} ${x.notes.join('; ')}`);
         }
       } catch (e) { console.log('run error', e.message); }
       if (b) { await b.ctx.close().catch(() => {}); fs.rmSync(b.profile, { recursive: true, force: true }); }
@@ -289,13 +318,11 @@ async function scenario(b, col, kind, vid) {
     const m = f => xs.map(f).filter(Number.isFinite);
     const row = { build: LABEL, scenario: kind, n: xs.length, ok: m(x => x.first).length };
     row.media_pre = xs.filter(x => x.start?.media_pre?.v).length;
-    for (const [name, f] of [['first', x => x.first], ['hd', x => x.hd], ['seek', x => x.seek], ['sw_down', x => x.sw_down], ['sw_up', x => x.sw_up]]) {
+    for (const [name, f] of [['first', x => x.first], ['play', x => x.play], ['hd', x => x.hd], ['seek', x => x.seek], ['seek_in', x => x.seek_in], ['seek_hov', x => x.seek_hov], ['sw_down', x => x.sw_down], ['sw_up', x => x.sw_up], ['stall_ms', x => x.stall_ms]]) {
       const a = m(f); row[name] = `${pct(a, 0.5)?.toFixed?.(0)} / ${pct(a, 0.9)?.toFixed?.(0)} (${a.length})`;
     }
     row.below1080 = xs.filter(x => x.below1080).length;
     if (THROTTLE || HANG) {
-      const a = m(x => x.stall_ms);
-      row.stall_ms = `${pct(a, 0.5)?.toFixed?.(0)} / ${pct(a, 0.9)?.toFixed?.(0)} (${a.length})`;
       row.end_1080 = xs.filter(x => x.last_h >= 1080).length;
       row.hedge_won = xs.reduce((s, x) => s + (x.slow?.hedge_won || 0) + (x.slow?.vision_hedge?.won ? 1 : 0), 0);
       row.no_frame = xs.filter(x => !Number.isFinite(x.first)).length;

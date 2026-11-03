@@ -100,6 +100,8 @@ const PNG = (() => {
 })();
 const IMG = { delay: 0, search: 0 }; // motion step: late thumbnails / a slow search (skeleton geometry)
 const NET = { down: false, probes: 0 };
+// googlevideo chunk requests of these videos answer `ms` late (only `itag`'s, when given).
+const SLOWSEG = new Map();
 // Hedged reads: the first matching InnerTube request never answers (`{ ep, q | v, n }`).
 const HEDGE = { stall: null };
 const FX = { bot: null, homeChips: false, wlMock: false, wl: new Set(), wlFail: false, linked: new Set(), checkDelay: 0, checksInFlight: 0, checksMax: 0, homeLabels: false, homeShorts: false };
@@ -316,6 +318,9 @@ function googlevideo(route, url) {
   if (v === 'stepdown001' && itag === '243' && a > 120000) return route.abort('failed');
   if (!mediaFiles.has(itag)) mediaFiles.set(itag, fs.readFileSync(path.join(media.dir, `itag-${itag}.webm`)));
   const file = mediaFiles.get(itag);
+  // Slow media requests (seek cancel / seek-bar prefetch): every chunk request answers this many ms late.
+  const slow = SLOWSEG.get(v);
+  if (slow && (!slow.itag || slow.itag === itag) && a > 0 && a < file.length) return new Promise(r => setTimeout(r, slow.ms)).then(() => route.fulfill({ status: 200, headers: cors, body: file.subarray(a, Math.min(b, file.length - 1) + 1) })).catch(() => {});
   if (!(a >= 0 && b >= a && a < file.length)) return route.fulfill({ status: 416, headers: cors, body: '' });
   return route.fulfill({ status: 200, headers: cors, body: file.subarray(a, Math.min(b, file.length - 1) + 1) });
 }
@@ -2814,6 +2819,124 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(!st.paused && st.h === 144, JSON.stringify(st));
     await page.click('#ytc-qual');
     await page.locator('#ytc-menu button[data-arg="q:0"]').click();
+  });
+
+  // Media is appended while it downloads (player/frag.rs, own/stream.rs): the test switch hands every
+  // googlevideo body to the player in 997-byte pieces, so EBML elements, blocks and the index split anywhere.
+  await step('own player: media appended while it downloads, in 997-byte pieces (elements split anywhere): first frame, playback, a seek outside the buffer and the end are right', async () => {
+    await page.evaluate(() => localStorage.setItem('ytc-test-chunk', '997'));
+    const err0 = errors.length, inc0 = incidents.length;
+    try {
+      await page.goto('https://www.youtube.com/watch?v=piecemeal01&t=27', { waitUntil: 'commit' });
+      await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 9000);
+      await waitT(() => { const v = document.getElementById('ytc-video'); return v.currentTime > 28.5 && v.readyState >= 3; }, null, 8000);
+      assert.equal((await vstate()).h, 360);
+      // Outside the buffer: back to 6 s (segment 5–10), then on to the end of the 40 s video.
+      const box = await page.locator('.pseek').boundingBox();
+      await page.mouse.click(box.x + box.width * 0.15, box.y + box.height / 2);
+      await waitT(() => { const v = document.getElementById('ytc-video'); return v.currentTime > 6.3 && v.currentTime < 12 && v.readyState >= 3 && !v.paused; }, null, 8000);
+      const ranges = await page.evaluate(() => { const v = document.getElementById('ytc-video'), r = v.buffered, o = []; for (let i = 0; i < r.length; i++) o.push([r.start(i), r.end(i)]); return o; });
+      assert.ok(ranges.some(([a, b]) => a <= 6.5 && b >= 9.5), 'the seek target segment is buffered whole: ' + JSON.stringify(ranges));
+      await page.evaluate(() => { const v = document.getElementById('ytc-video'); v.currentTime = 37; });
+      await waitT(() => document.getElementById('ytc-video').ended, null, 9000);
+      assert.deepEqual(problems(inc0), [], 'no incident');
+      assert.deepEqual(errors.slice(err0), [], 'no page error');
+    } finally { await page.evaluate(() => localStorage.removeItem('ytc-test-chunk')); }
+  });
+
+  // The instant switch (own/stream.rs): a chosen quality shows at once (the new segment under the playhead,
+  // then a seek to where the playhead is), not at the next segment boundary (5 s segments here).
+  await step('own player: a chosen quality shows within a fraction of a second, not at the next segment; audio untouched, playback goes on', async () => {
+    await page.goto('https://www.youtube.com/watch?v=instantq001', { waitUntil: 'commit' });
+    await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 9000);
+    await page.evaluate(() => { const v = document.getElementById('ytc-video'); window.__w = []; for (const e of ['waiting', 'playing']) v.addEventListener(e, () => window.__w.push([e, performance.now()])); });
+    for (const [q, h] of [['144', 144], ['0', 360]]) {
+      // Well inside a segment: the next boundary is ≥ 3 s away.
+      await waitT(() => { const t = document.getElementById('ytc-video').currentTime; return t % 5 > 0.6 && t % 5 < 1.8; }, null, 8000);
+      const audio0 = log.gv.filter(g => g.v === 'instantq001' && g.itag === '249' && g.a > 0).map(g => g.a);
+      await page.click('#ytc-qual');
+      await page.waitForSelector('#ytc-player.menu #ytc-menu button');
+      const [t0, ct0] = await page.evaluate(() => [performance.now(), document.getElementById('ytc-video').currentTime]);
+      await page.locator(`#ytc-menu button[data-arg="q:${q}"]`).click();
+      await waitT(h => document.getElementById('ytc-video').videoHeight === h, h, 6000);
+      const [t1, ct1] = await page.evaluate(() => [performance.now(), document.getElementById('ytc-video').currentTime]);
+      console.log(`     quality ${q === '0' ? 'Auto (360p)' : q + 'p'} chosen at ${ct0.toFixed(2)} s → on screen in ${(t1 - t0).toFixed(0)} ms (next segment at ${(Math.ceil(ct0 / 5) * 5).toFixed(0)} s)`);
+      assert.ok(t1 - t0 < 1200 && ct1 < Math.ceil(ct0 / 5) * 5, `shown before the next segment: ${(t1 - t0).toFixed(0)} ms, at ${ct1.toFixed(2)} s`);
+      await page.waitForTimeout(1200);
+      const st = await vstate();
+      assert.ok(!st.paused && st.t > ct1 + 0.8 && st.rs >= 3, 'playback goes on ' + JSON.stringify(st));
+      const audio1 = log.gv.filter(g => g.v === 'instantq001' && g.itag === '249' && g.a > 0).map(g => g.a);
+      assert.ok(audio1.slice(audio0.length).every(a => !audio0.includes(a)), 'no audio fetched again: ' + JSON.stringify([audio0, audio1]));
+      await page.mouse.move(5, 5);
+    }
+    const w = await page.evaluate(() => window.__w);
+    let frozen = 0; for (let i = 0; i < w.length; i++) if (w[i][0] === 'waiting') { const p = w.slice(i).find(x => x[0] === 'playing'); if (p) frozen += p[1] - w[i][1]; }
+    console.log(`     time waiting during the two switches: ${frozen.toFixed(0)} ms`);
+    assert.ok(frozen < 600, 'at most a brief freeze: ' + frozen.toFixed(0) + ' ms');
+  });
+
+  // "Data but no picture" (own/stream.rs): the test switch makes the first video SourceBuffer take data but
+  // never show anything; at 1.5 s the format is given up and the start continues on the next one.
+  await step('own player: media buffered but no picture → another format within ~1.5 s (no 4 s stuck status, no 6 s retry)', async () => {
+    const inc0 = incidents.length;
+    await page.evaluate(() => localStorage.setItem('ytc-test-nopicture', '1'));
+    // 243's later chunks come late, so its end of stream does not come before the 1.5 s.
+    SLOWSEG.set('nopicture01', { ms: 4000, itag: '243' });
+    try {
+      const t0 = Date.now();
+      await page.goto('https://www.youtube.com/watch?v=nopicture01', { waitUntil: 'commit' });
+      await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 9000);
+      const ms = Date.now() - t0;
+      console.log(`     no picture → another format → first frame after ${ms} ms`);
+      assert.ok(ms < 3800, 'before the 4 s stuck status: ' + ms);
+      await page.waitForTimeout(500);
+      assert.equal(await page.locator('#ytc-player.stuck').count(), 0, 'no stuck status');
+      assert.equal((await vstate()).h, 240, 'the next format plays');
+      assert.deepEqual(problems(inc0), [], 'no player-stuck incident');
+      await page.keyboard.press('Backquote');
+      const dbg = await page.locator('#ytc-debug').textContent();
+      await page.keyboard.press('Backquote');
+      assert.match(dbg, /itag 243: media covers .* but no picture: 242/);
+    } finally { SLOWSEG.delete('nopicture01'); await page.evaluate(() => localStorage.removeItem('ytc-test-nopicture')); }
+  });
+
+  await step('own player: a seek drops the requests in flight at once; resting on the seek bar fetches that spot ahead and the click takes it over', async () => {
+    const v = 'seekcancel1', aborted = [];
+    const onFail = r => { const u = new URL(r.url()); if (u.hostname.endsWith('googlevideo.com') && u.searchParams.get('v') === v) aborted.push({ itag: u.searchParams.get('itag'), range: u.searchParams.get('range'), t: Date.now() }); };
+    page.on('requestfailed', onFail);
+    // Every segment request takes 1 s (below the 1.5 s that counts as throttled while playing).
+    SLOWSEG.set(v, { ms: 1000 });
+    try {
+      await page.goto(`https://www.youtube.com/watch?v=${v}`, { waitUntil: 'commit' });
+      await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 9000);
+      // The rest of the first segment is still on its way: seek to 31 s.
+      const box = await page.locator('.pseek').boundingBox();
+      const n0 = log.gv.length, ts = Date.now();
+      await page.mouse.click(box.x + box.width * (31 / 40), box.y + box.height / 2);
+      for (let i = 0; i < 30 && !aborted.some(a => a.t >= ts); i++) await page.waitForTimeout(50);
+      assert.ok(aborted.some(a => a.t >= ts), 'the old request was dropped: ' + JSON.stringify(aborted));
+      const next = log.gv.slice(n0).find(g => g.v === v && g.itag === '243' && g.a > 0);
+      assert.ok(next && next.t - ts < 400, 'the target segment asked at once: ' + JSON.stringify(next));
+      await waitT(() => { const x = document.getElementById('ytc-video'); return x.currentTime > 31 && x.readyState >= 3; }, null, 8000);
+      // Rest on 13 s (not buffered) for 0.5 s: its segments are fetched ahead; the click there takes them over.
+      await page.mouse.move(box.x + box.width * (13 / 40), box.y + box.height / 2, { steps: 3 });
+      const n1 = log.gv.length;
+      await page.waitForTimeout(500);
+      const pre = log.gv.slice(n1).filter(g => g.v === v && g.a > 0);
+      assert.ok(pre.some(g => g.itag === '243') && pre.some(g => g.itag === '249'), 'video and audio fetched ahead: ' + JSON.stringify(pre));
+      const n2 = log.gv.length, tc = Date.now();
+      await page.mouse.down(); await page.mouse.up();
+      await waitT(() => { const x = document.getElementById('ytc-video'); return x.currentTime > 13 && x.currentTime < 20 && x.readyState >= 3; }, null, 8000);
+      const ms = Date.now() - tc;
+      const again = log.gv.slice(n2).filter(g => g.v === v && g.a > 0 && pre.some(p => p.itag === g.itag && p.a === g.a));
+      console.log(`     seek to a spot fetched ahead (still loading, 1 s per request): playing after ${ms} ms`);
+      assert.deepEqual(again, [], 'nothing asked twice');
+      assert.ok(ms < 900, 'sooner than a fresh 1 s request: ' + ms);
+      await page.keyboard.press('Backquote');
+      const dbg = await page.locator('#ytc-debug').textContent();
+      await page.keyboard.press('Backquote');
+      assert.match(dbg, /video segment 2 fetched ahead/);
+    } finally { SLOWSEG.delete(v); page.off('requestfailed', onFail); await page.mouse.move(5, 5); }
   });
 
   await step('layout: six-link sidebar (no Shorts) while browsing, none on watch pages; results render without layout shift', async () => {

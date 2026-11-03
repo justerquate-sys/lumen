@@ -6,7 +6,7 @@
 //! The player takes them in `fetch_head` (a finished body is used at once; one in flight becomes
 //! the player's own request).
 
-use super::{caps_key, formats, next_id, Inflight, Own, Req, CAPS, V};
+use super::{caps_known, formats, next_id, Inflight, Own, Req, V};
 use crate::bridge;
 use crate::config::Prefs;
 use crate::json;
@@ -40,7 +40,7 @@ const MAX_AGE_MS: f64 = 300_000.0;
 /// End byte of the first request for `f` (index, plus the first segment when starting near 0).
 /// The first segment's size is unknown until the index is parsed (live 2 Nov 2026: 108 KB to
 /// 4.4 MB at 1080p), so the guess is bounded: what of the segment came along is kept and only the
-/// rest is asked for (`Track::prefix`); a first frame never waits for bytes past segment 0.
+/// rest is asked for (`stream.rs`); a first frame never waits for bytes past segment 0.
 pub(super) fn head_end(f: &Format, kind: usize, extra: bool) -> u64 {
     head_end_max(f, kind, extra, HEAD_EXTRA)
 }
@@ -75,10 +75,7 @@ fn plan(body: &[u8], prefs: &Prefs, bw: Option<f64>) -> Option<(Format, Format)>
     }
     let ok = |m: &str| support.get(m).copied().unwrap_or(false);
     let codecs = formats::order(Codec::from_key(&prefs.codec));
-    let caps: HashMap<u32, (bool, bool)> = CAPS.with(|c| {
-        let c = c.borrow();
-        fmts.iter().filter(|f| f.video).filter_map(|f| c.get(&caps_key(f)).map(|x| (f.itag, *x))).collect()
-    });
+    let caps: HashMap<u32, (bool, bool)> = fmts.iter().filter(|f| f.video).filter_map(|f| caps_known(f).map(|x| (f.itag, x))).collect();
     // Not every format's decodingInfo answer is in yet: the player might pick another codec.
     if fmts.iter().any(|f| f.video && !caps.contains_key(&f.itag)) {
         return None;

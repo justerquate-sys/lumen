@@ -469,26 +469,36 @@ const YTC = (() => {
     // `opts` (JSON) is merged into the fetch init, e.g. {"credentials":"omit"} or {"keepalive":true}.
     // `progress: 1` in `opts` also reports on_fetch_progress(id, status, bytes so far): once when the
     // response headers arrive (0 bytes), then at most every 100 ms while the body streams in.
+    // `chunks: 1` hands a successful (2xx) body over as it arrives instead: on_fetch_chunk(id, status, bytes)
+    // per piece the network delivered, then on_fetch(id, status, <empty>) at its end.
     fetch_opts(id, method, url, body, headers, opts) {
       const c = new AbortController();
       ctl.set(id, c);
-      const o = JSON.parse(opts), prog = o.progress; delete o.progress;
+      const o = JSON.parse(opts), prog = o.progress, chunks = o.chunks; delete o.progress; delete o.chunks;
       const init = { method, headers: JSON.parse(headers), credentials: 'same-origin', signal: c.signal, ...o };
       if (body) init.body = body;
       const done = (status, b) => { ctl.delete(id); call('on_fetch', id, status, b); };
       gfetch(url, init)
         .then(r => {
-          if (!prog || !r.body) return r.arrayBuffer().then(b => done(r.status, new Uint8Array(b)));
-          call('on_fetch_progress', id, r.status, 0);
+          const stream = chunks && r.ok;
+          // Test switch only (e2e): hand the body over in pieces of this many bytes (boxes split anywhere).
+          let split = Infinity; if (stream) try { split = +localStorage.getItem('ytc-test-chunk') || Infinity; } catch {}
+          if ((!prog && !stream) || !r.body) return r.arrayBuffer().then(b => done(r.status, new Uint8Array(b)));
+          if (prog) call('on_fetch_progress', id, r.status, 0);
           const rd = r.body.getReader(), parts = [];
           let n = 0, last = perf.now();
           const next = () => rd.read().then(({ done: end, value }) => {
+            if (!ctl.has(id)) return;
             if (end) {
+              if (stream) return done(r.status, new Uint8Array(0));
               const b = new Uint8Array(n); let at = 0;
               for (const p of parts) { b.set(p, at); at += p.length; }
               return done(r.status, b);
             }
-            parts.push(value); n += value.length;
+            n += value.length;
+            if (stream) { for (let i = 0; i < value.length; i += split) call('on_fetch_chunk', id, r.status, value.subarray(i, i + split)); }
+            else parts.push(value);
+            if (!prog) return next();
             const t = perf.now();
             if (t - last >= 100) { last = t; call('on_fetch_progress', id, r.status, n); }
             return next();
@@ -860,7 +870,18 @@ const YTC = (() => {
     },
     source_buffer(h, msh, mime) {
       try {
-        const sb = mo.get(msh).addSourceBuffer(mime);
+        let sb = mo.get(msh).addSourceBuffer(mime);
+        // Test switch only (e2e): the next video SourceBuffer takes data but never gives a picture (its
+        // init segment goes in, later appends go nowhere, and `buffered` says they arrived).
+        let np = false; try { np = mime.startsWith('video/') && localStorage.getItem('ytc-test-nopicture') === '1'; if (np) localStorage.removeItem('ytc-test-nopicture'); } catch {}
+        if (np) {
+          const real = sb, on = {}, fire = () => { for (const f of on.updateend || []) f(); };
+          let n = 0, busy = false, end = 0;
+          const done = () => { busy = true; setTimeout(() => { busy = false; end = 60; fire(); }, 5); };
+          real.addEventListener('updateend', fire);
+          sb = { addEventListener(t, f) { (on[t] = on[t] || []).push(f); }, appendBuffer(b) { if (n++) done(); else real.appendBuffer(b); }, remove() { done(); }, abort() {}, changeType() {},
+            get updating() { return busy || real.updating; }, get buffered() { return { length: end ? 1 : 0, start: () => 0, end: () => end }; } };
+        }
         mo.set(h, sb);
         sb.addEventListener('updateend', () => evt(h, 'updateend'));
         sb.addEventListener('error', () => evt(h, 'error'));
@@ -869,6 +890,8 @@ const YTC = (() => {
     },
     // Returns '' on success, else the exception name (e.g. QuotaExceededError).
     sb_append(h, bytes) { try { mo.get(h).appendBuffer(bytes.slice()); return ''; } catch (e) { return (e && e.name) || 'Error'; } },
+    // Drops a partly appended media segment (resetParserState), so the next append may start a new one.
+    sb_abort(h) { try { mo.get(h).abort(); return true; } catch { return false; } },
     sb_remove(h, a, b) { try { mo.get(h).remove(a, b); return true; } catch { return false; } },
     sb_change_type(h, mime) { try { mo.get(h).changeType(mime); return true; } catch { return false; } },
     media_ranges(h) {

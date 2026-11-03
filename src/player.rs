@@ -10,6 +10,7 @@
 pub mod captions;
 pub mod fail;
 pub mod formats;
+pub mod frag;
 pub mod index;
 pub mod live;
 pub mod own;
