@@ -160,8 +160,28 @@ pub fn utf16_to_byte(s: &str, u16_off: usize) -> usize {
     s.len()
 }
 
+/// A rolling budget: `true` (and the use recorded) when fewer than `max` uses fall within the last
+/// `window_ms` before `now`.
+pub fn budget_take(uses: &mut Vec<f64>, now: f64, max: usize, window_ms: f64) -> bool {
+    uses.retain(|t| now - t < window_ms);
+    if uses.len() >= max {
+        return false;
+    }
+    uses.push(now);
+    true
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rolling_budget() {
+        let mut u = Vec::new();
+        assert!((0..10).all(|i| budget_take(&mut u, i as f64 * 1000.0, 10, 60_000.0)), "ten in a minute");
+        assert!(!budget_take(&mut u, 30_000.0, 10, 60_000.0), "the eleventh waits");
+        assert!(budget_take(&mut u, 60_000.0, 10, 60_000.0), "the first one has left the window");
+        assert!(!budget_take(&mut u, 60_500.0, 10, 60_000.0));
+    }
+
     use super::*;
     #[test]
     fn escaping() {

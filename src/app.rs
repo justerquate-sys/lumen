@@ -99,8 +99,13 @@ const RESTORED: &str = "#ytc-main>*";
 /// Hover this long on a thumbnail to start YouTube's animated preview.
 const PREVIEW_MS: u32 = 500;
 const SUGGEST_MS: u32 = 80;
-/// Typing pause after which the search results are fetched ahead of Enter.
-const SEARCH_WARM_MS: u32 = 300;
+/// Typing pause after which the search results are fetched ahead of Enter (owner, 3 Nov 2026: "≥ ~250 ms").
+const SEARCH_WARM_MS: u32 = 250;
+/// Rest on a suggestion chosen with the arrow keys before its results are fetched (arrowing through
+/// the list fetches nothing).
+const SEARCH_PICK_MS: u32 = 120;
+/// At most this many searches fetched ahead per minute (a slow typist pausing often, ~100 KB each).
+const SEARCH_WARM_BUDGET: usize = 10;
 const SUGGEST_CACHE: usize = 64;
 /// sessionStorage mirror of the config, so the first request never waits for chrome.storage.
 const CFG_SESSION: &str = "ytc:cfg";
@@ -165,6 +170,17 @@ struct Pending {
     sent: f64,
     /// Endpoint name for the perf report.
     ep: &'static str,
+    /// A field-masked request (`api::NEXT_FIELDS`): the same request without the mask, sent if
+    /// YouTube refuses the mask (HTTP 400).
+    unmasked: Option<Box<Resend>>,
+}
+
+/// What it takes to send a request again unchanged (URL, body, headers, fetch options).
+struct Resend {
+    url: String,
+    body: String,
+    headers: String,
+    opts: &'static str,
 }
 
 enum Timer {
@@ -281,6 +297,12 @@ pub struct App {
     preview_v: String,
     preview_on: bool,
     suggest_q: String,
+    /// The query whose results a typing pause or a suggestion rest fetches ahead (memory only).
+    warm_q: String,
+    /// The results URL of the search fetched ahead and still loading (one at a time).
+    warm_url: Option<String>,
+    /// When the last searches were fetched ahead (the per-minute budget).
+    warm_at: Vec<f64>,
     suggest_id: Option<u32>,
     suggest_cache: Vec<(String, Vec<String>)>,
     debug: bool,
@@ -454,6 +476,9 @@ pub fn boot() {
         preview_v: String::new(),
         preview_on: false,
         suggest_q: String::new(),
+        warm_q: String::new(),
+        warm_url: None,
+        warm_at: Vec::new(),
         suggest_id: None,
         suggest_cache: Vec::new(),
         debug: false,
@@ -599,12 +624,14 @@ impl App {
         let auth = if self.auth.bearer.is_some() && !self.tv_account_req(&req) { crate::config::Auth::default() } else { self.auth.clone() };
         let (body, headers) = crate::tv::finish(&self.cfg, &auth, body, (bridge::epoch() / 1000.0) as u64);
         let opts = if low { LOW } else { "{}" };
-        let url = req.url();
+        let url = req.send_url();
         bridge::fetch_opts(id, "POST", &url, &body, &headers, opts);
         let ep = req.endpoint();
+        let plain = req.url();
+        let unmasked = (url != plain).then(|| Box::new(Resend { url: plain, body: body.clone(), headers: headers.clone(), opts }));
         // Background requests the user may come to wait for (a continuation, a speculative or background page prefetch).
         let cont = matches!(purpose, Purpose::Cont { .. } | Purpose::Prefetch { .. } | Purpose::PagePrefetch { .. });
-        self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep });
+        self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep, unmasked });
         // Reads someone waits for get a second copy past their deadline (never actions; a
         // background continuation only once the user waits for it; Home's first page is the Home
         // path's). The copy goes out at normal priority.
@@ -672,7 +699,7 @@ impl App {
         self.config_inflight = true;
         let id = next_id();
         bridge::fetch_opts(id, "GET", "https://www.youtube.com/sw.js_data", "", "{}", if retry_nav.is_none() { LOW } else { "{}" });
-        self.pending.insert(id, Pending { purpose: Purpose::Config { retry_nav }, sent: bridge::now(), ep: "sw.js_data" });
+        self.pending.insert(id, Pending { purpose: Purpose::Config { retry_nav }, sent: bridge::now(), ep: "sw.js_data", unmasked: None });
     }
 
     fn abort_nav_requests(&mut self) {
@@ -1276,9 +1303,8 @@ impl App {
                 }
             }
             Some(Timer::SearchWarm(q)) => {
-                if self.suggest_q == q {
-                    let url = Route::Search { q, sp: Default::default() }.url();
-                    self.prefetch_page(&url);
+                if self.warm_q == q {
+                    self.search_warm(&q);
                 }
             }
             None => {}
@@ -1402,7 +1428,7 @@ impl App {
         let (body, headers, opts) = crate::api::vision_request(&self.cfg, &self.auth, (bridge::epoch() / 1000.0) as u64, &route, v);
         let id = next_id();
         bridge::fetch_opts(id, "POST", &crate::api::player_url(), &body, &headers, opts);
-        self.pending.insert(id, Pending { purpose: Purpose::VisionPrefetch { v: v.to_string(), spec, route }, sent: bridge::now(), ep: "player-visionos" });
+        self.pending.insert(id, Pending { purpose: Purpose::VisionPrefetch { v: v.to_string(), spec, route }, sent: bridge::now(), ep: "player-visionos", unmasked: None });
         self.vision_prefetching.insert(v.to_string());
         if spec {
             self.spec_vision.1 += 1;
@@ -1655,14 +1681,9 @@ impl App {
         self.fx_typed(value);
         let q: String = value.trim().chars().take(100).collect();
         self.suggest_q = q.clone();
+        self.search_warm_soon(&q, SEARCH_WARM_MS);
         if q.is_empty() {
             return;
-        }
-        // Measured in a real browser session: a search answer takes ~0.6 s.
-        // Fetch it during the typing pause so Enter paints from cache.
-        if q.chars().count() >= 2 {
-            let warm = self.timer(Timer::SearchWarm(q.clone()));
-            bridge::timer(warm, SEARCH_WARM_MS);
         }
         if let Some((_, list)) = self.suggest_cache.iter().find(|(k, _)| *k == q) {
             let list = list.clone();
@@ -1673,6 +1694,48 @@ impl App {
         bridge::timer(id, SUGGEST_MS);
     }
 
+    /// The search box now holds `q` (typed, or a suggestion chosen with the arrows): its results
+    /// are fetched ahead after `ms` without a change (measured: a search answer takes ~0.6–0.9 s,
+    /// so Enter paints from memory). A search still loading for other text is dropped at once.
+    pub(super) fn search_warm_soon(&mut self, q: &str, ms: u32) {
+        self.warm_q = q.to_string();
+        let target = Route::Search { q: q.to_string(), sp: Default::default() }.url();
+        if let Some(url) = self.warm_url.take() {
+            // (Not the one a submitted search is waiting for.)
+            if url != target && self.await_page.as_deref() != Some(url.as_str()) {
+                if let Some(id) = self.page_prefetching.remove(&url) {
+                    self.pending.remove(&id);
+                    self.abort_req(id);
+                }
+            } else {
+                self.warm_url = Some(url);
+            }
+        }
+        if q.chars().count() >= 2 {
+            let warm = self.timer(Timer::SearchWarm(q.to_string()));
+            bridge::timer(warm, ms);
+        }
+    }
+
+    /// Fetches `q`'s results ahead: low priority, one at a time, ≤ `SEARCH_WARM_BUDGET` a minute,
+    /// kept in memory only (the page cache); telemetry sees `req.search` `via: prefetch`, never the text.
+    fn search_warm(&mut self, q: &str) {
+        let url = Route::Search { q: q.to_string(), sp: Default::default() }.url();
+        if url == self.route.url() || self.page_prefetching.contains_key(&url) || self.page_cached(&url) {
+            return;
+        }
+        if self.page_prefetching.len() >= MAX_PREFETCH {
+            return;
+        }
+        let Some(req) = self.page_req(&Route::Search { q: q.to_string(), sp: Default::default() }) else { return };
+        if !crate::util::budget_take(&mut self.warm_at, bridge::now(), SEARCH_WARM_BUDGET, 60_000.0) {
+            return;
+        }
+        let id = self.send(req, Purpose::PagePrefetch { url: url.clone(), bg: false }, true);
+        self.page_prefetching.insert(url.clone(), id);
+        self.warm_url = Some(url);
+    }
+
     fn suggest(&mut self, q: &str) {
         if let Some(old) = self.suggest_id.take() {
             self.pending.remove(&old);
@@ -1681,7 +1744,7 @@ impl App {
         let id = next_id();
         let url = format!("https://www.youtube.com/complete/search?client=youtube&ds=yt&xhr=t&oe=utf-8&hl={}&q={}", self.hl, pct_encode(q));
         bridge::fetch(id, "GET", &url, "", "{}");
-        self.pending.insert(id, Pending { purpose: Purpose::Suggest { q: q.to_string() }, sent: bridge::now(), ep: "suggest" });
+        self.pending.insert(id, Pending { purpose: Purpose::Suggest { q: q.to_string() }, sent: bridge::now(), ep: "suggest", unmasked: None });
         self.suggest_id = Some(id);
     }
 
@@ -1987,12 +2050,28 @@ impl App {
             }
             return;
         }
-        let Some(p) = self.pending.remove(&id) else {
+        let Some(mut p) = self.pending.remove(&id) else {
             if self.player.as_mut().is_some_and(|p| p.on_fetch(id, status, body)) {
                 self.after_player();
             }
             return;
         };
+        // YouTube refused the field mask (a field it no longer knows): the same request whole, at
+        // once and under the same id, and no mask for the rest of this document.
+        if status == 400 {
+            if let Some(r) = p.unmasked.take() {
+                crate::api::unmask();
+                if let Some(x) = self.hedge.forget(id) {
+                    bridge::abort(x);
+                }
+                bridge::fetch_opts(id, "POST", &r.url, &r.body, &r.headers, r.opts);
+                // Seen in the speed telemetry as a `req.next` with status 400 (numbers only: an
+                // incident would carry the page's URL, a search page's terms included).
+                self.tel_req(&p, status, body.len());
+                self.pending.insert(id, p);
+                return;
+            }
+        }
         let ok = status == 200;
         if status != 0 {
             self.perf.req(p.ep, bridge::now() - p.sent, ok);
@@ -2721,7 +2800,7 @@ impl App {
     fn net_probe(&mut self) {
         let id = next_id();
         bridge::fetch_opts(id, "GET", "https://www.youtube.com/generate_204", "", "{}", "{\"cache\":\"no-store\",\"credentials\":\"omit\"}");
-        self.pending.insert(id, Pending { purpose: Purpose::NetProbe, sent: bridge::now(), ep: "net-probe" });
+        self.pending.insert(id, Pending { purpose: Purpose::NetProbe, sent: bridge::now(), ep: "net-probe", unmasked: None });
     }
 
     /// A probe answered (or failed): back → continue the failed video by itself; still down →

@@ -48,6 +48,15 @@ impl Req {
         format!("{ORIGIN}/youtubei/v1/{}?prettyPrint=false", self.endpoint())
     }
 
+    /// The URL as sent: a watch page's `next` carries the field mask (`NEXT_FIELDS`) while
+    /// YouTube accepts it (`masked`).
+    pub fn send_url(&self) -> String {
+        match self {
+            Req::Next { .. } | Req::NextList { .. } if masked() => format!("{}&fields={}", self.url(), crate::util::pct_encode(NEXT_FIELDS)),
+            _ => self.url(),
+        }
+    }
+
     pub fn body(&self, cfg: &Config, hl: &str, page_url: &str) -> String {
         let mut body = Map::new();
         body.insert("context".into(), context(cfg, hl, page_url));
@@ -84,6 +93,48 @@ impl Req {
         }
         Value::Object(body).to_string()
     }
+}
+
+/// Related items as the watch page reads them: lockups trimmed to what `parse::lockup` uses (their
+/// menus, palettes and logging are ~60 % of a `next` answer), every other renderer the column can
+/// carry whole. Only names YouTube knows today: an unknown name is an HTTP 400 for the whole request.
+macro_rules! next_rel {
+    () => {
+        "lockupViewModel(contentId,contentType,contentImage,metadata/lockupMetadataViewModel(title,image,metadata),rendererContext/commandContext),\
+         compactVideoRenderer,compactRadioRenderer,compactPlaylistRenderer,continuationItemRenderer,reelShelfRenderer,shelfRenderer"
+    };
+}
+
+/// The `next` field mask (3 Nov 2026, measured live signed out on 22 videos: the decoded answer
+/// 380–450 KB → ~100 KB, gzip on the wire 55–65 KB → ~20 KB; YouTube's server time unchanged). It
+/// keeps everything `parse::next`, `actions::watch::parse`, `features::upnext::parse`, `parse::ctx`
+/// and the topbar read (a unit test parses fixtures masked and whole and compares); what it drops
+/// is never rendered: the end screen, the structured-description panel, ticket and merchandise
+/// shelves, the lockups' menus and colour palettes, tracking.
+pub const NEXT_FIELDS: &str = concat!(
+    "responseContext,currentVideoEndpoint,topbar,frameworkUpdates,",
+    "contents/twoColumnWatchNextResults(",
+    "results/results/contents(videoPrimaryInfoRenderer(title,viewCount,dateText,relativeDateText,videoActions/menuRenderer/topLevelButtons/segmentedLikeDislikeButtonViewModel),",
+    "videoSecondaryInfoRenderer(owner,subscribeButton,attributedDescription,description),itemSectionRenderer),",
+    "secondaryResults/secondaryResults/results(",
+    next_rel!(),
+    ",itemSectionRenderer(sectionIdentifier,targetId,contents(",
+    next_rel!(),
+    "))),playlist,autoplay),",
+    "engagementPanels/engagementPanelSectionListRenderer(panelIdentifier,header,content(sectionListRenderer,macroMarkersListRenderer)),",
+    "playerOverlays/playerOverlayRenderer/decoratedPlayerBarRenderer"
+);
+
+static UNMASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `next` goes out with `NEXT_FIELDS` (until YouTube refused it once in this document).
+pub fn masked() -> bool {
+    !UNMASKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// YouTube answered a masked request with HTTP 400 (a field it no longer knows): whole answers from now on.
+pub fn unmask() {
+    UNMASKED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The window, as YouTube's web app describes it in its requests (`bridge::viewport`).
@@ -279,6 +330,120 @@ mod tests {
         let h: Value = serde_json::from_str(&headers(&cfg, &Auth::default(), 1)).unwrap();
         assert!(h.get("Authorization").is_none());
     }
+    /// A `fields=` mask applied the way InnerTube applies it (arrays are transparent; a name
+    /// without a sub-selection keeps its whole subtree).
+    #[derive(Default, Debug)]
+    struct Mask(std::collections::BTreeMap<String, Mask>);
+
+    fn mask_parse(s: &str) -> Mask {
+        fn list(b: &[u8], i: &mut usize, m: &mut Mask) {
+            loop {
+                item(b, i, m);
+                if *i < b.len() && b[*i] == b',' {
+                    *i += 1;
+                } else {
+                    return;
+                }
+            }
+        }
+        fn item(b: &[u8], i: &mut usize, m: &mut Mask) {
+            let start = *i;
+            while *i < b.len() && (b[*i].is_ascii_alphanumeric() || b[*i] == b'_' || b[*i] == b'*') {
+                *i += 1;
+            }
+            let name = std::str::from_utf8(&b[start..*i]).unwrap().to_string();
+            assert!(!name.is_empty(), "mask syntax at {start}");
+            let sub = m.0.entry(name).or_default();
+            if *i < b.len() && b[*i] == b'/' {
+                *i += 1;
+                item(b, i, sub);
+            } else if *i < b.len() && b[*i] == b'(' {
+                *i += 1;
+                list(b, i, sub);
+                assert_eq!(b.get(*i), Some(&b')'), "unbalanced mask");
+                *i += 1;
+            }
+        }
+        let mut m = Mask::default();
+        let mut i = 0;
+        list(s.as_bytes(), &mut i, &mut m);
+        assert_eq!(i, s.len(), "mask parsed to the end");
+        m
+    }
+
+    fn mask_apply(m: &Mask, v: &Value) -> Value {
+        if m.0.is_empty() {
+            return v.clone();
+        }
+        match v {
+            Value::Object(o) => Value::Object(o.iter().filter_map(|(k, x)| m.0.get(k).map(|sub| (k.clone(), mask_apply(sub, x)))).collect()),
+            Value::Array(a) => Value::Array(a.iter().map(|x| mask_apply(m, x)).collect()),
+            x => x.clone(),
+        }
+    }
+
+    /// Whole and masked parse alike: everything the watch page reads survives `NEXT_FIELDS`.
+    fn masked_parses_alike(full: &Value) -> (usize, usize) {
+        let m = mask_parse(NEXT_FIELDS);
+        let masked = mask_apply(&m, full);
+        let (a, b) = (full.to_string(), masked.to_string());
+        let wa = crate::parse::next(&crate::json::parse_str(&a).unwrap());
+        let wb = crate::parse::next(&crate::json::parse_str(&b).unwrap());
+        assert_eq!(format!("{wa:?}"), format!("{wb:?}"));
+        let ca = crate::parse::ctx(&crate::json::parse_str(&a).unwrap());
+        let cb = crate::parse::ctx(&crate::json::parse_str(&b).unwrap());
+        assert_eq!(format!("{ca:?}"), format!("{cb:?}"));
+        let ta = crate::actions::notify::topbar(&crate::json::parse_str(&a).unwrap());
+        let tb = crate::actions::notify::topbar(&crate::json::parse_str(&b).unwrap());
+        assert_eq!(format!("{ta:?}"), format!("{tb:?}"));
+        (a.len(), b.len())
+    }
+
+    #[test]
+    fn next_mask_keeps_what_the_watch_page_reads() {
+        let m = mask_parse(NEXT_FIELDS);
+        assert!(["contents", "engagementPanels", "playerOverlays", "responseContext"].iter().all(|k| m.0.contains_key(*k)));
+        for f in ["next.json", "chapters_next.json", "next_list.json"] {
+            let full = crate::util::test_fixture(f).to_serde();
+            let w = crate::parse::next(&crate::util::test_fixture(f));
+            assert!(!w.title.is_empty() && !w.related.items.is_empty(), "{f}: a real watch page");
+            let (a, b) = masked_parses_alike(&full);
+            assert!(b < a, "{f}: {b} < {a}");
+        }
+        // The URL: only `next` carries it; every other request is unchanged.
+        assert!(Req::Next { v: "aqz-KE-bpKQ".into() }.send_url().contains("&fields=responseContext%2CcurrentVideoEndpoint"));
+        assert!(Req::NextList { v: "aqz-KE-bpKQ".into(), list: "PLx".into() }.send_url().contains("&fields="));
+        assert_eq!(Req::Search { q: "a".into(), params: None }.send_url(), Req::Search { q: "a".into(), params: None }.url());
+        assert_eq!(Req::Cont { ep: "next", token: "t".into() }.send_url(), Req::Cont { ep: "next", token: "t".into() }.url());
+    }
+
+    /// Live check (by hand): `YTC_NEXT_DIR=<dir of whole next answers> cargo test -- --ignored next_mask_live`.
+    #[test]
+    #[ignore]
+    fn next_mask_live() {
+        let dir = std::env::var("YTC_NEXT_DIR").expect("YTC_NEXT_DIR");
+        let (mut n, mut a, mut b) = (0, 0, 0);
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.to_string_lossy().to_string();
+            if name.ends_with(".masked.json") {
+                continue;
+            }
+            let full: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            let (x, y) = masked_parses_alike(&full);
+            (n, a, b) = (n + 1, a + x, b + y);
+            // YouTube's own masked answer (fetched right after): the same page, field by field.
+            let Ok(m) = std::fs::read(name.replace(".json", ".masked.json")) else { continue };
+            let (wa, wb) = (crate::parse::next(&crate::json::parse(&serde_json::to_vec(&full).unwrap()).unwrap()), crate::parse::next(&crate::json::parse(&m).unwrap()));
+            let sum = |w: &crate::parse::Watch| {
+                ((w.id.clone(), w.title.clone(), w.channel.clone(), w.channel_href.clone(), w.avatar.is_some(), w.subs.is_empty(), w.date.is_empty(), w.desc.len(), w.acts.like.is_some(), w.acts.channel_id.clone()),
+                    (w.acts.sub_params.is_some(), w.acts.comments.is_some(), w.acts.comments_off.clone(), w.acts.sorts.len(), w.acts.chapters.len(), w.up.auto.is_some(), w.up.playlist.as_ref().map(|p| p.items.len()), w.related.items.len() > 10, w.related.cont.is_some()))
+            };
+            assert_eq!(sum(&wa), sum(&wb), "{name}");
+        }
+        eprintln!("{n} answers: whole {a} bytes, masked {b} bytes ({:.0} %)", 100.0 * b as f64 / a.max(1) as f64);
+    }
+
     #[test]
     fn home_body_like_youtubes() {
         let mut cfg = Config::default();
