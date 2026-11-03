@@ -78,7 +78,7 @@ const YTC = (() => {
     }, { passive: true, capture: true });
     // Keyboard focus on a link is intent too (prefetch before Enter).
     d.addEventListener('focusin', e => { const a = e.target.closest && e.target.closest('a[href]'); if (a) call('on_intent', a.getAttribute('href')); });
-    d.addEventListener('visibilitychange', () => { if (d.visibilityState === 'hidden') call('on_hide'); });
+    d.addEventListener('visibilitychange', () => { call(d.visibilityState === 'hidden' ? 'on_hide' : 'on_show'); });
     d.addEventListener('keydown', e => {
       if (e.altKey) return;
       // Ctrl/⌘ combinations outside text fields are offered as `Mod+<key>`; unhandled ones stay the browser's.
@@ -471,6 +471,8 @@ const YTC = (() => {
     session_del(key) { try { sessionStorage.removeItem(key); } catch {} },
     nav_type() { try { return performance.getEntriesByType('navigation')[0].type; } catch { return 'navigate'; } },
     width: () => innerWidth,
+    // The window as a web app describes it to its server: size, pixel ratio, dark preference, Web Share.
+    viewport: () => JSON.stringify({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1, dark: matchMedia('(prefers-color-scheme: dark)').matches, share: typeof navigator.share === 'function' }),
     observe(id) { const el = byId(id); if (el && io) { io.unobserve(el); io.observe(el); } },
     post(id, msg, origin) { const f = byId(id); if (f && f.contentWindow) f.contentWindow.postMessage(msg, origin); },
     mark(name) { d.documentElement.dataset[name] = perf.now().toFixed(1); },

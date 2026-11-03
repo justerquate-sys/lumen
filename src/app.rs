@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 mod fxglue;
+mod homeready;
 mod logo;
 mod motionglue;
 mod speed;
@@ -143,6 +144,10 @@ enum Purpose {
     Suggest { q: String },
     Config { retry_nav: Option<u32> },
     VisionPrefetch { v: String, spec: bool, route: crate::api::VisionRoute },
+    /// The ready Home response (`app/homeready.rs`): its page, then its first continuation; sent
+    /// under taint `generation` for account `acct`.
+    Ready { generation: u32, acct: String },
+    ReadyCont { generation: u32, acct: String },
 }
 
 struct Pending {
@@ -181,6 +186,12 @@ enum Timer {
     TvPoll { generation: u32 },
     /// TV: a focus check after a paint (the old page may drop the focus while it goes).
     TvFocus,
+    /// Idle time for refilling the ready Home response (`lazy`: after an event or expiry).
+    ReadyFill { lazy: bool },
+    /// Home navigation `nav`'s request is late: send the hedge.
+    Hedge { nav: u32 },
+    /// Home navigation `nav` still has no answer: show the old Home dimmed.
+    HomeSlow { nav: u32 },
 }
 
 #[derive(PartialEq)]
@@ -208,8 +219,6 @@ struct FeedState {
     cont: Option<String>,
     cont_ep: &'static str,
     seen: HashSet<String>,
-    /// When its first page came from YouTube (epoch ms; a snapshot's write time).
-    at: f64,
 }
 
 pub struct App {
@@ -334,6 +343,11 @@ pub struct App {
     direct: bool,
     /// TV mode (`app/tvglue.rs`).
     tv: tvglue::Tv,
+    /// The ready Home response, the Home request's hedge (`app/homeready.rs`).
+    hr: homeready::HomeReady,
+    /// A new tab's first Home request waits for the stored config (its visitor: without it a
+    /// signed-out visitor gets YouTube's empty Home instead of their own).
+    home_hold: bool,
 }
 
 /// Watch-data cache key: the video, plus its playlist (the `next` response differs).
@@ -463,10 +477,24 @@ pub fn boot() {
         logo: Default::default(),
         direct: false,
         tv: tvglue::Tv::new(tv_hold),
+        hr: Default::default(),
+        home_hold: false,
     };
     app.tel_boot();
     let nav_type = bridge::nav_type();
-    let snap = app.read_snap();
+    if matches!(app.route, Route::Watch { .. }) {
+        // A video: YouTube's next Home differs from the ready one.
+        crate::ready::taint();
+    }
+    // Home loaded or reloaded (not back/forward): YouTube's answer for this request, never this
+    // tab's old Home first. The ready response when there is one, else the skeleton and the request.
+    let home = app.route == Route::Home && nav_type != "back_forward" && !app.tv.hold;
+    let ready = if home { app.ready_take() } else { None };
+    if home && ready.is_none() && app.cfg.visitor.is_none() && !crate::tv::on() {
+        app.home_hold = true;
+    }
+    // (TV cold start holding for the token: the skeleton until it answers, no request without it.)
+    let snap = if home || app.tv.hold { None } else { app.read_snap() };
     let restore_scroll = snap.as_ref().filter(|_| nav_type == "back_forward").map(|s| s.scroll);
     let fresh_enough = snap.as_ref().is_some_and(|s| bridge::epoch() - s.at < SNAP_FRESH_MS);
     // A snapshot's refresh goes out before the snapshot is rendered: it travels while the page
@@ -492,6 +520,8 @@ pub fn boot() {
     app.tv_boot();
     if app.tv.hold {
         // TV cold start: the skeleton shows until the shell's token answer (`tv_release`).
+    } else if let Some(r) = ready {
+        app.ready_show(r);
     } else if main.is_some() {
         crate::telemetry::nav_src("snapshot");
         bridge::mark("ytcRepaint");
@@ -535,7 +565,10 @@ impl App {
     fn send(&mut self, req: Req, purpose: Purpose, low: bool) -> u32 {
         let id = next_id();
         self.auth = crate::tv::auth();
-        let body = req.body(&self.cfg, &self.hl, &self.url);
+        // Home goes out exactly as YouTube's web app sends it (window fields included).
+        // (TV signed in: `tv::finish` below turns it into the TVHTML5 request with the access token.)
+        let home = matches!(&req, Req::Browse { id, params: None } if id == "FEwhat_to_watch");
+        let body = if home { crate::api::home_body(&self.cfg, &self.hl, &crate::api::Viewport::from_json(&bridge::viewport())) } else { req.body(&self.cfg, &self.hl, &self.url) };
         // TV: the account's feeds go out as the TV client with the bearer, everything else anonymous.
         let auth = if self.auth.bearer.is_some() && !self.tv_account_req(&req) { crate::config::Auth::default() } else { self.auth.clone() };
         let (body, headers) = crate::tv::finish(&self.cfg, &auth, body, (bridge::epoch() / 1000.0) as u64);
@@ -549,7 +582,8 @@ impl App {
             self.mark("request");
         }
         let nav = self.nav;
-        self.send(req, Purpose::Page { nav }, false);
+        let id = self.send(req, Purpose::Page { nav }, false);
+        self.home_sent(id);
     }
 
     fn refresh_config(&mut self, retry_nav: Option<u32>) {
@@ -674,7 +708,6 @@ impl App {
             buf,
             cont: sn.cont,
             cont_ep: sn.cont_ep,
-            at: sn.at,
         };
         self.fx_new_feed();
         let title = self.head_title();
@@ -767,6 +800,9 @@ impl App {
         }
         self.route = route;
         self.url = url;
+        if matches!(self.route, Route::Watch { .. }) {
+            crate::ready::taint();
+        }
         self.tel_nav(mode == Mode::Pop);
         self.spec_cancel();
         bridge::attr("ytc", "data-nav", self.route.nav_key());
@@ -797,6 +833,14 @@ impl App {
                 return;
             }
         }
+        // Home: the ready response (YouTube's answer, fetched ahead) is the page.
+        if mode == Mode::Push && self.route == Route::Home {
+            if let Some(r) = self.ready_take() {
+                bridge::scroll_to(0.0);
+                self.ready_show(r);
+                return;
+            }
+        }
         // A first page already in memory (the logo's or a hover prefetch, the background refresh)
         // is the page: written at once over the old one, instead of its older snapshot followed by
         // a second render of the same page in the same task.
@@ -807,7 +851,8 @@ impl App {
             self.load();
             return;
         }
-        let sn = self.read_snap();
+        // Going Home is a new Home from YouTube: the skeleton, never the old Home first.
+        let sn = if mode == Mode::Push && self.route == Route::Home { None } else { self.read_snap() };
         if matches!(self.route, Route::Home | Route::Subs) {
             self.perf.hit("feed-snapshot", sn.is_some());
         }
@@ -834,6 +879,7 @@ impl App {
     /// A page painted from memory or a snapshot is ready to use.
     fn after_paint(&mut self) {
         self.rendered = true;
+        self.ready_lazy(false);
         self.tv_after_paint();
         self.spec_schedule();
         if self.perf_nav != self.nav && self.nav > 1 {
@@ -902,6 +948,10 @@ impl App {
                 if !self.first_ready_pending() {
                     bridge::html(MAIN, &render::skeleton(&self.route));
                 }
+                if self.home_hold {
+                    // Sent as soon as the stored config answers (`on_storage`).
+                    return;
+                }
             }
         }
         self.load();
@@ -930,6 +980,7 @@ impl App {
         if let Some(i) = hit {
             let (_, body, _) = self.page_cache.remove(i);
             crate::telemetry::nav_src("prefetch");
+            bridge::mark_val("ytcHomeSrc", "prefetch");
             self.mark("request");
             self.mark("prefetched");
             self.on_page_body(200, &body);
@@ -937,6 +988,7 @@ impl App {
         }
         if self.page_prefetching.contains_key(&key) {
             crate::telemetry::nav_src("inflight");
+            bridge::mark_val("ytcHomeSrc", "inflight");
             self.mark("request");
             self.await_page = Some(key);
             return;
@@ -1001,7 +1053,17 @@ impl App {
             bridge::session_set(CFG_SESSION, &self.cfg.to_json());
         }
         self.cfg_ready = true;
-        if au_changed && !matches!(self.route, Route::Watch { .. }) {
+        let hold = std::mem::take(&mut self.home_hold);
+        if hold && !au_changed && self.route == Route::Home && !self.rendered {
+            if self.cfg.visitor.is_some() {
+                self.load();
+            } else {
+                // Never stored either (a first run): YouTube's own visitor first (sw.js_data), then Home.
+                self.refresh_config(Some(self.nav));
+            }
+        }
+        // (TV: a first page still held for the token has not gone out; it uses this config when it does.)
+        if au_changed && !self.tv.hold && !matches!(self.route, Route::Watch { .. }) {
             // The first request went out for another account index: redo the page.
             self.abort_nav_requests();
             self.swr = false;
@@ -1062,16 +1124,20 @@ impl App {
                 }
             }
             Some(Timer::NetProbe) => {
-                if self.offline && self.player_failed.is_some() {
+                if self.hr.offline || (self.offline && self.player_failed.is_some()) {
                     self.net_probe();
                 }
             }
             Some(Timer::TvHold) => self.tv_release(),
             Some(Timer::TvPoll { generation }) => self.tv_poll(generation),
             Some(Timer::TvFocus) => self.tv_focus_check(),
+            Some(Timer::ReadyFill { lazy }) => self.ready_timer(lazy),
+            Some(Timer::Hedge { nav }) => self.home_hedge(nav),
+            Some(Timer::HomeSlow { nav }) => self.home_slow(nav),
             Some(Timer::Bg) => {
                 self.tv_tick();
                 self.bg_check();
+                self.ready_lazy(false);
                 let id = self.timer(Timer::Bg);
                 bridge::timer(id, BG_TICK_MS);
             }
@@ -1244,8 +1310,11 @@ impl App {
         if url == self.route.url() {
             return;
         }
-        if matches!(route::parse(url), Some(Route::Home | Route::Subs)) && self.snap_fresh(url) {
-            return;
+        match route::parse(url) {
+            // Home paints the ready response when there is one (no request needed).
+            Some(Route::Home) if self.ready_waiting() => return,
+            Some(Route::Subs) if self.snap_fresh(url) => return,
+            _ => {}
         }
         self.prefetch_page_now(url);
     }
@@ -1578,6 +1647,10 @@ impl App {
         self.tel_flush(true);
     }
 
+    pub fn on_show(&mut self) {
+        self.ready_shown();
+    }
+
     pub fn on_visible(&mut self, id: &str) {
         if self.acts.on_visible(&net!(self), id) {
             return;
@@ -1769,7 +1842,13 @@ impl App {
                 }
                 self.kick_player();
             }
-            Purpose::NetProbe => self.on_net_probe(status),
+            Purpose::NetProbe => {
+                if !self.home_probe(status) {
+                    self.on_net_probe(status);
+                }
+            }
+            Purpose::Ready { generation, acct } => self.ready_body(id, generation, acct, false, status, body),
+            Purpose::ReadyCont { generation, acct } => self.ready_body(id, generation, acct, true, status, body),
             Purpose::VisionPrefetch { v, route, .. } => {
                 self.vision_prefetching.remove(&v);
                 let ms = bridge::now() - p.sent;
@@ -1889,7 +1968,12 @@ impl App {
                 self.on_cont_body(status, body);
             }
             Purpose::Page { nav } => {
-                if nav != self.nav {
+                if nav != self.nav || !self.home_answered(id, status) {
+                    return;
+                }
+                if status == 0 && self.route == Route::Home {
+                    // A dropped connection: the old Home dimmed (if any) until it is back.
+                    self.home_offline();
                     return;
                 }
                 self.on_page_body(status, body);
@@ -1952,6 +2036,7 @@ impl App {
             if bridge::scroll_y() > SWAP_MAX_Y {
                 self.held = Some(body.to_vec());
                 bridge::html(PILL, render::FRESH_PILL);
+                self.home_fresh_painted();
                 return;
             }
         }
@@ -2041,25 +2126,8 @@ impl App {
                 (head.clone(), head.title().to_string(), p.feed, "browse", "This playlist is empty.")
             }
             Route::Home => {
-                self.fx_home_response(json);
-                let f = parse::browse(json);
-                // Nothing to show (hidden Shorts don't count): the nudge page, as before.
-                if self.counted(&f.items) == 0 {
-                    let nudge = f.nudge.clone().unwrap_or_else(|| "Search to get started.".into());
-                    self.mark("parsed");
-                    bridge::html(MAIN, &render::home_nudge(&nudge, self.auth.signed_in()));
-                    self.stats.merge(&f.stats);
-                    self.feed = FeedState { cont_ep: "browse", ..Default::default() };
-                    self.set_title("");
-                    self.rendered = true;
-                    self.mark("rendered");
-                    self.ready();
-                    return;
-                }
-                if self.nav > 1 {
-                    self.perf.nav("nav:home-fresh", bridge::now() - self.nav_start);
-                }
-                (render::feed_head("Home"), String::new(), f, "browse", "Nothing here yet.")
+                self.home_from_json(json);
+                return;
             }
             Route::Subs => (render::feed_head("Subscriptions"), "Subscriptions".into(), parse::browse(json), "browse", "No videos from your subscriptions."),
             Route::History => (render::feed_head("History"), "History".into(), parse::browse(json), "browse", "Your watch history is empty or turned off."),
@@ -2068,7 +2136,7 @@ impl App {
         };
         self.mark("parsed");
         let empty = feed.alert.clone().unwrap_or_else(|| empty.to_string());
-        self.show_feed(head, feed, ep, &empty);
+        self.show_feed(head, feed, ep, &empty, Vec::new());
         self.set_title(&title);
         self.mark("rendered");
         if self.first_ready {
@@ -2077,23 +2145,62 @@ impl App {
         self.after_paint();
     }
 
+    /// Home from YouTube (a response, or the ready response: `extra` its preloaded continuation
+    /// items).
+    fn show_home(&mut self, f: Feed, extra: Vec<Item>) {
+        // Nothing to show (hidden Shorts don't count): the nudge page, as before.
+        if self.counted(&f.items) + self.counted(&extra) == 0 {
+            let nudge = f.nudge.clone().unwrap_or_else(|| "Search to get started.".into());
+            self.mark("parsed");
+            bridge::html(MAIN, &render::home_nudge(&nudge, self.auth.signed_in()));
+            self.home_fresh_painted();
+            self.stats.merge(&f.stats);
+            self.feed = FeedState { cont_ep: "browse", ..Default::default() };
+            self.set_title("");
+            self.rendered = true;
+            self.swr = false;
+            self.mark("rendered");
+            self.ready();
+            return;
+        }
+        if self.nav > 1 {
+            self.perf.nav("nav:home-fresh", bridge::now() - self.nav_start);
+        }
+        self.mark("parsed");
+        let empty = f.alert.clone().unwrap_or_else(|| "Nothing here yet.".to_string());
+        self.show_feed(render::feed_head("Home"), f, "browse", &empty, extra);
+        self.home_fresh_painted();
+        self.swr = false;
+        self.set_title("");
+        self.mark("rendered");
+        if self.first_ready {
+            bridge::mark("ytcFresh");
+        }
+        // The next Home is fetched in idle time (before `after_paint` schedules a lazy one).
+        self.ready_after_home();
+        self.after_paint();
+    }
+
     /// Replaces the page with a fresh feed (first response).
-    fn show_feed(&mut self, head: Head, mut feed: Feed, ep: &'static str, empty: &str) {
+    fn show_feed(&mut self, head: Head, mut feed: Feed, ep: &'static str, empty: &str, mut extra: Vec<Item>) {
         self.admit(&mut feed.items);
+        self.admit(&mut extra);
         self.generation += 1;
         self.cont_busy = false;
         self.want = false;
         self.cols = render::grid_cols(bridge::width());
         self.stats.merge(&feed.stats);
         self.remember(&feed.items);
+        self.remember(&extra);
+        let mut seen: HashSet<String> = feed.items.iter().map(|i| i.key().to_string()).collect();
+        extra.retain(|i| seen.insert(i.key().to_string()));
         self.feed = FeedState {
-            seen: feed.items.iter().map(|i| i.key().to_string()).collect(),
+            seen,
             head: Some(head),
             shown: feed.items,
-            buf: Vec::new(),
+            buf: extra,
             cont: feed.cont,
             cont_ep: ep,
-            at: bridge::epoch(),
         };
         self.fx_new_feed();
         let head = self.feed.head.as_ref().expect("head set above");
@@ -2132,7 +2239,6 @@ impl App {
             buf: Vec::new(),
             cont: w.related.cont.clone(),
             cont_ep: "next",
-            at: bridge::epoch(),
         };
         self.set_title(&w.title);
         self.up_render(w, &v);

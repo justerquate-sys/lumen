@@ -147,6 +147,15 @@ pub fn init(dir: PathBuf) {
         offer: Mutex::new(None),
         status: Mutex::new(status),
     });
+    // Home reload, early start: a new process holds no access token, and the client's first account
+    // request (Home) waits for `auth_token`, which would refresh it only then. The refresh starts
+    // now, in parallel with the WebView, the document and the client's Wasm; the page's
+    // `auth_token` call waits on the same lock and gets the fresh token without a second request.
+    std::thread::spawn(|| {
+        if let Some(s) = get() {
+            let _ = s.account.lock().unwrap().token(&s.http, now());
+        }
+    });
 }
 
 impl Shell {

@@ -312,7 +312,7 @@ function googlevideo(route, url) {
 }
 // ---- signed-in-like Home: real channel lockups as page 1, then five browse
 // continuations with fresh video ids (HOMECONT1…5) = 180 videos.
-const HOME = { rich: false, delay: 0, latency: 0, stamp: false, served: 0 };
+const HOME = { rich: false, delay: 0, latency: 0, stamp: false, served: 0, stall: 0, aborted: 0 };
 // Simulated `next` latency (speed table).
 const NEXT = { latency: 0 };
 const ids11 = str => [...new Set([...str.matchAll(/"contentId":"([A-Za-z0-9_-]{11})"/g)].map(m => m[1]))];
@@ -505,6 +505,13 @@ async function handle(route) {
     if (out && out.status) return route.fulfill({ status: out.status, contentType: 'application/json', body: out.body });
     if (out && ACTS.signedIn && (ep === 'next' || ep === 'browse') && !body.continuation) { const o = JSON.parse(out); o.topbar = SIGNED_TOPBAR; out = JSON.stringify(o); }
     const home = ep === 'browse' && (body.browseId === 'FEwhat_to_watch' || body.continuation?.startsWith('HOME'));
+    // A dropped connection fails Home at once; HOME.stall: the next N first-page requests hang (a hedge test).
+    if (home && NET.down) return route.abort('internetdisconnected');
+    if (home && !body.continuation && HOME.stall > 0) {
+      HOME.stall--;
+      await new Promise(r => setTimeout(r, 12000));
+      return route.fulfill({ status: 200, contentType: 'application/json', body: out }).catch(() => { HOME.aborted++; });
+    }
     if (home && (HOME.latency || (HOME.delay && !body.continuation))) await new Promise(r => setTimeout(r, HOME.latency + (body.continuation ? 0 : HOME.delay)));
     if (ep === 'next' && NEXT.latency && !body.continuation && !masked) await new Promise(r => setTimeout(r, NEXT.latency));
     return out ? route.fulfill({ status: 200, contentType: 'application/json', body: out }) : route.fulfill({ status: 404, body: '{}' });
@@ -857,20 +864,147 @@ chrome.runtime.onMessage.addListener(m => {
     assert.deepEqual(pre.filter(h => !h.endsWith('.googlevideo.com/')), ['https://i.ytimg.com/', 'https://yt3.ggpht.com/']);
   });
 
-  await step('reload paints the sessionStorage snapshot before InnerTube answers, then refreshes in place (no layout jump)', async () => {
+  await step('Home reload: YouTube\'s answer on the first frame, from the ready response (fetched ahead once, used once, never the old Home first); expiry, sign-in change and watching discard it', async () => {
     await page.evaluate(() => scrollTo(0, 0));
-    HOME.delay = 700;
-    await page.reload({ waitUntil: 'commit' });
-    await page.waitForFunction(() => document.documentElement.dataset.ytcRepaint && document.querySelectorAll('#ytc-list .c').length >= 30);
-    const early = await page.evaluate(() => ({ fresh: document.documentElement.dataset.ytcFresh, top: document.querySelector('#ytc-list .c:nth-child(9)').getBoundingClientRect().top, h: document.body.scrollHeight }));
-    assert.equal(early.fresh, undefined, 'painted before the response');
-    await page.waitForFunction(() => document.documentElement.dataset.ytcFresh, null, { timeout: 5000 });
-    HOME.delay = 0;
-    const top = await page.evaluate(() => document.querySelector('#ytc-list .c:nth-child(9)').getBoundingClientRect().top);
-    assert.equal(top, early.top, 'cards did not move when the fresh feed replaced the snapshot');
-    const snap = await page.evaluate(() => ({ keys: Object.keys(sessionStorage), home: JSON.parse(sessionStorage.getItem('ytc:snap:/') || 'null') }));
-    assert.ok(snap.keys.includes('ytc:snap:/') && snap.keys.includes('ytc:snaps'), snap.keys.join());
-    assert.ok(snap.home.i.length >= 100 && snap.home.h.k === 'f', 'snapshot holds parsed items, not HTML');
+    const wasRich = HOME.rich;
+    HOME.rich = true; HOME.stamp = true;
+    // Every document: the first frame that shows Home cards, and every write of #ytc-main.
+    await page.addInitScript(() => {
+      const w = window.__home = { first: null, frames: 0, writes: 0 };
+      const tick = () => {
+        const t = document.querySelector('#ytc-list .c[data-v] .t');
+        if (t && w.first === null) { w.first = t.textContent; w.firstAt = performance.now(); w.upd = document.getElementById('ytc-main')?.dataset.upd || ''; }
+        if (++w.frames < 2000) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      new MutationObserver(ms => { for (const m of ms) if (m.target.id === 'ytc-main') w.writes++; }).observe(document, { childList: true, subtree: true });
+    });
+    const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
+    const stamp = t => +((/Fresh #(\d+)/.exec(t || '') || [])[1] || 0);
+    const ready = () => page.evaluate(() => { const r = JSON.parse(sessionStorage.getItem('ytc:ready') || 'null'); return r && { n: r.i.length, first: r.f, title: r.i[0].t, at: r.t, cont: !!r.c }; });
+    const waitReady = () => page.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+    const home = () => page.evaluate(() => ({ ...window.__home, src: document.documentElement.dataset.ytcHomeSrc, title: document.querySelector('#ytc-list .c[data-v] .t')?.textContent }));
+    try {
+      // (A ready response fetched before the stamps were on would be the page: start without one.)
+      await page.evaluate(() => sessionStorage.removeItem('ytc:ready'));
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''));
+      // 1. After the paint, in idle time, the Home request once more (low priority) and its first continuation.
+      await waitReady();
+      const r1 = await ready();
+      assert.ok(r1.first > 0 && r1.n > r1.first && r1.cont, `first page + its continuation ${JSON.stringify(r1)}`);
+      const shown = stamp((await home()).title);
+      assert.ok(stamp(r1.title) > shown, 'a new answer, not the one on screen');
+      const lowReady = prio.filter(x => x.post.includes('FEwhat_to_watch')).at(-1);
+      assert.equal(lowReady.p, 'Low', 'fetched at low priority');
+      // 2. Reload: the ready response is the page on the first frame with cards, without a Home request
+      //    before it; exactly one Home request afterwards (the next ready response), sent after the paint.
+      HOME.delay = 700;
+      const n0 = homeReqs().length, t0 = Date.now();
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => window.__home && window.__home.first !== null);
+      let h = await home();
+      assert.equal(stamp(h.first), stamp(r1.title), 'the first cards are the ready response');
+      assert.equal(h.src, 'ready');
+      assert.equal(await page.evaluate(() => document.documentElement.dataset.ytcRepaint), undefined, 'no snapshot repaint');
+      assert.equal(await page.evaluate(() => sessionStorage.getItem('ytc:ready')), null, 'used up: taken out at once');
+      const after = homeReqs().slice(n0);
+      assert.ok(after.every(a => a.t - t0 > h.firstAt - 50), 'no Home request before the paint');
+      // 3. Reloading again before the next one has landed: the skeleton and YouTube's answer (never the old Home first).
+      await page.waitForTimeout(150);
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => window.__home && window.__home.first !== null, null, { timeout: 5000 });
+      h = await home();
+      assert.equal(h.src, 'network');
+      assert.ok(stamp(h.first) > stamp(r1.title), `the first cards are a new answer (${h.first})`);
+      HOME.delay = 0;
+      // 4. Expired (older than 10 min): not used.
+      await waitReady();
+      await page.evaluate(() => { const r = JSON.parse(sessionStorage.getItem('ytc:ready')); r.t -= 11 * 60000; sessionStorage.setItem('ytc:ready', JSON.stringify(r)); });
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => window.__home && window.__home.first !== null);
+      assert.equal((await home()).src, 'network', 'an expired ready response is not used');
+      // 5. Signing in (another account key): not used.
+      await waitReady();
+      await ctx.addCookies([{ name: 'SAPISID', value: 'e2e-ready-account', domain: '.youtube.com', path: '/', secure: true }]);
+      try {
+        await page.reload({ waitUntil: 'commit' });
+        await page.waitForFunction(() => window.__home && window.__home.first !== null);
+        assert.equal((await home()).src, 'network', 'another account: not used');
+      } finally { await ctx.clearCookies({ name: 'SAPISID' }); }
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => window.__home && window.__home.first !== null);
+      // 6. Opening a video discards it (watching changes what YouTube recommends); nothing is fetched
+      //    ahead on the watch page; Home afterwards asks YouTube.
+      await waitReady();
+      await page.click('#ytc-list a.t[href^="/watch"]');
+      await page.waitForSelector('#ytc-info h1.wt');
+      assert.equal(await page.evaluate(() => sessionStorage.getItem('ytc:ready')), null, 'watching discards it');
+      const n1 = homeReqs().length;
+      await page.waitForTimeout(2500);
+      assert.equal(homeReqs().length, n1, 'nothing fetched ahead on a watch page');
+      await page.mouse.move(700, 450);
+      const tc = Date.now();
+      await page.click('#ytc-logo');
+      await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''));
+      assert.ok(homeReqs().length > n1 && homeReqs()[n1].t >= tc - 100, 'Home asked YouTube when it was opened');
+      assert.notEqual(await page.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
+      // 7. Feeds stay in this tab: the ready response is in sessionStorage only (checked with chrome.storage in the next steps).
+      await waitReady();
+      assert.deepEqual(await page.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('ytc:'))), []);
+    } finally { HOME.delay = 0; HOME.stamp = false; HOME.rich = wasRich; }
+  });
+
+  await step('Home request hedged: a stalled first request gets an identical second one at the deadline; the first answer paints once and the other is aborted; past 4 s the old Home shows dimmed ("Updating…"), offline it waits for the connection', async () => {
+    const wasRich = HOME.rich;
+    HOME.rich = true; HOME.stamp = true;
+    const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
+    const failed = [];
+    const onFail = r => { if (r.url().includes('/youtubei/v1/browse')) failed.push(r.failure()?.errorText); };
+    page.on('requestfailed', onFail);
+    try {
+      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); sessionStorage.setItem('ytc:bt', '120,140,150,160,170,180'); });
+      // 1. The first request hangs: the hedge goes out at this tab's p90 (clamped to ≥ 0.7 s) and paints.
+      HOME.stall = 1; HOME.aborted = 0;
+      const n0 = homeReqs().length;
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => window.__home && window.__home.first !== null, null, { timeout: 5000 });
+      const h = await page.evaluate(() => ({ ...window.__home, hedge: document.documentElement.dataset.ytcHedge }));
+      const reqs = homeReqs().slice(n0);
+      assert.equal(reqs.length, 2, 'the request and its hedge');
+      assert.equal(JSON.stringify(reqs[0].body), JSON.stringify(reqs[1].body), 'identical requests');
+      const gap = reqs[1].t - reqs[0].t;
+      assert.ok(gap >= 650 && gap < 1200, `hedge after ${gap} ms`);
+      assert.equal(h.hedge, 'hedge', 'the hedge won');
+      assert.ok(h.firstAt < 2500, `painted at ${h.firstAt.toFixed(0)} ms`);
+      await page.waitForFunction(() => document.querySelector('#ytc-list .c[data-v]'));
+      await page.waitForTimeout(300);
+      assert.ok(failed.includes('net::ERR_ABORTED'), `the first request was aborted (${failed.join()})`);
+      const writes = await page.evaluate(() => window.__home.writes);
+      assert.ok(writes <= 2, `#ytc-main written ${writes} times (skeleton shell, then the page once)`);
+      // 2. Both late (> 4 s): the old Home dimmed with "Updating…", replaced in place when YouTube answers.
+      HOME.delay = 5200;
+      await page.evaluate(() => sessionStorage.setItem('ytc:bt', '3000,3000,3000,3000,3000,3000'));
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => document.getElementById('ytc-main')?.dataset.upd === '1', null, { timeout: 6000 });
+      const dim = await page.evaluate(() => ({ cards: document.querySelectorAll('#ytc-list .c[data-v]').length, op: getComputedStyle(document.querySelector('#ytc-main>.feed')).opacity, note: getComputedStyle(document.getElementById('ytc-main'), '::after').content, at: performance.now() }));
+      assert.ok(dim.cards > 10 && +dim.op < 0.6 && /Updating/.test(dim.note) && dim.at >= 3900, JSON.stringify(dim));
+      await page.waitForFunction(() => document.getElementById('ytc-main').dataset.upd === '' && document.documentElement.dataset.ytcFresh, null, { timeout: 4000 });
+      HOME.delay = 0;
+      // 3. Offline: the old Home dimmed with "No connection", probed every 3 s; back → it loads by itself.
+      NET.down = true; NET.probes = 0;
+      await page.reload({ waitUntil: 'commit' });
+      await page.waitForFunction(() => document.getElementById('ytc-main')?.dataset.upd === '2', null, { timeout: 5000 });
+      assert.match(await page.evaluate(() => getComputedStyle(document.getElementById('ytc-main'), '::after').content), /No connection/);
+      assert.equal(await page.evaluate(() => location.pathname), '/', 'stays in the client');
+      NET.down = false;
+      await page.waitForFunction(() => document.getElementById('ytc-main').dataset.upd === '' && document.documentElement.dataset.ytcFresh, null, { timeout: 7000 });
+      assert.ok(NET.probes >= 1);
+    } finally {
+      page.off('requestfailed', onFail);
+      HOME.stall = 0; HOME.delay = 0; HOME.stamp = false; HOME.rich = wasRich; NET.down = false;
+      await page.evaluate(() => { localStorage.removeItem('ytc-test-noready'); sessionStorage.removeItem('ytc:bt'); }).catch(() => {});
+    }
   });
 
   await step('back from another document restores Home at its scroll position without refetching', async () => {
@@ -900,7 +1034,7 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(!bytes.includes(HOME_ID0) && !bytes.includes('HOMECONT') && !bytes.includes('ytc:snap'), 'feed data in chrome.storage');
   });
 
-  await step('logo: resting on it opens Home from memory (request on enter, 250 ms dwell, mint pill fills); a pass-over or a shorter rest never navigates, a new rest starts over; click instant; keyboard unchanged; nothing while typing; Home on Home keeps the page (top, fresh only when stale)', async () => {
+  await step('logo: resting on it opens Home from memory (the ready response, else a request on enter; 250 ms dwell, mint pill fills); a pass-over or a shorter rest never navigates, a new rest starts over; click instant; keyboard unchanged; nothing while typing; Home on Home: top, then a new Home from YouTube', async () => {
     const saved = { ...HOME };
     HOME.rich = true; HOME.latency = 150; HOME.delay = 0;
     const box = await page.locator('#ytc-logo').boundingBox();
@@ -925,13 +1059,13 @@ chrome.runtime.onMessage.addListener(m => {
       await page.mouse.move(700, 450);
       await page.goto('https://www.youtube.com/results?search_query=' + q, { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-list .c[data-v]');
-      await page.evaluate(() => sessionStorage.removeItem('ytc:snap:/'));
+      await page.evaluate(() => { sessionStorage.removeItem('ytc:snap:/'); sessionStorage.removeItem('ytc:ready'); });
     };
     try {
       // 1. Rest on the logo from a results page (no Home snapshot): Home's first page is requested the moment
       // the pointer enters (not after the 70 ms hover delay) and the dwell ends in Home painted from memory.
       // (The background refresh, which would have fetched Home already, is off for this part.)
-      await page.evaluate(() => localStorage.setItem('ytc-test-nobg', '1'));
+      await page.evaluate(() => { localStorage.setItem('ytc-test-nobg', '1'); localStorage.setItem('ytc-test-noready', '1'); });
       const dwellMs = [];
       for (let i = 0; i < 3; i++) {
         await results('dwell' + i);
@@ -953,8 +1087,27 @@ chrome.runtime.onMessage.addListener(m => {
         await page.waitForTimeout(400);
         assert.equal(await page.evaluate(() => history.length), h, 'no second dwell while the pointer stays');
       }
-      await page.evaluate(() => localStorage.removeItem('ytc-test-nobg'));
+      await page.evaluate(() => { localStorage.removeItem('ytc-test-nobg'); localStorage.removeItem('ytc-test-noready'); });
       console.log(`     logo rest → Home cards (pointer enters the logo; 150 ms InnerTube latency): median ${median(dwellMs).toFixed(0)} ms`);
+      // 1b. With a ready Home response waiting, the dwell paints it: no request on enter or at the end
+      // (only the next ready response afterwards, once Home is on screen).
+      HOME.stamp = true;
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      const readyTitle = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ytc:ready')).i[0].t);
+      await page.mouse.move(700, 450);
+      await page.goto('https://www.youtube.com/results?search_query=dwellready', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c[data-v]');
+      await watch();
+      const n0 = homeReqs().length;
+      await page.mouse.move(lc.x, lc.y);
+      await page.waitForFunction(() => window.__dw.nav !== null, null, { timeout: 3000 });
+      const wr = await page.evaluate(() => window.__dw);
+      const sent = homeReqs().filter(a => a.t <= wr.navEpoch + 5);
+      assert.equal(sent.length, n0, 'no Home request on enter or at the end of the dwell');
+      assert.ok(wr.cards >= 20 && !wr.sk, 'painted on the dwell\'s frame');
+      assert.equal(await page.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), readyTitle, 'the ready response');
+      HOME.stamp = false;
       // 2. Passing over (sidebar → search, fast and slow) and resting shorter than the dwell never navigate.
       await results('pass');
       await page.mouse.move(4, lc.y);
@@ -1023,36 +1176,30 @@ chrome.runtime.onMessage.addListener(m => {
       console.log(`     scroll-under: pointerover events on the logo after the scroll: ${back.over}`);
       await page.mouse.move(lc.x + 3, lc.y);
       await page.waitForFunction(() => location.pathname === '/', null, { timeout: 1000 });
-      // 6. Home on Home: back to the top, same cards (no re-render), no history entry, no request while the feed is fresh.
+      // 6. Home on Home (like YouTube's logo on its Home): back to the top at once, no history entry, and a new
+      // Home from YouTube: the ready response when one is waiting (no request), else the request sent on enter.
+      HOME.stamp = true;
       await page.waitForSelector('#ytc-list .c[data-v]');
       await page.mouse.move(700, 450);
-      await page.evaluate(() => { document.querySelector('#ytc-list .c').dataset.keep = '1'; scrollTo(0, 900); });
+      await page.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      const next = await page.evaluate(() => JSON.parse(sessionStorage.getItem('ytc:ready')).i[0].t);
+      await page.evaluate(() => scrollTo(0, 900));
       const before = { h: await page.evaluate(() => history.length), n: homeReqs().length };
       await page.mouse.move(lc.x, lc.y); await page.waitForTimeout(400);
-      let s = await page.evaluate(() => ({ y: scrollY, keep: !!document.querySelector('#ytc-list .c[data-keep]'), h: history.length, path: location.pathname }));
-      assert.deepEqual(s, { y: 0, keep: true, h: before.h, path: '/' }, 'Home on Home: top, same page');
-      assert.equal(homeReqs().length, before.n, 'no request for a fresh feed');
-      // The click and g h do the same.
-      await page.evaluate(() => scrollTo(0, 900));
+      let s = await page.evaluate(() => ({ y: scrollY, h: history.length, path: location.pathname, t: document.querySelector('#ytc-list .c[data-v] .t').textContent }));
+      assert.deepEqual(s, { y: 0, h: before.h, path: '/', t: next }, 'Home on Home: top, the ready response');
+      assert.ok(homeReqs().slice(before.n).every(a => a.t > Date.now() - 350), 'no request at the dwell (only the next ready response after it)');
+      // Without a ready response, the click asks YouTube and replaces the page in place.
+      await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); scrollTo(0, 900); });
+      const k0 = HOME.served, n1 = homeReqs().length;
       await page.evaluate(() => document.getElementById('ytc-logo').click());
-      s = await page.evaluate(() => ({ y: scrollY, keep: !!document.querySelector('#ytc-list .c[data-keep]'), h: history.length }));
-      assert.deepEqual(s, { y: 0, keep: true, h: before.h }, 'click on Home: top, same page');
-      // A stale feed (older than the background age) is refreshed in place from the request sent on enter.
-      HOME.stamp = true;
-      await page.evaluate(() => sessionStorage.setItem('ytc:bgage', '1000'));
-      await page.mouse.move(700, 450);
-      await page.reload({ waitUntil: 'commit' });
-      await page.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 5000 });
-      const k0 = HOME.served;
-      await page.waitForTimeout(1100);
-      const n1 = homeReqs().length;
-      await page.mouse.move(lc.x, lc.y);
+      s = await page.evaluate(() => ({ y: scrollY, h: history.length }));
+      assert.deepEqual(s, { y: 0, h: before.h }, 'click on Home: top at once, no history entry');
       await page.waitForFunction(k => { const m = /Fresh #(\d+)/.exec(document.querySelector('#ytc-list .c .t')?.textContent || ''); return m && +m[1] > k; }, k0, { timeout: 2000 });
-      assert.equal(homeReqs().length, n1 + 1, 'one request (sent on enter)');
-      assert.ok(homeReqs().at(-1).t < Date.now() - 100, 'it went out before the dwell ended');
+      assert.equal(homeReqs().length, n1 + 1, 'one request');
     } finally {
       Object.assign(HOME, saved);
-      await page.evaluate(() => { sessionStorage.removeItem('ytc:bgage'); localStorage.removeItem('ytc-test-nobg'); }).catch(() => {});
+      await page.evaluate(() => { sessionStorage.removeItem('ytc:bgage'); localStorage.removeItem('ytc-test-nobg'); localStorage.removeItem('ytc-test-noready'); }).catch(() => {});
       await page.mouse.move(700, 450);
     }
   });
@@ -5611,6 +5758,58 @@ chrome.runtime.onMessage.addListener(m => {
       await tv.close();
     }
   });
+  await step('TV app (signed in): the ready Home response and the hedge are the account\'s TVHTML5 Home request with the access token; a reload paints the ready response', async () => {
+    const tv = await ctx.newPage();
+    const token = 'ya29.' + 'h'.repeat(60);
+    const wasRich = HOME.rich;
+    HOME.rich = true; HOME.stamp = true;
+    const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
+    try {
+      await tv.addInitScript(t => {
+        localStorage.setItem('ytc:platform', 'tv');
+        localStorage.setItem('ytc:shell', JSON.stringify({ auth_token: JSON.stringify({ token: t, exp: Date.now() + 3600e3 }) }));
+      }, token);
+      // (The tab's first document may boot before the init script sets the TV flag: let it settle, then
+      // start from an empty tab session.)
+      await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await tv.waitForTimeout(2500);
+      await tv.evaluate(() => { sessionStorage.clear(); localStorage.removeItem('ytc-test-noready'); });
+      const n0 = homeReqs().length;
+      await tv.reload({ waitUntil: 'commit' });
+      await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 8000 });
+      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      const reqs = homeReqs().slice(n0);
+      assert.ok(reqs.length >= 2, `the page and the ready response (${reqs.length})`);
+      for (const r of reqs) {
+        assert.equal(r.body.context.client.clientName, 'TVHTML5');
+        assert.equal(r.headers.authorization, `Bearer ${token}`);
+      }
+      const title = await tv.evaluate(() => JSON.parse(sessionStorage.getItem('ytc:ready')).i[0].t);
+      const n1 = homeReqs().length;
+      await tv.reload({ waitUntil: 'commit' });
+      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+      assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
+      assert.equal(await tv.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), title);
+      assert.ok(homeReqs().slice(n1).every(a => a.t > Date.now() - 3000), 'no Home request before the paint');
+      // A stalled TV Home request: the identical TVHTML5 request with the token at the deadline (after the
+      // next ready response has landed, so the stall meets the page's own request).
+      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      await tv.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); sessionStorage.setItem('ytc:bt', '100,100,100,100,100'); });
+      HOME.stall = 1;
+      const n2 = homeReqs().length;
+      await tv.reload({ waitUntil: 'commit' });
+      await tv.waitForFunction(() => document.documentElement.dataset.ytcHedge === 'hedge' && document.querySelector('#ytc-list .c[data-v]'), null, { timeout: 5000 });
+      const h = homeReqs().slice(n2);
+      assert.equal(h.length, 2);
+      assert.equal(JSON.stringify(h[0].body), JSON.stringify(h[1].body), 'identical bodies');
+      assert.ok(h.every(r => r.headers.authorization === `Bearer ${token}` && r.body.context.client.clientName === 'TVHTML5'), 'both with the access token');
+    } finally {
+      HOME.stall = 0; HOME.stamp = false; HOME.rich = wasRich;
+      await tv.evaluate(() => { for (const k of ['ytc:platform', 'ytc:shell', 'ytc-test-noready']) localStorage.removeItem(k); }).catch(() => {});
+      await tv.close();
+    }
+  });
+
   await step('no live network traffic; no YouTube player JS or embed ever requested', async () => {
     assert.ok(log.external.every(u => /ytimg\.com|ggpht\.com|googleusercontent\.com/.test(new URL(u).hostname)), log.external.filter(u => !/ytimg|ggpht|googleusercontent/.test(u)).join(','));
     // (The DNR step fetches /s/player/abc/…/base.js itself to prove it is not blocked.)

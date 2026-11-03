@@ -1189,6 +1189,10 @@ impl App {
         };
         let (body, headers) = crate::tv::finish(&self.cfg, &self.auth, body, (bridge::epoch() / 1000.0) as u64);
         let id = next_id();
+        if edit.is_some() {
+            // Saving to Watch later changes what YouTube recommends next.
+            crate::ready::taint();
+        }
         bridge::fetch_opts(id, "POST", &wl::url(ep), &body, &headers, if edit.is_some() { "{}" } else { "{\"priority\":\"low\"}" });
         self.fx.reqs.insert(id, Req::Wl { v: v.to_string(), edit });
     }
@@ -1623,6 +1627,16 @@ impl App {
         }
     }
 
+    /// A ready Home response's chips (`fx_home_response` when it was fetched).
+    pub(super) fn fx_home_chips(&mut self, chips: Vec<hc::Chip>, all: Option<String>) {
+        if all.is_some() {
+            self.fx.nall = all;
+        }
+        if !chips.is_empty() {
+            hc::adopt(&mut self.fx.nbar, chips);
+        }
+    }
+
     fn fx_chip_abort(&mut self) {
         self.fx.ngen += 1;
         let ids: Vec<u32> = self.fx.reqs.iter().filter(|(_, r)| matches!(r, Req::Chip { .. })).map(|(i, _)| *i).collect();
@@ -1717,12 +1731,12 @@ impl App {
                     hc::adopt(&mut self.fx.nbar, c);
                 }
                 let feed = parse::continuation(&j);
-                self.show_feed(head, feed, "browse", "YouTube has nothing for this topic right now.");
+                self.show_feed(head, feed, "browse", "YouTube has nothing for this topic right now.", Vec::new());
             }
             None => {
                 let what = self.fx.nsel.clone().unwrap_or_default();
                 self.incident("home-chip", &format!("YouTube Home chip \"{what}\" failed: HTTP {status}"), None);
-                self.show_feed(head, parse::Feed::default(), "browse", "Couldn't load this topic. Pick it again or All.");
+                self.show_feed(head, parse::Feed::default(), "browse", "Couldn't load this topic. Pick it again or All.", Vec::new());
             }
         }
         self.after_paint();

@@ -39,6 +39,8 @@ fn purpose(p: &Purpose) -> &'static str {
         Purpose::VisionPrefetch { spec: true, .. } => "spec",
         Purpose::VisionPrefetch { .. } => "prefetch",
         Purpose::NetProbe => "net-probe",
+        Purpose::Ready { .. } => "ready",
+        Purpose::ReadyCont { .. } => "ready-cont",
     }
 }
 

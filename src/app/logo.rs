@@ -5,9 +5,9 @@
 //! navigates: leaving the logo cancels, coming back starts over, and a dwell that ran (or a press on
 //! the logo) needs the pointer to leave before another one starts. Clicks and keys are unchanged.
 //!
-//! Home while on Home (click, `g h` or dwell) keeps the page: back to the top at once, and a fresh
-//! feed only when the one shown is older than the background age (the rule a return from another
-//! page follows), without re-rendering the cards or adding a history entry.
+//! Home while on Home (click, `g h` or dwell) keeps the page: back to the top at once, then a new
+//! Home from YouTube (the ready response when there is one), like YouTube's logo on its Home; no
+//! history entry.
 
 use super::{App, Mode, Timer, PAGE_TTL_MS};
 use crate::bridge;
@@ -150,9 +150,9 @@ impl App {
         self.route == Route::Home && !self.fx.topic_on() && !self.fx.chip_on()
     }
 
-    /// Home on Home: the top of the page at once; a held fresh feed (the New videos pill) is shown,
-    /// and a feed older than the background age is refreshed in place (from the logo's prefetch when
-    /// it has landed).
+    /// Home on Home (like YouTube's logo on Home): the top of the page at once, then a new Home
+    /// from YouTube: a held fresh feed (the New videos pill), else the ready response, else the
+    /// request (the logo's prefetch when it has landed); the page stays until it answers.
     pub(super) fn home_again(&mut self) {
         self.logo_done();
         if let Some(body) = self.held.take() {
@@ -162,29 +162,27 @@ impl App {
             return;
         }
         bridge::scroll_to(0.0);
-        if self.home_stale() {
+        if let Some(r) = self.ready_take() {
+            self.ready_show(r);
+            return;
+        }
+        if self.rendered && !self.swr && self.await_page.is_none() {
             self.swr = true;
             self.load();
         }
     }
 
-    /// The Home feed shown is older than the background age and nothing fresher is on its way.
-    fn home_stale(&self) -> bool {
-        self.rendered && !self.swr && self.await_page.is_none() && bridge::epoch() - self.feed.at >= self.bg_age
-    }
-
-    /// The pointer entered the logo: Home's first page now (not after the hover delay), unless Home
-    /// will paint without a request (a snapshot younger than the background age) or is already
-    /// fresh in memory.
+    /// The pointer entered the logo: Home's first page now (not after the hover delay), unless a
+    /// ready response will paint it without a request.
     fn logo_prefetch(&mut self) {
-        let url = Route::Home.url();
-        if self.route == Route::Home {
-            if self.home_in_place() && self.home_stale() {
-                self.prefetch_page_now(&url);
-            }
+        if self.ready_waiting() {
             return;
         }
-        self.prefetch_page(&url);
+        let url = Route::Home.url();
+        if self.route == Route::Home && !self.home_in_place() {
+            return;
+        }
+        self.prefetch_page_now(&url);
     }
 
     /// When a feed's snapshot in this tab was written (epoch ms; read once per document).

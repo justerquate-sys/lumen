@@ -1,7 +1,7 @@
 //! Speed without waiting: speculative prefetch of the video cards in view
 //! (idle time, `next` then VISIONOS, two at a time, cancelled on
-//! navigation), background refresh of Home and Subscriptions while the tab is
-//! in use, and the `perf` debug-center report.
+//! navigation), background refresh of Subscriptions while the tab is in use
+//! (Home has its ready response: `homeready.rs`), and the `perf` debug-center report.
 
 use super::{App, BG_ACTIVE_MS, LIST, Pending, Purpose, SPEC_CARDS, SPEC_CONCURRENT, SPEC_IDLE_MS, Timer, wkey};
 use crate::bridge;
@@ -93,7 +93,8 @@ impl App {
         if !self.first_ready || !bridge::visible() || now - self.last_input > BG_ACTIVE_MS || bridge::local_flag("ytc-test-nobg") {
             return;
         }
-        let mut targets = vec![Route::Home];
+        // Home is not refreshed here: the ready Home response (`app/homeready.rs`) is its next page.
+        let mut targets = Vec::new();
         if self.auth.signed_in() {
             targets.push(Route::Subs);
         }

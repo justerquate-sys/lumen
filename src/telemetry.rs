@@ -53,6 +53,8 @@ pub struct NavSpan {
     pub t0: f64,
     /// Navigation start in the app (after the input handler began).
     pub t_nav: f64,
+    /// Extra breakdown fields of this navigation (`nav_field`).
+    pub extra: Map<String, Value>,
     pub reqs: Vec<Value>,
 }
 
@@ -176,7 +178,7 @@ impl Tel {
     pub fn nav_start(&mut self, route: &'static str, mode: &'static str, now: f64) -> u32 {
         let (input, t0) = if mode == "boot" { ("boot", 0.0) } else if mode == "pop" { ("history", self.cause(now).1) } else { self.cause(now) };
         self.nav_seq += 1;
-        self.nav = Some(NavSpan { id: self.nav_seq, route, mode, input, src: "network", t0, t_nav: now, reqs: Vec::new() });
+        self.nav = Some(NavSpan { id: self.nav_seq, route, mode, input, src: "network", t0, t_nav: now, reqs: Vec::new(), extra: Map::new() });
         self.nav_t0 = Some(t0);
         self.waits.clear();
         self.nav_visible = None;
@@ -187,6 +189,13 @@ impl Tel {
     pub fn nav_src(&mut self, src: &'static str) {
         if let Some(n) = self.nav.as_mut() {
             n.src = src;
+        }
+    }
+
+    /// One more breakdown field of the current navigation's event (e.g. `age_ms`).
+    pub fn nav_field(&mut self, k: &str, v: Value) {
+        if let Some(n) = self.nav.as_mut().filter(|n| n.extra.len() < 8) {
+            n.extra.insert(k.into(), v);
         }
     }
 
@@ -219,6 +228,9 @@ impl Tel {
         }
         if !n.reqs.is_empty() {
             f.insert("reqs".into(), Value::Array(n.reqs.clone()));
+        }
+        for (k, v) in &n.extra {
+            f.insert(k.clone(), v.clone());
         }
         Some((self.next_token(), n, f))
     }
@@ -416,6 +428,10 @@ mod glue {
 
     pub fn nav_req(r: Value) {
         timed(|t| t.nav_req(r));
+    }
+
+    pub fn nav_field(k: &str, v: Value) {
+        timed(|t| t.nav_field(k, v));
     }
 
     /// The page's content was written to the DOM: the navigation event completes at the next frame.

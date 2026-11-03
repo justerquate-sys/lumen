@@ -5,7 +5,8 @@
 //! is the `yourTubeNativeTopicsV1` record (at
 //! most 20 `{key, name}` records, keys ≤ 120 and names ≤ 40 characters),
 //! here with an optional `hide` flag. Chips themselves and their tokens are
-//! never stored.
+//! never stored (beyond this tab's sessionStorage copy of the ready Home
+//! response, `crate::ready`).
 
 use crate::parse::text;
 use crate::json::Value as In;

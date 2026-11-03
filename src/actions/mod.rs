@@ -265,6 +265,10 @@ impl Actions {
             auth = Auth::default();
         }
         let (body, headers) = crate::tv::finish(net.cfg, &auth, req::with_context(body, net.cfg, net.hl, net.url), (bridge::epoch() / 1000.0) as u64);
+        if crate::ready::personalizes(ep) {
+            // A like, subscription or playlist change: YouTube's next Home differs from the ready one.
+            crate::ready::taint();
+        }
         bridge::fetch(id, "POST", &req::url(ep), &body, &headers);
         self.jobs.insert(id, job);
         id
@@ -325,7 +329,12 @@ impl Actions {
 
     /// Bell count and avatar from a page response's `topbar`.
     pub fn learn(&mut self, json: &Value) {
-        let Some(t) = notify::topbar(json) else { return };
+        self.learn_bar(notify::topbar(json));
+    }
+
+    /// Bell count and avatar (a page response's `topbar`, or a ready Home response's copy of it).
+    pub fn learn_bar(&mut self, t: Option<notify::Topbar>) {
+        let Some(t) = t else { return };
         if t.signed_out {
             return;
         }
