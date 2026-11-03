@@ -123,6 +123,23 @@ pub struct Feed {
     pub nudge: Option<String>,
     /// Server-side alert text (e.g. "This playlist does not exist").
     pub alert: Option<String>,
+    /// YouTube's tracking ids of each video card (memory only: the "shown" signals, `crate::impress`).
+    pub track: Vec<Track>,
+}
+
+/// A card's tracking ids as YouTube's page logs them when the card is shown: the grid item's
+/// (`richItemRenderer.trackingParams`) and the card's own (a lockup's `loggingDirectives`, a renderer's
+/// `trackingParams`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Track {
+    pub id: String,
+    pub item: Option<String>,
+    pub own: Option<String>,
+}
+
+/// A tracking id as YouTube sends them (base64, ≤ 200 characters).
+pub fn is_tracking(s: &str) -> bool {
+    (4..=200).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=+/".contains(&b))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -386,6 +403,13 @@ struct Walker<'f> {
     seen: HashSet<String>,
     /// Search results: YouTube's recommendation shelves are dropped (`rec_shelf`).
     search: bool,
+    /// The grid item being walked (its tracking id) and the card's own, for `Feed::track`.
+    item_tp: Option<String>,
+    own_tp: Option<String>,
+}
+
+fn tp_at(x: &Value, path: &[&str]) -> Option<String> {
+    st(x, path).filter(|t| is_tracking(t)).map(String::from)
 }
 
 /// Titles of YouTube's recommendation shelves inside search results (lower case;
@@ -452,12 +476,18 @@ impl Walker<'_> {
     }
 
     fn push(&mut self, r: Res, kind: &str) {
+        let own = self.own_tp.take();
         match r {
             Res::Item(item) => {
                 if item.is_short() {
                     self.feed.stats.shorts += 1;
                 }
                 if self.seen.insert(item.key().to_string()) {
+                    if let Item::Video(v) = &item {
+                        if self.item_tp.is_some() || own.is_some() {
+                            self.feed.track.push(Track { id: v.id.clone(), item: self.item_tp.clone(), own });
+                        }
+                    }
                     self.feed.items.push(item);
                 } else {
                     self.feed.stats.dupes += 1;
@@ -480,10 +510,12 @@ impl Walker<'_> {
             "horizontalCardListRenderer" if self.search => self.feed.stats.recs += 1,
             "videoRenderer" | "compactVideoRenderer" | "gridVideoRenderer" | "playlistVideoRenderer" | "playlistPanelVideoRenderer" | "videoWithContextRenderer" => {
                 let r = video_renderer(x);
+                self.own_tp = tp_at(x, &["trackingParams"]);
                 self.push(r, k)
             }
             "lockupViewModel" => {
                 let r = lockup(x, &mut self.feed.stats);
+                self.own_tp = tp_at(x, &["rendererContext", "loggingContext", "loggingDirectives", "trackingParams"]);
                 self.push(r, k)
             }
             "tileRenderer" => {
@@ -521,6 +553,7 @@ impl Walker<'_> {
             }
             "shortsLockupViewModel" => {
                 let r = shorts_lockup(x);
+                self.own_tp = tp_at(x, &["loggingDirectives", "trackingParams"]);
                 self.push(r, k)
             }
             "reelItemRenderer" => {
@@ -554,6 +587,11 @@ impl Walker<'_> {
                     self.feed.alert = text_at(x, &["text"]).or_else(|| text_at(x, &["title"]));
                 }
             }
+            "richItemRenderer" => {
+                let outer = std::mem::replace(&mut self.item_tp, tp_at(x, &["trackingParams"]));
+                self.descend(x);
+                self.item_tp = outer;
+            }
             _ if CONTAINERS.contains(&k) || (k.ends_with("Continuation") && x.is_object()) => {
                 self.descend(x);
                 if let Some(t) = st(x, &["continuations", "0", "nextContinuationData", "continuation"]) {
@@ -569,7 +607,7 @@ impl Walker<'_> {
 }
 
 fn walk_into(feed: &mut Feed, v: &Value) {
-    let mut w = Walker { feed, seen: HashSet::new(), search: false };
+    let mut w = Walker { feed, seen: HashSet::new(), search: false, item_tp: None, own_tp: None };
     w.walk(v);
 }
 
@@ -984,7 +1022,7 @@ pub fn search(v: &Value) -> Feed {
     let mut f = Feed::default();
     let c = at(v, &["contents", "twoColumnSearchResultsRenderer", "primaryContents"]).or_else(|| at(v, &["contents"]));
     if let Some(c) = c {
-        Walker { feed: &mut f, seen: HashSet::new(), search: true }.walk(c);
+        Walker { feed: &mut f, seen: HashSet::new(), search: true, item_tp: None, own_tp: None }.walk(c);
     }
     f
 }
@@ -1001,7 +1039,7 @@ pub fn search_continuation(v: &Value) -> Feed {
 
 fn cont_walk(v: &Value, search: bool) -> Feed {
     let mut f = Feed::default();
-    let mut w = Walker { feed: &mut f, seen: HashSet::new(), search };
+    let mut w = Walker { feed: &mut f, seen: HashSet::new(), search, item_tp: None, own_tp: None };
     for key in ["onResponseReceivedActions", "onResponseReceivedCommands", "onResponseReceivedEndpoints"] {
         for action in arr(v, &[key]) {
             for inner in ["appendContinuationItemsAction", "reloadContinuationItemsCommand"] {
@@ -1153,7 +1191,7 @@ pub fn next(v: &Value) -> Watch {
     }
     w.up = crate::features::upnext::parse(v);
     if let Some(sr) = at(root, &["secondaryResults", "secondaryResults"]) {
-        let mut wk = Walker { feed: &mut w.related, seen: HashSet::new(), search: false };
+        let mut wk = Walker { feed: &mut w.related, seen: HashSet::new(), search: false, item_tp: None, own_tp: None };
         wk.descend(sr);
     }
     w
@@ -1370,6 +1408,26 @@ mod tests {
         assert_eq!(videos(&f)[0].meta, "1.2M views");
         assert_eq!(f.stats.shorts, 5, "3 cards + the reel without an id + the non-Short in a Shorts shelf");
         assert!(f.items[0].is_short() && !f.items[3].is_short());
+    }
+
+    #[test]
+    fn home_cards_carry_their_tracking_ids() {
+        // The two ids YouTube's page logs for a shown Home card (live capture, 3 Nov 2026): the grid item's
+        // and the lockup's own; an old videoRenderer card has its own `trackingParams`.
+        let v = json::parse_str(r#"{"contents":{"twoColumnBrowseResultsRenderer":{"tabs":[{"tabRenderer":{"selected":true,"content":{"richGridRenderer":{"contents":[
+            {"richItemRenderer":{"trackingParams":"CL4DEJmNBRgBIhMI","content":{"lockupViewModel":{"contentType":"LOCKUP_CONTENT_TYPE_VIDEO","contentId":"ccccccccccc",
+                "rendererContext":{"loggingContext":{"loggingDirectives":{"trackingParams":"CL8DENwwIhMI","visibility":{"types":"12"}}}},
+                "metadata":{"lockupMetadataViewModel":{"title":{"content":"Lockup"}}}}}}},
+            {"richItemRenderer":{"trackingParams":"CAEQ","content":{"lockupViewModel":{"contentType":"LOCKUP_CONTENT_TYPE_PLAYLIST","contentId":"PLxxxxxxxxxx",
+                "rendererContext":{"loggingContext":{"loggingDirectives":{"trackingParams":"CAIQ"}}}}}}},
+            {"richItemRenderer":{"trackingParams":"bad\"><x","content":{"videoRenderer":{"videoId":"eeeeeeeeeee","trackingParams":"CAMQ","title":{"simpleText":"Normal"}}}}},
+            {"videoRenderer":{"videoId":"fffffffffff","title":{"simpleText":"Bare"}}}
+        ]}}}}]}}}"#).unwrap();
+        let f = browse(&v);
+        assert_eq!(f.track, vec![
+            Track { id: "ccccccccccc".into(), item: Some("CL4DEJmNBRgBIhMI".into()), own: Some("CL8DENwwIhMI".into()) },
+            Track { id: "eeeeeeeeeee".into(), item: None, own: Some("CAMQ".into()) },
+        ]);
     }
 
     #[test]

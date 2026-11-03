@@ -183,6 +183,22 @@
     }
   },
   {
+    "id": 33,
+    "priority": 4,
+    "action": {
+      "type": "allow"
+    },
+    "condition": {
+      "urlFilter": "|https://www.youtube.com/youtubei/v1/log_event?alt=json&prettyPrint=false|",
+      "resourceTypes": [
+        "xmlhttprequest"
+      ],
+      "requestMethods": [
+        "post"
+      ]
+    }
+  },
+  {
     "id": 40,
     "priority": 3,
     "action": {

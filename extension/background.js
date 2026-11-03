@@ -1,8 +1,15 @@
 // Background worker. Generic tooling only: no YouTube logic.
-// Public build: the voice-search socket relay below and nothing else.
+// Public build: the shared tab storage switch and the voice-search socket relay below, nothing else.
 // Development build (./build.sh --dev; browser/build.cjs keeps the @dev blocks): also the
 // auto-reload and the debug-center delivery.
 'use strict';
+
+// ---- Tab-shared memory (chrome.storage.session: never written to disk, cleared when the browser closes). Content
+// scripts may use it only after this switch, which the browser keeps for its session; the worker sets it whenever it
+// starts (the startup listener makes it start with the browser). The client keeps one thing there: the ready Home
+// response (src/ready.rs; CONTRIBUTING "Privacy").
+try { chrome.storage.session.setAccessLevel({ accessLevel: 'TRUSTED_AND_UNTRUSTED_CONTEXTS' }).catch(() => {}); } catch {}
+chrome.runtime.onStartup.addListener(() => {});
 
 
 // ---- Socket relay (voice search). A content script asks for a WebSocket over a

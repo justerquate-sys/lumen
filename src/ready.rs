@@ -9,23 +9,30 @@
 //!   subscription, a playlist or Watch later change, …; see `personalizes`);
 //! - younger than `MAX_AGE_MS` (YouTube's answer drifts with time: tools/bench/home-drift.cjs).
 //!
-//! It is shown once (taken out when used) and lives in memory plus this tab's sessionStorage
-//! (`KEY`, parsed and re-validated like a snapshot; never chrome.storage or localStorage), the same
-//! place as the feed snapshots (CONTRIBUTING, privacy rules). The one exception (owner decision, 3 Nov
-//! 2026): in the TV app the shell also keeps it sealed on disk for the next app start
-//! (`tv/core/src/readystore.rs`: the same account, younger than `MAX_AGE_MS`, read once).
+//! It is shown once (taken out when used). In the browser extension it is one per browser, shared by every
+//! tab (owner decision, 3 Nov 2026: a new tab or window paints Home as fast as a reload): it lives in the
+//! extension's memory-only `chrome.storage.session` (`KEY`; cleared when the browser closes, never on disk,
+//! re-validated on read like a snapshot) and in each tab's memory; a tab that uses it removes it for all,
+//! and a personalizing event in any tab removes it for all (`taint`, broadcast as `TAINT_KEY`). Never
+//! chrome.storage.local or localStorage (CONTRIBUTING, privacy rules). In the TV app (no extension storage)
+//! it lives in the page's sessionStorage, and the shell keeps it sealed on disk for the next app start
+//! (owner decision, 3 Nov 2026; `tv/core/src/readystore.rs`: the same account, younger than `MAX_AGE_MS`,
+//! read once).
 
 use crate::actions::notify::Topbar;
 use crate::config::Auth;
 use crate::features::home_chips::Chip;
 use crate::json::{self, Value as In};
-use crate::parse::Item;
+use crate::parse::{Item, Track, is_tracking};
 use crate::snap::{item_from, item_json};
 use crate::util::safe_img;
 use serde_json::{Value, json};
 use std::cell::Cell;
 
 pub const KEY: &str = "ytc:ready";
+/// A personalizing event in some tab (`{"by": <that document's id>, "at": ms}`, extension only): every other
+/// tab drops what it fetched before it.
+pub const TAINT_KEY: &str = "ytc:taint";
 /// A ready response older than this is not used (it is what YouTube answered then, not now).
 /// 10 min: see docs/architecture.md "Home reload" for the drift curve behind it.
 pub const MAX_AGE_MS: f64 = 10.0 * 60_000.0;
@@ -50,11 +57,44 @@ pub struct Ready {
     pub all: Option<String>,
     pub topbar: Option<Topbar>,
     pub logged_out: Option<bool>,
+    /// The answer's id in YouTube's logs (`EVENT_ID` of the Home document) and the cards' tracking ids:
+    /// the "shown" signals when it is painted (`crate::impress`).
+    pub eid: Option<String>,
+    pub track: Vec<Track>,
 }
 
 thread_local! {
     /// Bumped by every personalizing event of this document (`taint`).
     static TAINT: Cell<u32> = const { Cell::new(0) };
+    /// This document's id in `TAINT_KEY` broadcasts (its own come back to it too).
+    static DOC_ID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The extension's shared store holds the ready response (every tab sees the same one); the TV app keeps
+/// it in the page's sessionStorage and the shell.
+pub fn shared() -> bool {
+    !crate::tv::on() && crate::bridge::shared_ok()
+}
+
+fn doc_id() -> String {
+    DOC_ID.with(|d| {
+        let mut d = d.borrow_mut();
+        if d.is_empty() {
+            *d = crate::player::stats::cpn(&format!("{}:{}:taint", crate::bridge::epoch(), crate::bridge::now()));
+        }
+        d.clone()
+    })
+}
+
+/// A taint broadcast from another tab (`TAINT_KEY`'s new value): drop what was fetched before it. Our own
+/// broadcasts come back here too and are ignored.
+pub fn taint_seen(json: &str) -> bool {
+    let by = json::parse_str(json).and_then(|v| v.get("by").and_then(In::as_str).map(String::from)).unwrap_or_default();
+    if by.is_empty() || by == doc_id() {
+        return false;
+    }
+    TAINT.with(|t| t.set(t.get().wrapping_add(1)));
+    true
 }
 
 /// The current taint generation: a ready response fetched under another one is stale.
@@ -66,8 +106,13 @@ pub fn generation() -> u32 {
 /// tab's copy) is no longer what YouTube would answer.
 pub fn taint() {
     TAINT.with(|t| t.set(t.get().wrapping_add(1)));
-    crate::bridge::session_del(KEY);
-    crate::tv::ready_drop();
+    if shared() {
+        crate::bridge::shared_del(KEY);
+        crate::bridge::shared_set(TAINT_KEY, &json!({"by": doc_id(), "at": crate::bridge::epoch()}).to_string());
+    } else {
+        crate::bridge::session_del(KEY);
+        crate::tv::ready_drop();
+    }
 }
 
 /// Requests that change what YouTube recommends (endpoint path after `/youtubei/v1/`).
@@ -139,6 +184,8 @@ pub fn to_json(r: &Ready) -> String {
         "al": r.all,
         "b": tb,
         "lo": r.logged_out,
+        "e": r.eid,
+        "k": r.track.iter().take(MAX_ITEMS).map(|t| json!([t.id, t.item, t.own])).collect::<Vec<_>>(),
     })
     .to_string()
 }
@@ -174,6 +221,18 @@ pub fn from_json(s: &str) -> Option<Ready> {
         avatar: so(b, "a").and_then(safe_img),
         signed_out: b.get("o").and_then(In::as_bool).unwrap_or(false),
     });
+    let tp = |x: Option<&In>| x.and_then(In::as_str).filter(|t| is_tracking(t)).map(String::from);
+    let track = v
+        .get("k")
+        .and_then(In::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_ITEMS)
+        .filter_map(|t| {
+            let id = t.get(0)?.as_str().filter(|i| crate::util::is_video_id(i))?.to_string();
+            Some(Track { id, item: tp(t.get(1)), own: tp(t.get(2)) })
+        })
+        .collect();
     Some(Ready {
         at: v.get("t").and_then(In::as_f64)?,
         acct: so(&v, "a")?.chars().take(80).collect(),
@@ -184,6 +243,8 @@ pub fn from_json(s: &str) -> Option<Ready> {
         all: so(&v, "al").map(|s| s.chars().take(120).collect()),
         topbar,
         logged_out: v.get("lo").and_then(In::as_bool),
+        eid: so(&v, "e").filter(|e| (8..=64).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))).map(String::from),
+        track,
     })
 }
 
@@ -240,6 +301,8 @@ mod tests {
             all: Some("all".into()),
             topbar: Some(Topbar { count: Some(3), avatar: Some("https://yt3.ggpht.com/a.jpg".into()), signed_out: false }),
             logged_out: Some(false),
+            eid: Some("08zpaoXgNPKx-cAP6oehsQQ".into()),
+            track: vec![Track { id: "abcdefghijk".into(), item: Some("CL4DEJmN".into()), own: Some("CL8DENww".into()) }, Track { id: "bbcdefghijk".into(), item: None, own: Some("CAMQ".into()) }],
         }
     }
 
@@ -253,6 +316,9 @@ mod tests {
         assert_eq!(b.items.len(), 1);
         assert!(b.topbar.unwrap().avatar.is_none());
         assert!(b.chips.is_empty());
+        let bad = to_json(&r).replace("CL4DEJmN", "x\\\"><y").replace("08zpaoXgNPKx-cAP6oehsQQ", "<script>");
+        let b = from_json(&bad).unwrap();
+        assert_eq!((b.track[0].item.as_deref(), b.track[0].own.as_deref(), b.eid.as_deref()), (None, Some("CL8DENww"), None), "hostile tracking ids dropped");
         assert!(from_json("{\"v\":2}").is_none() && from_json("nope").is_none());
     }
 

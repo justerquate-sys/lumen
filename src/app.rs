@@ -28,6 +28,7 @@ use std::rc::Rc;
 
 mod fxglue;
 mod homeready;
+mod impglue;
 mod logo;
 mod motionglue;
 mod speed;
@@ -106,6 +107,8 @@ const SUGGEST_CACHE: usize = 64;
 const CFG_SESSION: &str = "ytc:cfg";
 /// `fetch_opts` for background requests.
 const LOW: &str = "{\"priority\":\"low\"}";
+/// The endpoint name of YouTube's Home document request (`crate::homedoc`).
+const HOME_DOC: &str = "home-doc";
 /// Player failure reasons kept in chrome.storage.local for the debug overlay
 /// (across reloads and the manual Open on YouTube).
 const PLAYER_LOG_KEY: &str = "ytcPlayerLogV1";
@@ -158,6 +161,8 @@ enum Purpose {
     /// under taint `generation` for account `acct`.
     Ready { generation: u32, acct: String },
     ReadyCont { generation: u32, acct: String },
+    /// A batch of Home's "shown" signals (`app/impglue.rs`); `first`: the screen's first batch.
+    Imp { first: bool },
 }
 
 struct Pending {
@@ -210,6 +215,8 @@ enum Timer {
     TvScrub { generation: u32 },
     /// TV: ask the shell about updates (repeats; `fast` = while an app update downloads).
     TvUpdates { fast: bool },
+    /// Home's "shown" signals: the batch's time came.
+    ImpFlush,
 }
 
 #[derive(PartialEq)]
@@ -368,6 +375,8 @@ pub struct App {
     tv: tvglue::Tv,
     /// The ready Home response, the Home request's hedge (`app/homeready.rs`).
     hr: homeready::HomeReady,
+    /// Home's "shown" signals (`app/impglue.rs`).
+    imp: impglue::Imp,
     /// A new tab's first Home request waits for the stored config (its visitor: without it a
     /// signed-out visitor gets YouTube's empty Home instead of their own).
     home_hold: bool,
@@ -504,6 +513,7 @@ pub fn boot() {
         direct: false,
         tv: tvglue::Tv::new(tv_hold),
         hr: Default::default(),
+        imp: Default::default(),
         home_hold: false,
     };
     app.tel_boot();
@@ -515,8 +525,14 @@ pub fn boot() {
     // Home loaded or reloaded (not back/forward): YouTube's answer for this request, never this
     // tab's old Home first. The ready response when there is one, else the skeleton and the request.
     let home = app.route == Route::Home && nav_type != "back_forward" && !app.tv.hold;
-    let ready = if home { app.ready_take() } else { None };
-    if home && ready.is_none() && app.cfg.visitor.is_none() && !crate::tv::on() {
+    // Extension: the ready response is shared by the tabs (memory-only extension storage): one
+    // asynchronous read (a few ms) before this document's first Home (`on_shared`).
+    let shared = crate::ready::shared();
+    let taking = home && shared;
+    let ready = if home && !shared { app.ready_take() } else { None };
+    // Without a visitor YouTube answers a signed-out `browse` with its empty Home; its Home document
+    // needs none (the browser's cookies carry it).
+    if home && ready.is_none() && app.cfg.visitor.is_none() && !crate::tv::on() && !app.doc_ok() {
         app.home_hold = true;
     }
     // (TV cold start holding for the token: the skeleton until it answers, no request without it.)
@@ -548,6 +564,10 @@ pub fn boot() {
         // TV cold start: the skeleton shows until the shell's token answer (`tv_release`).
     } else if let Some(r) = ready {
         app.ready_show(r);
+    } else if taking {
+        // The skeleton (in the shell) until the shared store answers: its ready response or the request.
+        app.hr.taking = true;
+        bridge::shared_take(crate::ready::KEY);
     } else if main.is_some() {
         crate::telemetry::nav_src("snapshot");
         bridge::mark("ytcRepaint");
@@ -558,6 +578,10 @@ pub fn boot() {
         app.after_paint();
     } else {
         app.start_route();
+    }
+    if shared && !taking {
+        // What is waiting for the next Home (this tab neither fetches a second one nor misses it).
+        bridge::shared_get(crate::ready::KEY);
     }
     let id = app.timer(Timer::Bg);
     bridge::timer(id, BG_TICK_MS);
@@ -594,6 +618,12 @@ impl App {
     fn send(&mut self, req: Req, purpose: Purpose, low: bool) -> u32 {
         let id = next_id();
         self.auth = crate::tv::auth();
+        // Home is YouTube's own Home document, as a reload of its page asks for it (`crate::homedoc`).
+        if matches!(&req, Req::Browse { id, params: None } if id == "FEwhat_to_watch") && self.doc_ok() {
+            bridge::fetch_opts(id, "GET", crate::homedoc::URL, "", crate::homedoc::HEADERS, crate::homedoc::opts(low));
+            self.pending.insert(id, Pending { purpose, sent: bridge::now(), ep: HOME_DOC });
+            return id;
+        }
         // Home goes out exactly as YouTube's web app sends it (window fields included).
         // (TV signed in: `tv::finish` below turns it into the TVHTML5 request with the access token.)
         let home = matches!(&req, Req::Browse { id, params: None } if id == "FEwhat_to_watch");
@@ -851,6 +881,7 @@ impl App {
     }
 
     fn navigate(&mut self, route: Route, url: String, mode: Mode) {
+        self.imp_end();
         self.voice_leave();
         self.tel_leave();
         self.logo_done();
@@ -1064,6 +1095,9 @@ impl App {
         self.perf.hit("page-prefetch", hit.is_some());
         if let Some(i) = hit {
             let (_, body, _) = self.page_cache.remove(i);
+            if self.route == Route::Home {
+                self.hr.doc_meta = self.hr.prefetch_meta.take();
+            }
             crate::telemetry::nav_src("prefetch");
             bridge::mark_val("ytcHomeSrc", "prefetch");
             self.mark("request");
@@ -1149,7 +1183,8 @@ impl App {
             }
         }
         // (TV: a first page still held for the token has not gone out; it uses this config when it does.)
-        if au_changed && !self.tv.hold && !matches!(self.route, Route::Watch { .. }) {
+        // (A first Home still reading the shared ready response starts with this config when it answers.)
+        if au_changed && !self.tv.hold && !self.hr.taking && !matches!(self.route, Route::Watch { .. }) {
             // The first request went out for another account index: redo the page.
             self.abort_nav_requests();
             self.swr = false;
@@ -1219,6 +1254,7 @@ impl App {
             Some(Timer::TvFocus) => self.tv_focus_check(),
             Some(Timer::Hedge { id }) => self.hedge_fire(id),
             Some(Timer::ReadyFill { lazy }) => self.ready_timer(lazy),
+            Some(Timer::ImpFlush) => self.imp_timer(),
             Some(Timer::HomeHedge { nav }) => self.home_hedge(nav),
             Some(Timer::HomeSlow { nav }) => self.home_slow(nav),
             Some(Timer::TvScrub { generation }) => self.tv_scrub_rest(generation),
@@ -1590,6 +1626,7 @@ impl App {
                 bridge::html(PILL, "");
                 if let Some(body) = self.held.take() {
                     bridge::scroll_to(0.0);
+                    self.hr.doc_meta = self.hr.held_meta.take();
                     self.on_page_body(200, &body);
                 }
                 return true;
@@ -1787,6 +1824,7 @@ impl App {
     }
 
     pub fn on_hide(&mut self) {
+        self.imp_flush(true);
         self.voice_leave();
         self.fx_flush();
         self.write_snap();
@@ -1915,6 +1953,7 @@ impl App {
         if !s.is_empty() {
             bridge::append(LIST, &s);
             self.fade_thumbs();
+            self.imp_scan();
         }
         self.fx_hold(held);
         self.fx_entrance(false, self.feed.shown.is_empty());
@@ -2006,6 +2045,27 @@ impl App {
             }
             return;
         };
+        // YouTube's Home document: its Home data stands in for the `browse` response (the page's facts are
+        // kept for the "shown" signals); without Home data, the `browse` request instead.
+        let mut body = body;
+        if p.ep == HOME_DOC && status != 0 {
+            match crate::homedoc::split(body).filter(|_| status == 200) {
+                Some((range, meta)) => {
+                    body = &body[range];
+                    self.doc_learn(&meta);
+                    if matches!(p.purpose, Purpose::PagePrefetch { .. }) {
+                        self.hr.prefetch_meta = Some(meta);
+                    } else {
+                        self.hr.doc_meta = Some(meta);
+                    }
+                }
+                None => {
+                    self.perf.req(p.ep, bridge::now() - p.sent, false);
+                    self.doc_failed(id, p.purpose, status);
+                    return;
+                }
+            }
+        }
         let ok = status == 200;
         if status != 0 {
             self.perf.req(p.ep, bridge::now() - p.sent, ok);
@@ -2048,6 +2108,7 @@ impl App {
                     self.on_net_probe(status);
                 }
             }
+            Purpose::Imp { first } => self.imp_answered(first),
             Purpose::Ready { generation, acct } => self.ready_body(id, generation, acct, false, status, body),
             Purpose::ReadyCont { generation, acct } => self.ready_body(id, generation, acct, true, status, body),
             Purpose::VisionPrefetch { v, route, .. } => {
@@ -2141,6 +2202,7 @@ impl App {
                     self.await_page = None;
                     if ok {
                         self.mark("prefetched");
+                        self.hr.doc_meta = self.hr.prefetch_meta.take();
                         self.on_page_body(status, body);
                     } else if let Some(req) = self.page_req(&self.route) {
                         self.page_request(req);
@@ -2242,6 +2304,7 @@ impl App {
             self.swr = false;
             if bridge::scroll_y() > SWAP_MAX_Y {
                 self.held = Some(body.to_vec());
+                self.hr.held_meta = self.hr.doc_meta.take();
                 bridge::html(PILL, render::FRESH_PILL);
                 self.home_fresh_painted();
                 return;
@@ -2292,6 +2355,7 @@ impl App {
 
     /// New continuation items (deduplicated) go to the buffer.
     fn take_items(&mut self, mut feed: Feed) {
+        self.imp_more(std::mem::take(&mut feed.track));
         self.admit(&mut feed.items);
         let total = feed.items.len();
         let items: Vec<Item> = feed.items.into_iter().filter(|i| self.feed.seen.insert(i.key().to_string())).collect();
@@ -2903,5 +2967,6 @@ impl App {
         self.write_snap();
         self.perf_on_hide();
         self.tel_flush(true);
+        self.imp_flush(true);
     }
 }

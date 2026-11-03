@@ -261,6 +261,28 @@ extern "C" {
     pub fn session_set(key: &str, value: &str) -> bool;
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn session_del(key: &str);
+    /// The extension's memory-only storage shared by its tabs (`chrome.storage.session`) is there.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shared_ok() -> bool;
+    /// `chrome.storage.session` get: the value (a string, `""` when missing) arrives in `on_shared(key, value)`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shared_get(key: &str);
+    /// Get and remove (the value arrives in `on_shared`).
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shared_take(key: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shared_set(key: &str, value: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shared_del(key: &str);
+    /// Reports elements in view: every `sel` element inside `#list` (now and when `shown_scan` runs) with the
+    /// attribute `data-<attr>` calls `on_shown(value, index, x, y, w, h)` once it is ≥ `ratio` in the viewport (an
+    /// IntersectionObserver: no layout read of ours). `shown_stop` ends it.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shown_watch(list: &str, sel: &str, attr: &str, ratio: f64);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shown_scan();
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn shown_stop();
     /// Navigation timing type: `navigate`, `reload` or `back_forward`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn nav_type() -> String;
