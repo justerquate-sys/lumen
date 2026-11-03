@@ -481,6 +481,27 @@ function apiFixture(ep, body) {
   return null;
 }
 
+// The website check's own `next` mask starts with `contents/`; the watch page's (`api::NEXT_FIELDS`) does not.
+const isCheck = url => (url.searchParams.get('fields') || '').startsWith('contents/');
+// A `fields=` mask applied the way InnerTube applies it (arrays transparent, a bare name keeps its subtree).
+function parseMask(s) {
+  let i = 0;
+  const list = m => { for (;;) { item(m); if (s[i] === ',') i++; else return m; } };
+  const item = m => {
+    const st = i; while (i < s.length && /[\w*]/.test(s[i])) i++;
+    const sub = m[s.slice(st, i)] ||= {};
+    if (s[i] === '/') { i++; item(sub); } else if (s[i] === '(') { i++; list(sub); i++; }
+  };
+  return list({});
+}
+function applyMask(m, v) {
+  if (!Object.keys(m).length || v === null || typeof v !== 'object') return v;
+  if (Array.isArray(v)) return v.map(x => applyMask(m, x));
+  const o = {}; for (const k of Object.keys(v)) if (m[k]) o[k] = applyMask(m[k], v[k]); return o;
+}
+// NEXT.refuse: YouTube answers a masked watch `next` with HTTP 400 (a field it no longer knows).
+const NEXT_MASK = { refused: 0, served: 0 };
+
 async function handle(route) {
   const req = route.request(), url = new URL(req.url());
   if (url.hostname.endsWith('.googlevideo.com')) return googlevideo(route, url);
@@ -522,13 +543,15 @@ async function handle(route) {
     const ct = homeDocReq ? 'text/html; charset=utf-8' : 'application/json';
     const wrap = out => homeDocReq ? homeDoc(out, docN) : out;
     const hs = HEDGE.stall;
-    if (hs && hs.n > 0 && ep === hs.ep && !body.continuation && !url.searchParams.has('fields') && (hs.home ? body.browseId === 'FEwhat_to_watch' : hs.q ? body.query === hs.q : body.videoId === hs.v)) {
+    if (hs && hs.n > 0 && ep === hs.ep && !body.continuation && !isCheck(url) && (hs.home ? body.browseId === 'FEwhat_to_watch' : hs.q ? body.query === hs.q : body.videoId === hs.v)) {
       hs.n--;
       await new Promise(r => setTimeout(r, 6000));
       try { await route.fulfill({ status: 200, contentType: ct, body: wrap('{}') }); } catch {}
       return;
     }
-    const masked = ep === 'next' && url.searchParams.has('fields') && body.videoId && !body.continuation;
+    const masked = ep === 'next' && isCheck(url) && body.videoId && !body.continuation;
+    const pageMask = ep === 'next' && !isCheck(url) && url.searchParams.get('fields');
+    if (pageMask && NEXT.refuse) { NEXT_MASK.refused++; return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 400, message: 'Request contains an invalid argument.', status: 'INVALID_ARGUMENT' } }) }); }
     if (masked && FX.checkDelay) {
       const home = /H\dz$/.test(body.videoId); // Home fixture ids (counted apart from other pages' checks)
       FX.checksInFlight++; FX.checksMax = Math.max(FX.checksMax, FX.checksInFlight);
@@ -561,6 +584,7 @@ async function handle(route) {
     }
     if (home && (HOME.latency || (HOME.delay && !body.continuation))) await new Promise(r => setTimeout(r, HOME.latency + (body.continuation ? 0 : HOME.delay)));
     if (ep === 'next' && NEXT.latency && !body.continuation && !masked) await new Promise(r => setTimeout(r, NEXT.latency));
+    if (out && pageMask) { NEXT_MASK.served++; out = JSON.stringify(applyMask(parseMask(pageMask), JSON.parse(out))); }
     return out ? route.fulfill({ status: 200, contentType: ct, body: wrap(out) }).catch(() => {}) : route.fulfill({ status: 404, body: '{}' });
   }
   if (p.startsWith('/api/stats/')) { log.stats.push(req.url()); return route.fulfill({ status: 204, body: '' }); }
@@ -851,6 +875,37 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok((await page.title()).startsWith('<img'), 'title set as text');
   });
 
+  await step('watch next is field-masked (YouTube applies the mask, the page renders everything); a refused mask (HTTP 400) is resent whole at once, then no mask in that document', async () => {
+    // The steps above ran on masked answers (the stub applies the mask like YouTube): title, related, description, chapters, comments.
+    const pageNexts = log.api.filter(a => a.ep === 'next' && !a.body.continuation && !a.url.includes('fields=contents%2F'));
+    assert.ok(pageNexts.length > 0 && pageNexts.every(a => a.url.includes('&fields=responseContext%2CcurrentVideoEndpoint')), 'every watch next carries the mask');
+    assert.ok(NEXT_MASK.served > 0, 'masked answers served');
+    assert.ok(log.api.filter(a => a.ep === 'next' && a.body.continuation).every(a => !new URL(a.url).searchParams.has('fields')), 'continuations unmasked');
+    assert.ok(log.api.filter(a => a.ep === 'search' || a.ep === 'browse').every(a => !new URL(a.url).searchParams.has('fields')), 'other endpoints unmasked');
+    const p2 = await ctx.newPage();
+    NEXT.refuse = true; NEXT_MASK.refused = 0;
+    const inc = incidents.length;
+    try {
+      const v = 'maskREF0001';
+      const from = log.api.length;
+      await p2.goto(`https://www.youtube.com/watch?v=${v}`, { waitUntil: 'commit' });
+      await p2.waitForFunction(() => document.querySelector('#ytc-info h1.wt')?.textContent && document.querySelectorAll('#ytc-list .c').length >= 20);
+      const mine = log.api.slice(from).filter(a => a.ep === 'next' && a.body.videoId === v && !a.body.continuation);
+      assert.equal(mine.length, 2, 'refused once, resent once: ' + mine.map(a => a.url).join(' '));
+      assert.ok(mine[0].url.includes('fields=') && !mine[1].url.includes('fields='), 'the resend is whole');
+      assert.equal(mine[1].postData ?? JSON.stringify(mine[1].body), mine[0].postData ?? JSON.stringify(mine[0].body), 'same body');
+      // Later watch pages in that document go out whole (no second refusal).
+      await p2.locator('#ytc-list .c a.t[href^="/watch"]').first().click();
+      await p2.waitForFunction(v => !location.search.includes(v) && document.querySelector('#ytc-info h1.wt'), v);
+      await p2.waitForTimeout(300);
+      assert.equal(NEXT_MASK.refused, 1, 'one refusal per document');
+      assert.equal(incidents.length, inc, 'no incident (it would carry the page URL); telemetry has the 400');
+    } finally {
+      NEXT.refuse = false;
+      await p2.close();
+    }
+  });
+
   await step('a typing pause fetches the search results, so Enter paints from cache', async () => {
     await page.fill('#ytc-q', '');
     await page.type('#ytc-q', 'roblox warm');
@@ -861,6 +916,54 @@ chrome.runtime.onMessage.addListener(m => {
     await page.press('#ytc-q', 'Enter');
     await page.waitForFunction(() => new URLSearchParams(location.search).get('search_query') === 'roblox warm' && document.querySelectorAll('#ytc-list .c').length > 5);
     assert.equal(log.api.filter(a => a.ep === 'search' && a.body.query === 'roblox warm').length, 1, 'Enter used the fetched results');
+  });
+
+  await step('search fetched ahead: low priority, one at a time (further typing aborts it), ≤ 10 a minute; arrowing onto a suggestion fetches its results and Enter paints them from memory; the text is never stored', async () => {
+    const failed = [];
+    const onFail = r => { if (r.url().includes('/youtubei/v1/search')) failed.push(r.postDataJSON()?.query); };
+    page.on('requestfailed', onFail);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Network.enable');
+    const prio = [];
+    cdp.on('Network.requestWillBeSent', e => { if (e.request.url.includes('/youtubei/v1/search')) prio.push({ q: JSON.parse(e.request.postData || '{}').query, p: e.request.initialPriority }); });
+    const searches = q => log.api.filter(a => a.ep === 'search' && a.body.query === q && !a.body.continuation).length;
+    try {
+      IMG.search = 1500;
+      await page.fill('#ytc-q', '');
+      await page.type('#ytc-q', 'cats warm');
+      for (let i = 0; i < 30 && !searches('cats warm'); i++) await page.waitForTimeout(25);
+      assert.equal(searches('cats warm'), 1, 'fetched during the pause');
+      await page.type('#ytc-q', 'er');
+      for (let i = 0; i < 40 && !failed.includes('cats warm'); i++) await page.waitForTimeout(25);
+      assert.ok(failed.includes('cats warm'), 'further typing aborts the search fetched ahead');
+      for (let i = 0; i < 40 && !searches('cats warmer'); i++) await page.waitForTimeout(25);
+      assert.equal(searches('cats warmer'), 1, 'the new text is fetched after its own pause');
+      assert.ok(prio.filter(x => x.q === 'cats warmer').every(x => x.p === 'Low'), 'low priority: ' + JSON.stringify(prio));
+      IMG.search = 0;
+      // Arrowing onto a suggestion: its results are fetched after a short rest; Enter then needs no request.
+      await page.fill('#ytc-q', '');
+      await page.type('#ytc-q', 'rob');
+      await page.waitForSelector('#ytc-sug li');
+      await page.waitForTimeout(400);
+      await page.keyboard.press('ArrowDown');
+      const pick = await page.inputValue('#ytc-q');
+      assert.ok(pick && pick !== 'rob', 'a row is chosen: ' + pick);
+      for (let i = 0; i < 30 && !searches(pick); i++) await page.waitForTimeout(25);
+      assert.equal(searches(pick), 1, 'the chosen suggestion is fetched ahead');
+      await page.waitForTimeout(150);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(q => new URLSearchParams(location.search).get('search_query') === q && document.querySelectorAll('#ytc-list .c').length > 5, pick);
+      assert.equal(searches(pick), 1, 'Enter used the results fetched ahead');
+      // Fetched ahead, never submitted: in memory only (no tab or extension storage holds the text).
+      const stored = await page.evaluate(async () => JSON.stringify(sessionStorage) + JSON.stringify(localStorage));
+      assert.ok(!stored.includes('cats warm'), 'not in this tab\'s storage');
+      const ext = await sw.evaluate(() => new Promise(r => chrome.storage.local.get(null, x => r(JSON.stringify(x)))));
+      assert.ok(!ext.includes('cats warm'), 'not in chrome.storage');
+    } finally {
+      IMG.search = 0;
+      page.off('requestfailed', onFail);
+      await cdp.detach().catch(() => {});
+    }
   });
 
   await step('direct channel load resolves the handle', async () => {
@@ -923,7 +1026,12 @@ chrome.runtime.onMessage.addListener(m => {
     assert.ok(imgs.every(i => i.dec === 'async'));
     const f = imgs[0];
     assert.match(f.srcset, /^https:\/\/i\.ytimg\.com\/vi_webp\/[\w-]{11}\/mqdefault\.webp 320w, https:\/\/i\.ytimg\.com\/vi\/[^ ]+ 360w, https:\/\/i\.ytimg\.com\/vi\/[^ ]+ 720w$/, f.srcset);
-    assert.ok(f.sizes.endsWith('460px'), f.sizes);
+    // `sizes` is the card's real width: at 1400 px a 1x screen takes the 320w webp, not the 720w file.
+    const w = await page.$eval('#ytc-list .c a.th img', e => e.getBoundingClientRect().width);
+    assert.ok(f.sizes.includes('(max-width:1700px) calc(25vw - 75px)'), f.sizes);
+    const said = await page.evaluate(() => innerWidth * 0.25 - 75); // 1400 px: four columns
+    assert.ok(Math.abs(said - w) < 12 && said < 320, `sizes says ${said} px, the card is ${w} px`);
+    assert.ok((await page.$eval('#ytc-list .c a.th img', e => e.currentSrc)).includes('/mqdefault.webp'), '1x: the 320w file');
     assert.equal(f.loading, null, 'first screen not lazy');
     // 1400 px viewport → 4 grid columns (5 above 1700 px) → first row high priority.
     assert.deepEqual(imgs.slice(0, 6).map(i => i.fp), ['high', 'high', 'high', 'high', null, null]);
@@ -4407,7 +4515,7 @@ chrome.runtime.onMessage.addListener(m => {
       HEDGE.stall = { ep: 'next', v: '-Bxc4gJluC0', n: 1 };
       await page.goto('https://www.youtube.com/watch?v=-Bxc4gJluC0', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-like', { timeout: 5000 });
-      const nx = calls('next').filter(a => a.body.videoId === '-Bxc4gJluC0' && !a.body.continuation && !a.url.includes('fields='));
+      const nx = calls('next').filter(a => a.body.videoId === '-Bxc4gJluC0' && !a.body.continuation && !a.url.includes('fields=contents%2F'));
       assert.equal(nx.length, 2, 'next hedged once');
       assert.equal(JSON.stringify(nx[1].body), JSON.stringify(nx[0].body));
       // Home's first page belongs to the Home path (src/app/homeready.rs), which sends its own single hedge:
@@ -5265,7 +5373,7 @@ chrome.runtime.onMessage.addListener(m => {
     assert.equal(searches[0].body.context.client.hl, 'en');
     assert.equal(searches[0].headers.authorization, undefined);
     assert.equal(searches[0].headers.cookie, undefined, 'anonymous (credentials omitted)');
-    assert.equal(reqs.filter(a => a.ep === 'next' && a.url.includes('fields=')).length, 0, 'no seed → related chain');
+    assert.equal(reqs.filter(a => a.ep === 'next' && a.url.includes('fields=contents%2F')).length, 0, 'no seed → related chain');
     assert.ok(reqs.filter(a => ['search', 'next'].includes(a.ep)).length <= 30, 'request bound');
     const shown = await cardIds();
     const titles = await page.locator('#ytc-list .c .t').allTextContents();
@@ -5734,7 +5842,7 @@ chrome.runtime.onMessage.addListener(m => {
     await page.waitForFunction(() => document.querySelector('#ytc-desc .fx-blk')?.textContent === 'Blocked · Undo');
     await page.waitForFunction(ids => ids.every(id => !document.querySelector(`#ytc-list .c[data-v="${id}"]`)), linked, { timeout: 10000 });
     await page.waitForFunction(n => document.querySelectorAll('#ytc-list .c').length === n, rel.length - 3, { timeout: 10000 });
-    const isCheck = a => a.ep === 'next' && a.url.includes('fields=');
+    const isCheck = a => a.ep === 'next' && a.url.includes('fields=contents%2F');
     // Wait for the queue to drain (cards whose next response was already in memory need no check).
     for (let i = 0, last = -1; i < 100; i++) { const c = log.api.slice(n).filter(isCheck).length; if (c === last && !FX.checksInFlight) break; last = c; await page.waitForTimeout(300); }
     const checks = log.api.slice(n).filter(isCheck);
@@ -5832,7 +5940,7 @@ chrome.runtime.onMessage.addListener(m => {
   await step('watch playlist (list=): panel from next, current row, near-end prefetch, end → next item at once, click jumps; Autoplay countdown, Cancel/Play now, Off remembered', async () => {
     const PL = 'PL_pGtHsOvhtxX3WHo-Hi268L78XBziem_';
     const items = JSON.parse(fx('next_list.json')).contents.twoColumnWatchNextResults.playlist.playlist.contents.map(c => c.playlistPanelVideoRenderer.videoId);
-    const nexts = () => log.api.filter(a => a.ep === 'next' && !a.body.continuation && !a.url.includes('fields='));
+    const nexts = () => log.api.filter(a => a.ep === 'next' && !a.body.continuation && !a.url.includes('fields=contents%2F'));
     await page.goto(`https://www.youtube.com/watch?v=${items[0]}&list=${PL}`, { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-pl .pli.cur');
     assert.ok(nexts().some(a => a.body.videoId === items[0] && a.body.playlistId === PL), 'next asks with the playlist');

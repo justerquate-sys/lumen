@@ -3,7 +3,7 @@
 //! topic feeds, search history and resume positions. A child module of
 //! `app` so the hooks in `app.rs` stay one line each.
 
-use super::{App, FeedState};
+use super::{App, FeedState, SEARCH_PICK_MS};
 use crate::{bridge, motion};
 use crate::features::filters::{self, Prefs, Surface};
 use crate::features::watch_later::{self as wl, Edit, Outcome, State};
@@ -1425,6 +1425,9 @@ impl App {
                 bridge::value("ytc-q", sel.map(|i| rows[i].as_str()).unwrap_or(&self.fx.sug.typed));
                 let typed = self.fx.sug.typed.clone();
                 self.fx_sug_render(&typed);
+                // Resting on a row fetches its results ahead (Enter then paints from memory).
+                let q: String = sel.map(|i| rows[i].as_str()).unwrap_or(&typed).trim().chars().take(100).collect();
+                self.search_warm_soon(&q, SEARCH_PICK_MS);
                 true
             }
             "Escape" => {

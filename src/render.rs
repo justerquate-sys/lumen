@@ -262,6 +262,10 @@ pub fn skeleton(route: &Route) -> String {
     s
 }
 
+/// `sizes` of a feed-grid thumbnail (see `Lay::sizes`).
+pub const GRID_SIZES: &str = "(max-width:560px) calc(100vw - 40px),(max-width:759px) calc(50vw - 29px),(max-width:950px) calc(50vw - 131px),\
+(max-width:1300px) calc(33.33vw - 93px),(max-width:1700px) calc(25vw - 75px),calc(20vw - 64px)";
+
 /// Which layout a card list is for: decides `sizes` and the first-row priority.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Lay {
@@ -280,7 +284,11 @@ impl Lay {
             };
         }
         match self {
-            Lay::Grid => "(max-width:560px) calc(100vw - 64px),(max-width:950px) calc(50vw - 40px),460px",
+            // The card's own width per `.grid` breakpoint (client.css: 5/4/3/2/1 columns at 1700/1300/950/560 px,
+            // the 224 px sidebar from 760 px, 20 px main padding, 18 px gaps). It was a flat 460 px above 950 px,
+            // so every 1x screen took the 720w file for a ~275 px card: 43 KB instead of the 320w webp's 11 KB
+            // (measured on i.ytimg.com, 3 Nov 2026).
+            Lay::Grid => GRID_SIZES,
             Lay::Rel => "(max-width:1640px) 168px,204px",
         }
     }

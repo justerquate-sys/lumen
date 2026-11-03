@@ -337,10 +337,12 @@ folds back into it when it expires.
   was ever stored), and the document's `ytcfg` gives the tab its visitor and YouTube's current client version.
   The player still waits for `chrome.storage` (its preferences).
 - **Thumbnails:** `srcset` width descriptors (`vi_webp/…/mqdefault.webp` 320w, YouTube's listed 360w and
-  720w) with `sizes` per layout, so the browser takes the smallest sharp file (1x screens: ~9 KB vs
-  14 KB per thumbnail, measured on i.ytimg.com; Retina keeps the 720w file); `fetchpriority=high` for the
-  first row, `loading=lazy` below the first screen, `decoding=async`, `preconnect` to `i.ytimg.com` and
-  `yt3.ggpht.com` in the shell.
+  720w) with `sizes` per layout, so the browser takes the smallest sharp file; the feed grid's `sizes` is the card's
+  real width per breakpoint (`render::GRID_SIZES`). Until 3 Nov 2026 it said 460 px above 950 px, so 1x screens
+  fetched the 43 KB 720w file for a ~275 px card instead of the 11 KB webp (measured on i.ytimg.com); now thumbnails
+  per channel boot are 1449 → 365 KB and the first row has loaded 121 → 103 ms after the cards' frame (p50, live
+  bench). Retina keeps the 720w file. `fetchpriority=high` for the first row, `loading=lazy` below the first screen,
+  `decoding=async`, `preconnect` to `i.ytimg.com` and `yt3.ggpht.com` in the shell.
 - **Build:** `opt-level = "z"` (Wasm −23 %, no measurable speed change in the e2e timings).
 - **Startup** (Chrome for Testing, fixtures, median of 30 loads, 1 Nov 2026): content script start → shell
   ≈ 1.4 ms: base64 decode 0.2, `WebAssembly.Module` 0.2 (V8 compiles lazily), instantiate 0.1, `boot()` →
@@ -352,13 +354,52 @@ folds back into it when it expires.
   the content script + ~9 ms of ours (decode + compile 2.3, app setup 2, shell 1–2, first request ~2); eager
   Wasm compilation (`--no-wasm-lazy-compilation`) changed neither startup nor the first watch page. So the
   owner's 210–440 ms `handler_ms` is mostly YouTube's document; every boot event now carries that breakdown
-  (`boot`, docs/debug-center.md) to confirm it on real data.
+  (`boot`, docs/debug-center.md) to confirm it on real data. Re-measured 3 Nov 2026 (`tools/bench`, 16 boots per
+  build): content script → Wasm instantiated 2 ms (p50), so a smaller Wasm (it is already `opt-level = "z"`, fat
+  LTO, one codegen unit, `panic = "abort"`, stripped) or lazy-loaded modules cannot buy a measurable boot.
 - **Hedged reads** (3 Nov 2026; `src/hedge.rs`): a `browse` / `next` / `search` / `resolve_url` request (and
   its continuation) that someone waits for and that has not answered by its deadline (≈ the session's p90 per
   endpoint, 0.7–2.5 s; 1.3 / 1.3 / 1.2 s for next / browse / search until 8 answers are in) goes out once more,
   identically; the first good answer wins, the other is aborted. Actions (like, subscribe, comment, save,
   playlists) never go out twice, background requests and Home's first page are not hedged. Measured with the
   live benchmark's injected slowness (`tools/bench`): see docs/debug-center.md "Hedged reads".
+- **Lighter `next`** (3 Nov 2026; `api::NEXT_FIELDS`): every watch-page `next` (the page, hover and cards-in-view
+  prefetches, the playlist and autoplay prefetches, their hedge copies) carries a `fields=` mask naming what the
+  watch page reads: title, views, date, owner, subscribe and like state, description, comments token and count,
+  chapters (panel, player bar and entity), the related column (lockups trimmed to id, type, image, title, avatar,
+  metadata rows and tap command; other column renderers whole), playlist, autoplay, topbar, `responseContext`,
+  `frameworkUpdates`. Dropped: the end screen, the structured-description panel, ticket/merchandise shelves, the
+  lockups' menus and colour palettes, tracking. Measured live (24 videos, signed out): the decoded answer
+  478 → 206 KB (43 %), gzip on the wire 62 → 28 KB, YouTube's time to first byte unchanged (774 vs 807 ms, noise);
+  per page view (`tools/bench`, 8 interleaved runs per build): InnerTube on the wire for a channel boot 625 → 383 KB,
+  its reload 583 → 375 KB, channel → watch → a related watch 1503 → 960 KB, a search session 1814 → 1284 KB (`next`
+  alone −55 %); a speculative `next` decodes to 201 instead of 537 KB (p50) and answers in 661 vs 679 ms. `api::tests` applies the mask to the recorded fixtures the way InnerTube does
+  and compares every parsed field; an ignored test (`YTC_NEXT_DIR=… cargo test -- --ignored next_mask_live`) does
+  the same on live answers and against YouTube's own masked answers; the e2e stub serves masked answers. InnerTube
+  answers a mask that names a field it does not know with **HTTP 400** for the whole request: then the same request
+  goes out at once without the mask (same id; the 400 shows in the telemetry as a `req.next`) and no mask is used
+  for the rest of the document. Continuations, search, browse and Home are not masked (Home must stay YouTube's
+  exact answer; search: "Known gaps"). Lumen TV: `next` is the anonymous WEB request there too, so the same mask
+  applies. YouTube's InnerTube answers only in gzip (with `br` or `zstd` alone it sends the body uncompressed), so
+  the browser's default `Accept-Encoding` is already the best; HTTP/3 is advertised and reused.
+- **Search ahead** (3 Nov 2026): a typing pause of **250 ms** (was 300) or resting **120 ms** on a suggestion chosen
+  with the arrow keys fetches that query's results at low priority, one at a time (more typing or another row
+  aborts the one in flight, unless a submitted search already waits for it), at most 10 a minute
+  (`util::budget_take`), kept in memory only (the page cache; never `sessionStorage` or `chrome.storage`; the
+  telemetry sees `req.search` `via: prefetch`, never the text). Enter then paints from memory or adopts the request
+  in flight; a pointer resting on a suggestion row prefetches it like any link. Lumen TV types into the same field
+  (the Android keyboard), so the same pause applies there. Measured live (8 runs per build): Enter after a 350 ms
+  pause 645 → 615 ms p50 (the request is in flight both times and now starts 50 ms earlier); Enter at once waits for
+  YouTube either way (its search answers in 0.7–0.9 s).
+- **The first watch open of a tab** (3 Nov 2026; Chrome traces at 4× CPU throttling): its click task is ~90–140 ms vs
+  ~50 ms for later opens. What is left: (1) the FLIP's destination read lays the new page out in the click (277 dirty
+  objects, 30–45 ms vs 12 ms later: first-time text shaping, the `<video>` element's 119 KB UA stylesheet, cold
+  layout); (2) ~300 Wasm functions run for the first time and V8 compiles each on its first call (lazy compilation):
+  eager compilation took the click's script time from 41–63 ms to ~27 ms, but an extension cannot set V8 flags.
+  Tried and dropped (no change in click → painted frame, `tools/bench --cpu=4`, 9 runs per build: first open p50
+  197 vs 198 ms): reading the FLIP destination in the next animation frame (the layout only moves into the frame);
+  running the watch page's pure markup builders once in idle time (compiles only ~25 of the ~300 functions; most are
+  the player mount's); a pre-warmed hidden `<video>` (saves the 2 ms stylesheet parse only).
 - **No layout reads per card.** The speculative prefetch of the cards in view (idle time after every paint and
   scroll chunk) measures each card's own box (`bridge::visible_hrefs(list, ".c", "a.t", n)`), never an element
   inside it: inside a `content-visibility:auto` card a measurement lays that card out on its own, one forced
@@ -1095,6 +1136,12 @@ but use the same rules), Shorts-style looping, storyboard thumbnails on the seek
   bundles never requested" fails about 1 run in 4, on `main`'s build as well. (Home's own document carries a CSP
   that keeps them from being fetched at all: rules.json 20.)
 - Suggestions come from YouTube's `/complete/search` with your cookies (like YouTube's own box).
+- Search answers are not field-masked: ~60 % of a search answer (928 KB decoded, 104 KB gzip) is
+  `expandableMetadata` (key-moment cards, up to 75 KB per result) that Lumen never renders, but a mask can only
+  list what to keep, so every result renderer type would have to be named (an unknown name is an HTTP 400, a
+  forgotten one silently drops results). Parse is 2–3 ms; the gain would be ~60 KB on the wire per search.
+- The VISIONOS `player` answers (the player's) are ~400 KB on the wire per channel → watch → watch session (hover and
+  cards-in-view prefetches); a `fields=` mask like `next`'s could roughly halve that.
 - The YouTube HTML document is still requested (and stopped at the first bytes, except Home with nothing ready,
   which reads it); the shell appears at roughly time-to-first-byte of that document.
 - After `window.stop()` the document's `load` event does not fire (readyState is `complete`); no effect
