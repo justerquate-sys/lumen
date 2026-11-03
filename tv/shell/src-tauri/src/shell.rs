@@ -13,6 +13,9 @@
 //! | `tel_info`     | speed telemetry: `{"on", "url", "dev", "queued", "sent", "error"}` (`dev`: the bundle has its telemetry variant) |
 //! | `tel_set`      | `{"on"?, "url"?}` → like `tel_info`, plus `"reload": true` when the page must load again (the script changed) |
 //! | `tel_find`     | looks for a debug center on the network (`--lan`): `{"url"}`                                      |
+//! | `ready_put`    | `{"record"}`: the page's ready Home response, kept sealed on disk for the next app start (`lumen_tv_core::readystore`) |
+//! | `ready_take`   | `{"record": <string or null>}`: the one kept for this account, younger than 10 min; once         |
+//! | `ready_drop`   | deletes it (something personalizing happened, or the page used its own copy)                     |
 //! | `tel_send`     | `{"perf": <batch>}` / `{"incident": <report>}` from the shim; kept for the debug center while on, else dropped |
 //!
 //! Updates: at launch and every 6 hours the latest GitHub release is checked (`lumen_tv_core::release`);
@@ -31,6 +34,7 @@ use std::sync::{Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use lumen_tv_core::auth::{Account, Endpoints};
 use lumen_tv_core::net::Http;
+use lumen_tv_core::readystore;
 use lumen_tv_core::release::{self, ApkOffer, Bundle};
 use lumen_tv_core::rules::{Decision, Rules};
 use lumen_tv_core::store::Store;
@@ -56,11 +60,18 @@ fn builtin() -> Bundle {
     if !dev.is_empty() {
         files.insert(release::DEV_FILE.into(), dev.into());
     }
+    let mut bin = std::collections::BTreeMap::new();
+    for (name, bytes) in [(release::WASM_FILE, &include_bytes!(env!("LUMEN_TV_WASM"))[..]), (release::DEV_WASM_FILE, &include_bytes!(env!("LUMEN_TV_DEV_WASM"))[..])] {
+        if !bytes.is_empty() {
+            bin.insert(name.to_string(), bytes.to_vec());
+        }
+    }
     Bundle {
         seq: include_str!("../bundle/seq").trim().parse().unwrap_or(0),
         client: include_str!("../bundle/client").trim().into(),
         source: "builtin",
         files,
+        bin,
     }
 }
 
@@ -77,6 +88,14 @@ pub struct Shell {
     tel: Mutex<Tel>,
     tel_wake: Condvar,
     tel_http: Http,
+    ready: Mutex<ReadySlot>,
+}
+
+/// The ready Home response kept from the last run: read (and deleted from disk) once, at launch.
+#[derive(Default)]
+struct ReadySlot {
+    loaded: bool,
+    record: Option<String>,
 }
 
 /// Telemetry: the owner's choice, the reports waiting, what happened to the last delivery.
@@ -182,6 +201,7 @@ pub fn init(dir: PathBuf) {
         tel: Mutex::new(t),
         tel_wake: Condvar::new(),
         tel_http: Http::new(Duration::from_secs(5)),
+        ready: Mutex::new(ReadySlot::default()),
     });
     std::thread::spawn(|| {
         if let Some(s) = get() {
@@ -194,6 +214,9 @@ pub fn init(dir: PathBuf) {
     // `auth_token` call waits on the same lock and gets the fresh token without a second request.
     std::thread::spawn(|| {
         if let Some(s) = get() {
+            // The last run's ready Home response, unsealed before the page asks for it (Keystore work stays off the
+            // UI thread and runs while the WebView starts).
+            s.ready_load(&mut s.ready.lock().unwrap());
             let _ = s.account.lock().unwrap().token(&s.http, now());
         }
     });
@@ -206,8 +229,32 @@ impl Shell {
         crate::script::compose(&b.0, version().0, on)
     }
 
+    fn ready_path(&self) -> PathBuf {
+        self.dir.join(readystore::FILE)
+    }
+
+    fn ready_load(&self, slot: &mut ReadySlot) {
+        if !std::mem::replace(&mut slot.loaded, true) {
+            let fp = self.account.lock().unwrap().fingerprint();
+            slot.record = readystore::take(&self.ready_path(), &fp, now(), host::open);
+        }
+    }
+
+    fn ready_drop(&self) {
+        readystore::remove(&self.ready_path());
+        let mut g = self.ready.lock().unwrap();
+        g.loaded = true;
+        g.record = None;
+    }
+
+    /// The Wasm the page asks for (`/__lumen/client.wasm`, format 2): the telemetry variant's while telemetry runs.
+    pub fn wasm(&self) -> Vec<u8> {
+        let on = self.tel.lock().unwrap().settings.on;
+        crate::script::wasm(&self.bundle.read().unwrap().0, on).to_vec()
+    }
+
     fn tel_info(&self, reload: bool) -> String {
-        let dev = !self.bundle.read().unwrap().0.file(release::DEV_FILE).is_empty();
+        let dev = self.bundle.read().unwrap().0.has_dev();
         let t = self.tel.lock().unwrap();
         let mut v = json!({"on": t.settings.on, "url": t.settings.url, "dev": dev, "queued": t.queue.len(), "sent": t.sent, "error": t.error});
         if reload {
@@ -256,9 +303,31 @@ impl Shell {
         match cmd {
             "auth_token" => Ok(lumen_tv_core::auth::token_json(self.account.lock().unwrap().token(&self.http, now())?.as_ref())),
             "auth_start" => self.account.lock().unwrap().start(&self.http, now()),
-            "auth_poll" => Ok(self.account.lock().unwrap().poll(&self.http, now())),
+            "auth_poll" => {
+                let r = self.account.lock().unwrap().poll(&self.http, now());
+                if serde_json::from_str::<Value>(&r).ok().and_then(|v| v.get("state").and_then(Value::as_str).map(|x| x == "done")).unwrap_or(false) {
+                    // Another account (or the first): nothing kept for the one before.
+                    self.ready_drop();
+                }
+                Ok(r)
+            }
             "auth_signout" => {
                 self.account.lock().unwrap().sign_out(&self.http);
+                self.ready_drop();
+                Ok("{}".into())
+            }
+            "ready_put" => {
+                let rec = arg.get("record").and_then(Value::as_str).ok_or("no record")?;
+                let fp = self.account.lock().unwrap().fingerprint();
+                readystore::put(&self.ready_path(), &fp, now(), rec, host::seal).map(|_| "{}".into())
+            }
+            "ready_take" => {
+                let mut g = self.ready.lock().unwrap();
+                self.ready_load(&mut g);
+                Ok(json!({"record": g.record.take()}).to_string())
+            }
+            "ready_drop" => {
+                self.ready_drop();
                 Ok("{}".into())
             }
             "store_get" => Ok(self.store.lock().unwrap().get(&arg).to_string()),

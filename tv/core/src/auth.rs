@@ -85,6 +85,15 @@ impl Account {
         self.refresh.is_some()
     }
 
+    /// Who is signed in, without the token: `in:` + 16 hex of SHA-256(refresh token), or `out`. Kept with data that
+    /// belongs to one account (the ready Home response), so another account never gets it.
+    pub fn fingerprint(&self) -> String {
+        match &self.refresh {
+            Some(r) => format!("in:{}", &crate::release::sha256_hex(r.as_bytes())[..16]),
+            None => "out".into(),
+        }
+    }
+
     /// A valid access token (refreshed when it runs out within 5 minutes), `Ok(None)` when signed
     /// out (or the grant was revoked: the account is then signed out here too), `Err` on a network
     /// failure (the page keeps what it has).

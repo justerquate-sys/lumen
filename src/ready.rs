@@ -11,7 +11,9 @@
 //!
 //! It is shown once (taken out when used) and lives in memory plus this tab's sessionStorage
 //! (`KEY`, parsed and re-validated like a snapshot; never chrome.storage or localStorage), the same
-//! place as the feed snapshots (CONTRIBUTING, privacy rules).
+//! place as the feed snapshots (CONTRIBUTING, privacy rules). The one exception (owner decision, 3 Nov
+//! 2026): in the TV app the shell also keeps it sealed on disk for the next app start
+//! (`tv/core/src/readystore.rs`: the same account, younger than `MAX_AGE_MS`, read once).
 
 use crate::actions::notify::Topbar;
 use crate::config::Auth;
@@ -65,6 +67,7 @@ pub fn generation() -> u32 {
 pub fn taint() {
     TAINT.with(|t| t.set(t.get().wrapping_add(1)));
     crate::bridge::session_del(KEY);
+    crate::tv::ready_drop();
 }
 
 /// Requests that change what YouTube recommends (endpoint path after `/youtubei/v1/`).

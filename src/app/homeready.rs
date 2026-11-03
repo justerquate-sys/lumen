@@ -61,6 +61,8 @@ impl App {
             None => ready::from_json(&bridge::session_get(ready::KEY)),
         };
         bridge::session_del(ready::KEY);
+        // (Used or not, it is gone: the TV shell's copy of it too.)
+        crate::tv::ready_drop();
         let r = r.filter(|r| ready::usable(r, &self.ready_acct(), bridge::epoch()));
         self.perf.hit("home-ready", r.is_some());
         r
@@ -166,7 +168,9 @@ impl App {
             let seen: std::collections::HashSet<String> = r.items.iter().map(|i| i.key().to_string()).collect();
             r.items.extend(f.items.into_iter().filter(|i| !seen.contains(i.key())));
             r.cont = f.cont;
-            bridge::session_set(ready::KEY, &ready::to_json(r));
+            let rec = ready::to_json(r);
+            bridge::session_set(ready::KEY, &rec);
+            crate::tv::ready_put(&rec);
             return;
         }
         let f = parse::browse(&j);
@@ -187,7 +191,9 @@ impl App {
             topbar: crate::actions::notify::topbar(&j),
             logged_out: ctx.logged_out,
         };
-        bridge::session_set(ready::KEY, &ready::to_json(&r));
+        let rec = ready::to_json(&r);
+        bridge::session_set(ready::KEY, &rec);
+        crate::tv::ready_put(&rec);
         self.hr.slot = Some((r, generation));
         // Its first continuation too (as the page would preload it), so a reload has both.
         if let Some(token) = f.cont {

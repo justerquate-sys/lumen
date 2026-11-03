@@ -1278,7 +1278,9 @@ html[data-ytc-tv] #ytc-info :is(.wn .m,.wsub,.wa,.desc,.ych){display:none}
 /* The bottom: time row, the thick seek bar, the round buttons. */
 html[data-ytc-tv] .pctl{z-index:12;padding:6rem 3.625rem 2.1875rem;background:linear-gradient(rgba(10,13,14,0),rgba(10,13,14,.9) 70%);transition:opacity var(--d-pop) var(--e-out),transform var(--d-panel) var(--e-out)}
 html[data-ytc-tv] .player.idle .pctl{transition:opacity var(--d-spring-soft) var(--spring),transform var(--d-panel) var(--e-out)}
-html[data-ytc-tv] .player:has(.pctl :focus),html[data-ytc-tv] .player:has(.pctl :focus) *{cursor:default!important}
+/* (A pointer's cursor stays while the controls have the focus; only with a pointer: on a remote this :has() restyled
+   every element of the player on each button move, ~280 elements three times, ~200 ms per press at a TV's CPU.) */
+@media (any-pointer:fine){html[data-ytc-tv] .player:has(.pctl :focus),html[data-ytc-tv] .player:has(.pctl :focus) *{cursor:default!important}}
 html[data-ytc-tv] .ptr{display:flex;align-items:baseline;gap:.75rem;margin:0 0 .625rem;font-size:.875rem;line-height:1.25rem;font-variant-numeric:tabular-nums}
 html[data-ytc-tv] .ptr .ptime{margin:0;font-size:.875rem;color:var(--tx)}
 html[data-ytc-tv] .ptr .pchap{display:block;max-width:30rem;height:auto;margin:0;padding:0;font-size:.875rem;line-height:1.25rem;color:var(--mu);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

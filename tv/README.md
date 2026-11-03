@@ -103,10 +103,14 @@ node tv/scripts/bench.cjs [--cpu 6] [cold reload keys hold open seek menu back]
 ```
 
 The first step is `./build.sh --tv`: the shared client built as the **public** build into
-`tv/shell/src-tauri/bundle/` (`content.js`, the extension's `client.css`, `native.css` and `rules.json`, a
-bundle sequence `seq` and the client version `client`; `browser/build.cjs --target=tv`). That folder is the
+`tv/shell/src-tauri/bundle/` (`content.js`, its Wasm `client.wasm`, the extension's `client.css`, `native.css` and
+`rules.json`, a bundle sequence `seq` and the client version `client`; `browser/build.cjs --target=tv`). Since app
+0.3.0 the bundle is **format 2**: `content.js` (130 KB) carries no Wasm; it fetches `/__lumen/client.wasm`, which the
+shell answers from the bundle, right after stopping YouTube's page, and compiles it while it streams in (the
+extension keeps the Wasm inside its `content.js`). A format-1 bundle (the Wasm inside `content.js`) still runs on
+0.3.0. That folder is the
 APK's built-in client and what a release publishes; `extension/` is not touched. `./build.sh --tv --dev` adds
-`content-dev.js` there, the same client with its development-build speed telemetry: `tv/scripts/build.sh` builds
+`content-dev.js` and `client-dev.wasm` there, the same client with its development-build speed telemetry: `tv/scripts/build.sh` builds
 both (the APK carries both, a release signs both), and the app runs it only while its owner turned telemetry on
 (see *Speed telemetry*). `SEQ=<n>` sets the
 sequence (default: the current Unix time; the app installs a bundle only when its `seq` is higher than the
@@ -160,7 +164,10 @@ the next TV release or also carry `lumen-tv.apk`, or the first-install link answ
 
 The repository the app reads its releases from is compiled in: `LUMEN_TV_REPO=owner/name` when building (default
 `justerquate-sys/lumen`); give `release.cjs` the same `LUMEN_TV_REPO` when publishing from a fork. A client-only
-release (most of them) needs no new APK: the TVs pick up the bundle. For a new APK, bump `version` in
+release (most of them) needs no new APK: the TVs pick up the bundle. A format-2 bundle (`client.wasm`) needs app 0.3.0:
+`release.cjs` then sets the manifest's `min_shell` to 0.3.0's version code (3000) at least, so an older app never
+installs it: its update check reports that the interface needs a newer app, keeps running the bundle it has and offers
+the release's APK (About & updates → Install update). For a new APK, bump `version` in
 `tv/shell/src-tauri/Cargo.toml` (the version code is derived from it) and release.
 
 Testing an update locally: `node tv/scripts/release.cjs --dry-run --no-build` then
@@ -215,6 +222,21 @@ numbers drift; the comparison does not):
 | Held arrow (20 repeats/s), 6× CPU, per repeat | 45 / 277 ms, long frames 5.6–7.6 s per 7 s | 28 / 103 ms, 1.1–2.5 s |
 | D-pad press, 1× CPU | 20 / 36 ms (handler 9) | 16 / 22 ms (handler 3) |
 
+Second round (3 Nov 2026, same method; the Mac at load ≈ 11, so absolute numbers are higher):
+
+| Path | Before p50 / p90 | After p50 / p90 |
+|---|---|---|
+| Cold start → Home painted, format 1 → 2 (no Wasm in the injected script) | 2122 / 2331 ms | 1943 / 2202 ms |
+| … YouTube's document → the client's shell | 291 / 374 ms | 215 / 323 ms |
+| Cold start, the client's shell → Home painted: network path → the kept ready response | 477 / 698 ms (signed out: a small Home request; signed in it is the 0.9–1.7 s TVHTML5 request) | 92 / 106 ms |
+| Player overlay, one button move, 6× CPU | ~200 ms (12 presses: 77–398) | ~40 ms (15–248) |
+
+What changed in the second round: the Wasm left the injected script (format 2, above; the script V8 parses on every app
+start went from 1.6 MB to 130 KB, and the Wasm compiles while it streams, off the main thread); a cold start paints the
+ready Home response the shell kept (below); and the player's `:has(.pctl :focus) *` cursor rule applies only with a
+pointer (it restyled the whole player, ~280 elements three times, on every button move). Reloads gained little from the
+split: V8 already reuses its compile of the injected script within a run.
+
 What changed: the shell serves the document for pages the client renders (`rules::client_page`; the client stops
 YouTube's page at its first byte, so YouTube's HTML only cost a round trip; not before the WebView holds YouTube's
 visitor cookies, so the first start ever still gets YouTube's page); the document-start script is composed off the UI
@@ -223,6 +245,11 @@ thread while the WebView starts; the focus engine measures a card by its own box
 held arrow is not link intent (only where it rests: no watch prefetch for every card it passes); and two desktop
 keyboard rules with `:has(:focus-visible)` apply only where there is a pointer (`@media (any-pointer:fine)`): on every
 focus move they made the browser restyle the whole grid twice (~340 elements, 70 ms per press at a TV's CPU).
+
+**The ready Home response across app starts** (owner decision, 3 Nov 2026): the page's ready Home response (what
+YouTube answered to its Home request, fetched ahead for the next Home) is also kept by the shell, sealed with the
+account's Android Keystore key in `files/ready.bin`, for that account only and at most 10 minutes; it is read and
+deleted at the next launch, so a cold start within 10 minutes paints Home on its first frame (`readystore.rs`).
 
 ## Architecture
 
@@ -244,6 +271,7 @@ tv/
     rules.rs              extension/rules.json (declarativeNetRequest subset) for the WebView; the client's own
                           pages (served the shell's document)
     store.rs              chrome.storage.local as a JSON file
+    readystore.rs         the ready Home response kept across app starts (sealed, one account, 10 min, read once)
     tel.rs                speed telemetry to the owner's debug center (off by default; LAN only, memory only)
   shim/shim.js            the extension runtime for the page: YTC_PLATFORM/YTC_SHELL, chrome.storage
                           and chrome.runtime (reports to the shell while telemetry is on), the stylesheet,

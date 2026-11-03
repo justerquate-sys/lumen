@@ -33,10 +33,12 @@ object Native {
   /** The desktop user agent the client needs (www.youtube.com, not m.youtube.com). */
   @JvmStatic external fun userAgent(webViewDefault: String): String
   /** The client's rules for a request: 0 pass, 1 block, 2 fetch here and allow CORS, 3 a page the client renders
-   *  (served [document] instead of YouTube's page). */
+   *  (served [document] instead of YouTube's page), 4 the client's Wasm ([wasm]). */
   @JvmStatic external fun decide(url: String, mainFrame: Boolean, top: String): Int
   /** The document for a page the client renders: it stops YouTube's at the first byte and writes its own. */
   @JvmStatic external fun document(): String
+  /** The client's Wasm (decide → 4: `/__lumen/client.wasm`): the page compiles it while it streams in. */
+  @JvmStatic external fun wasm(): ByteArray
   /** The owner said yes to a shell update: download, verify, then [Host.installApk]. */
   @JvmStatic external fun acceptUpdate()
 }
@@ -155,6 +157,11 @@ class Interceptor(private val inner: WebViewClient) : WebViewClient() {
         // own document saves that round trip. Not before this WebView has YouTube's visitor cookies (the very first
         // start gets YouTube's page: its cookies, a consent step if YouTube asks for one).
         3 -> if (request.method == "GET" && visitor()) return WebResourceResponse("text/html", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(doc))
+        4 -> {
+          val w = Native.wasm()
+          return if (w.isEmpty()) WebResourceResponse("text/plain", "utf-8", 404, "Not Found", mapOf(), ByteArrayInputStream(ByteArray(0)))
+          else WebResourceResponse("application/wasm", null, 200, "OK", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(w))
+        }
       }
     }
     return inner.shouldInterceptRequest(view, request)

@@ -449,6 +449,27 @@ pub fn parse_poll(json: &str) -> Poll {
     }
 }
 
+/// The TV app keeps the ready Home response for the next app start (`ready_put`, shell-side sealed, one account, 10 min,
+/// read once): the page hands it every record it keeps. Fire-and-forget calls (seq 0: no answer is awaited).
+pub fn ready_put(record: &str) {
+    if on() {
+        crate::bridge::shell(0, "ready_put", &json!({"record": record}).to_string());
+    }
+}
+
+/// The ready response is gone (used, or something personalizing happened): the shell's copy goes too.
+pub fn ready_drop() {
+    if on() {
+        crate::bridge::shell(0, "ready_drop", "null");
+    }
+}
+
+/// `ready_take`'s answer: the record kept from the last run, if any.
+pub fn parse_ready_take(json: &str) -> Option<String> {
+    let v = crate::json::parse_str(json)?;
+    v.get("record").and_then(|r| r.as_str()).filter(|r| !r.is_empty()).map(String::from)
+}
+
 /// The shell's speed telemetry (`tel_info`, `tel_set`): off unless the owner turned it on (About & updates →
 /// Developer); while on, the shell runs the interface's telemetry build (`dev`; without one only errors go) and
 /// delivers the reports to the debug center at `url` on the owner's network.
@@ -675,5 +696,13 @@ mod tests {
         assert_eq!(super::tel_set_json(Some(true), None), r#"{"on":true}"#);
         assert_eq!(super::tel_set_json(None, Some(" 192.168.1.20 ")), r#"{"url":"192.168.1.20"}"#);
         assert_eq!(super::tel_set_json(Some(true), Some("a\"b")), r#"{"on":true,"url":"a\"b"}"#);
+    }
+
+    #[test]
+    fn ready_take_answer() {
+        assert_eq!(super::parse_ready_take(r#"{"record":"{\"v\":1}"}"#).as_deref(), Some(r#"{"v":1}"#));
+        assert_eq!(super::parse_ready_take(r#"{"record":null}"#), None);
+        assert_eq!(super::parse_ready_take(r#"{"record":""}"#), None);
+        assert_eq!(super::parse_ready_take("\"unknown command ready_take\""), None);
     }
 }

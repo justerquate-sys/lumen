@@ -364,7 +364,9 @@ folds back into it when it expires.
   inside it did); a held arrow is not link intent, only where it rests on the key's release (before, every card it
   passed started a watch prefetch, `next` + VISIONOS, 20 a second); and the desktop's two `:has(:focus-visible)`
   keyboard rules apply only where there is a pointer (`@media (any-pointer:fine)`): every focus move flipped them
-  false → true, a whole-grid restyle twice per press (~340 elements, ~70 ms at a TV's CPU). The TV app's own document
+  false → true, a whole-grid restyle twice per press (~340 elements, ~70 ms at a TV's CPU); the same for the player's
+  `:has(.pctl :focus) *` cursor rule (the whole player restyled on every overlay button move, ~200 → ~40 ms at 6×).
+  The TV app's own document
   and the rest of its start path: tv/README.md "Speed".
 - **Restored pages** (back to a feed) lay all cards out for the scroll jump (`.rs`, 1 s): cards are
   `content-visibility:auto` with a 240 px placeholder, so a freshly written page would otherwise land on other
@@ -416,8 +418,13 @@ never shown first and then flipped (the only exception is a YouTube that has not
   update switching in, a reload, the screen loading again for a telemetry change) and the app going to the background (the activity is
   never recreated: it handles its configuration changes, and Back on Home only moves the task back), but not a new
   app process. So the shell's memory would keep it no longer than the page's `sessionStorage` already does (checked
-  3 Nov 2026); the ready response stays tab-scoped as on desktop and a cold app start takes the network path (keeping
-  it across app starts would mean persisting a recommendation payload on disk: an owner decision, not done). That path's first step is the OAuth refresh behind `auth_token`
+  3 Nov 2026); the ready response stays tab-scoped as on desktop and a cold app start takes the network path On a
+  cold app start the shell's kept copy stands in (owner decision, 3 Nov 2026; CONTRIBUTING "Privacy"): every record
+  the page keeps also goes to the shell (`ready_put`), which seals it with the account's Android Keystore key and
+  writes it to `files/ready.bin` for that account (`readystore.rs`; signing out or another account deletes it). At
+  launch the shell unseals and deletes it in the background, keeping it in memory only if it is that account's and
+  younger than 10 min; the held first page asks for it with the token (`ready_take`), and Home paints it on its
+  first frame, then refills as usual. A used or tainted ready response is dropped at the shell too (`ready_drop`). That path's first step is the OAuth refresh behind `auth_token`
   (a new process holds no access token): the shell now starts it at launch (`shell::init`), in parallel with the
   WebView, the document and the client's Wasm, instead of when the page first asks. While a cold start holds the
   first page for the token, nothing goes out without it (no snapshot refresh, no redo for another session index).

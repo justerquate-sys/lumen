@@ -2,14 +2,14 @@
 //! the client bundle, as one function so nothing leaks into the page's globals but what the shim
 //! defines on purpose.
 
-use lumen_tv_core::release::{Bundle, DEV_FILE};
+use lumen_tv_core::release::{Bundle, DEV_FILE, DEV_WASM_FILE, WASM_FILE};
 
 const SHIM: &str = include_str!("../../../shim/shim.js");
 
 /// The build a report names (the debug center groups by it): the client, the shell, the bundle's source and, while
 /// telemetry is on, `telemetry`.
 pub fn build_name(b: &Bundle, shell_version: &str, tel: bool) -> String {
-    let dev = if tel && !b.file(DEV_FILE).is_empty() { ", telemetry" } else { "" };
+    let dev = if tel && b.has_dev() { ", telemetry" } else { "" };
     format!("{} (TV {shell_version}, {}{dev})", b.client, b.source)
 }
 
@@ -18,10 +18,7 @@ pub fn build_name(b: &Bundle, shell_version: &str, tel: bool) -> String {
 pub fn compose(b: &Bundle, shell_version: &str, tel: bool) -> String {
     let cfg = serde_json::json!({"version": shell_version, "version_name": build_name(b, shell_version, tel), "tel": tel});
     let css = serde_json::json!({"client": b.file("client.css"), "native": b.file("native.css")});
-    let js = match b.file(DEV_FILE) {
-        dev if tel && !dev.is_empty() => dev,
-        _ => b.file("content.js"),
-    };
+    let js = if tel && b.has_dev() { b.file(DEV_FILE) } else { b.file("content.js") };
     let mut s = String::with_capacity(js.len() + 2 * 1024 * 1024);
     s.push_str("(() => {\n'use strict';\nconst CFG = ");
     s.push_str(&cfg.to_string());
@@ -33,6 +30,12 @@ pub fn compose(b: &Bundle, shell_version: &str, tel: bool) -> String {
     s.push_str(SHIM);
     s.push_str("\n})();\n");
     s
+}
+
+/// The Wasm the page's `content.js` asks for (format 2, `/__lumen/client.wasm`): the telemetry variant's while it
+/// runs. Empty for a format-1 bundle (its Wasm is inside `content.js`).
+pub fn wasm(b: &Bundle, tel: bool) -> &[u8] {
+    if tel && b.has_dev() && !b.bin_file(WASM_FILE).is_empty() { b.bin_file(DEV_WASM_FILE) } else { b.bin_file(WASM_FILE) }
 }
 
 /// A desktop Chrome user agent with the WebView's own Chrome version: www.youtube.com serves its
@@ -72,6 +75,7 @@ mod tests {
             client: "0.8.6 (x)".into(),
             source: "builtin",
             files,
+            ..Default::default()
         };
         let s = super::compose(&b, "0.1.0", false);
         assert!(s.starts_with("(() => {") && s.trim_end().ends_with("})();"));
@@ -88,10 +92,27 @@ mod tests {
         let mut files = std::collections::BTreeMap::new();
         files.insert("content.js".to_string(), "public();".to_string());
         files.insert("content-dev.js".to_string(), "dev();".to_string());
-        let b = lumen_tv_core::release::Bundle { seq: 1, client: "0.10.0 (x)".into(), source: "release", files };
+        let b = lumen_tv_core::release::Bundle { seq: 1, client: "0.10.0 (x)".into(), source: "release", files, ..Default::default() };
         let off = super::compose(&b, "0.2.0", false);
         assert!(off.contains("public();") && !off.contains("dev();") && off.contains(r#""version_name":"0.10.0 (x) (TV 0.2.0, release)""#));
         let on = super::compose(&b, "0.2.0", true);
         assert!(on.contains("dev();") && !on.contains("public();") && on.contains(r#""version_name":"0.10.0 (x) (TV 0.2.0, release, telemetry)""#));
+    }
+
+    #[test]
+    fn the_wasm_pairs_with_its_script() {
+        let mut b = lumen_tv_core::release::Bundle { seq: 1, client: "c".into(), source: "builtin", ..Default::default() };
+        b.files.insert("content.js".into(), "loader();".into());
+        b.files.insert("content-dev.js".into(), "dev_loader();".into());
+        b.bin.insert("client.wasm".into(), b"PUB".to_vec());
+        // Format 2 without the telemetry Wasm: the telemetry variant cannot run, telemetry on gets the public pair.
+        assert!(!b.has_dev());
+        assert!(super::compose(&b, "0.3.0", true).contains("loader();") && super::wasm(&b, true) == b"PUB");
+        b.bin.insert("client-dev.wasm".into(), b"DEV".to_vec());
+        assert!(super::compose(&b, "0.3.0", true).contains("dev_loader();") && super::wasm(&b, true) == b"DEV");
+        assert!(super::compose(&b, "0.3.0", false).contains("loader();") && super::wasm(&b, false) == b"PUB");
+        // Format 1 (the Wasm inside content.js): nothing to serve.
+        b.bin.clear();
+        assert!(super::wasm(&b, false).is_empty() && b.has_dev());
     }
 }

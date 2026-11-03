@@ -6343,6 +6343,49 @@ chrome.runtime.onMessage.addListener(m => {
     } finally { await tvClose(tv); }
   });
 
+  await step('TV bundle (format 2): content.js without the Wasm boots the way the app injects it (shim + bundle at document start, no extension), its Wasm streamed from /__lumen/client.wasm as the shell serves it; a missing Wasm falls back to YouTube\'s page', async () => {
+    const root = path.join(__dirname, '..'), bdir = path.join(root, 'tv', 'shell', 'src-tauri', 'bundle');
+    const loader = () => fs.existsSync(path.join(bdir, 'client.wasm')) && fs.readFileSync(path.join(bdir, 'content.js'), 'utf8').includes('/__lumen/client.wasm');
+    if (!loader()) require('node:child_process').execFileSync(path.join(root, 'build.sh'), ['--tv'], { cwd: root, stdio: 'ignore' });
+    const js = fs.readFileSync(path.join(bdir, 'content.js'), 'utf8');
+    assert.ok(js.length < 700_000 && !js.includes('function payload(){/*'), 'no Wasm inside content.js (' + js.length + ' bytes)');
+    const wasm = fs.readFileSync(path.join(bdir, 'client.wasm'));
+    const shim = fs.readFileSync(path.join(root, 'tv', 'shim', 'shim.js'), 'utf8');
+    const css = fs.readFileSync(path.join(bdir, 'client.css'), 'utf8');
+    // As tv/shell/src-tauri/src/script.rs composes it, with a stand-in for the shell's IPC.
+    const script = `globalThis.__TAURI_INTERNALS__ = { invoke: (_, a) => Promise.resolve({ auth_token: '{"token":null}', shell_info: '{"version":"0.3.0","version_code":3000,"bundle":{"seq":1,"client":"x","source":"builtin"},"update":{"state":"idle"},"offer":null}', store_get: '{}', store_set: '{}', ready_take: '{"record":null}' }[a.cmd] || '{}') };
+const ytcRun = () => { 'use strict'; const CFG = ${JSON.stringify({ version: '0.3.0', version_name: 'e2e', tel: false })}; const CSS = ${JSON.stringify({ client: css, native: '' })}; const ytcClient = () => {\n${js}\n};\n${shim}\n};
+// (Playwright runs init scripts before the root element exists; the WebView's document-start script runs once it does.)
+if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if (document.documentElement) { o.disconnect(); ytcRun(); } }).observe(document, { childList: true });`;
+    const browser = await chromium.launch(chromiumOptions());
+    try {
+      for (const served of [true, false]) {
+        const c = await browser.newContext({ viewport: { width: 960, height: 540 } });
+        await c.route('**/*', r => {
+          const u = new URL(r.request().url());
+          if (u.hostname === 'www.youtube.com' && u.pathname === '/__lumen/client.wasm') return served ? r.fulfill({ status: 200, contentType: 'application/wasm', body: wasm }) : r.fulfill({ status: 404, body: '' });
+          // The shell's own document for the client's pages (tv/core rules::CLIENT_DOCUMENT; YouTube's own for ?yt-native=1).
+          if (r.request().isNavigationRequest() && u.hostname === 'www.youtube.com' && !u.searchParams.has('yt-native')) return r.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>YouTube</title></head><body></body></html>' });
+          return handle(r);
+        });
+        await c.addInitScript(script);
+        const p = await c.newPage();
+        const errors = []; p.on('pageerror', e => errors.push(String(e)));
+        const logs = []; p.on('console', m => logs.push(m.text().slice(0, 300)));
+        await p.goto('https://www.youtube.com/results?search_query=tv+format+two', { waitUntil: 'commit' });
+        if (served) {
+          await p.waitForSelector('#ytc-list .c a.t', { timeout: 10000 }).catch(e => { throw new Error(e.message + ' ' + JSON.stringify(logs.slice(0, 5))); });
+          const d = await p.evaluate(() => ({ ...document.documentElement.dataset }));
+          assert.ok(d.ytcTv === '1' && +d.ytcWasm >= +d.ytcScript && +d.ytcShell >= +d.ytcWasm, 'booted in TV mode from the served Wasm: ' + JSON.stringify(d));
+          assert.deepEqual(errors, []);
+        } else {
+          await p.waitForURL(/yt-native=1/, { timeout: 10000 });
+        }
+        await c.close();
+      }
+    } finally { await browser.close(); }
+  });
+
   await step('TV shim (tv/shim/shim.js): the client\'s reports (ytcPerf, ytcIncident) reach the shell (tel_send) only while telemetry is on; off they go nowhere', async () => {
     const vm = require('node:vm');
     const shim = fs.readFileSync(path.join(__dirname, '..', 'tv', 'shim', 'shim.js'), 'utf8');
@@ -6635,6 +6678,70 @@ chrome.runtime.onMessage.addListener(m => {
     } finally {
       HOME.stall = 0; HOME.stamp = false; HOME.rich = wasRich;
       await tv.evaluate(() => { for (const k of ['ytc:platform', 'ytc:shell', 'ytc-test-noready']) localStorage.removeItem(k); }).catch(() => {});
+      await tv.close();
+    }
+  });
+
+  await step('TV app (signed in), cold start: the ready Home response the shell kept (ready_take) paints Home on the first frame, no Home request before it; every ready record the page keeps goes to the shell (ready_put), a used one is dropped; expired, another account\'s or none → the network path', async () => {
+    const tv = await ctx.newPage();
+    const token = 'ya29.' + 'k'.repeat(60);
+    const wasRich = HOME.rich;
+    HOME.rich = true; HOME.stamp = true;
+    const homeReqs = () => log.api.filter(a => a.ep === 'browse' && a.body?.browseId === 'FEwhat_to_watch');
+    const shellLog = () => tv.evaluate(() => JSON.parse(localStorage.getItem('ytc:shell-log') || '[]'));
+    // A cold app start: no tab session (no token mirror, no ready copy); the shell answers ready_take with `rec`.
+    const cold = async rec => {
+      await tv.evaluate(r => {
+        const t = JSON.parse(localStorage.getItem('ytc:shell')); t.ready_take = JSON.stringify({ record: r }); localStorage.setItem('ytc:shell', JSON.stringify(t));
+        localStorage.setItem('ytc:shell-log', '[]'); sessionStorage.clear(); addEventListener('pagehide', () => sessionStorage.clear());
+      }, rec);
+      await tv.reload({ waitUntil: 'commit' });
+    };
+    try {
+      await tv.addInitScript(t => {
+        localStorage.setItem('ytc:platform', 'tv');
+        if (!localStorage.getItem('ytc:shell')) localStorage.setItem('ytc:shell', JSON.stringify({ auth_token: JSON.stringify({ token: t, exp: Date.now() + 3600e3 }), ready_put: '{}', ready_drop: '{}', ready_take: '{"record":null}' }));
+      }, token);
+      await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await tv.waitForTimeout(2500);
+      await tv.evaluate(() => { localStorage.removeItem('ytc-test-noready'); localStorage.setItem('ytc:shell-log', '[]'); });
+      // A run that fetched its ready response: the page hands the record to the shell (page, then with its continuation).
+      await cold(null);
+      await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 8000 });
+      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      await tv.waitForTimeout(300);
+      let calls = await shellLog();
+      assert.ok(calls.some(c => c[0] === 'ready_take'), 'a cold start asks for the kept one');
+      const puts = calls.filter(c => c[0] === 'ready_put').map(c => JSON.parse(JSON.parse(c[1]).record));
+      assert.ok(puts.length >= 2 && puts[puts.length - 1].i.length > 30, 'the record and its continuation went to the shell: ' + puts.length);
+      const rec = JSON.stringify(puts[puts.length - 1]);
+      const title = puts[puts.length - 1].i[0].t;
+      // The next cold start: Home from the kept record on its first frame, before any Home request; then it is used up
+      // (dropped at the shell) and refilled as usual.
+      const n1 = homeReqs().length;
+      await cold(rec);
+      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+      assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
+      assert.equal(await tv.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), title);
+      assert.equal(homeReqs().slice(n1).filter(a => a.t < Date.now() - 2500).length, 0, 'no Home request before the paint');
+      await tv.waitForFunction(() => JSON.parse(localStorage.getItem('ytc:shell-log') || '[]').some(c => c[0] === 'ready_put'), null, { timeout: 8000 });
+      calls = await shellLog();
+      assert.ok(calls.some(c => c[0] === 'ready_drop'), 'the used one is dropped at the shell');
+      // Expired (11 min old) or another account's: the network path, as without one.
+      for (const [what, patch] of [['expired', r => { r.t = Date.now() - 11 * 60e3; }], ['another account', r => { r.a = 'o123:en'; }]]) {
+        const r = JSON.parse(rec); patch(r);
+        await cold(JSON.stringify(r));
+        await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+        assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'network', what);
+      }
+      // A shell without the command (an older app): the network path, nothing breaks.
+      await tv.evaluate(() => { const t = JSON.parse(localStorage.getItem('ytc:shell')); delete t.ready_take; localStorage.setItem('ytc:shell', JSON.stringify(t)); sessionStorage.clear(); addEventListener('pagehide', () => sessionStorage.clear()); });
+      await tv.reload({ waitUntil: 'commit' });
+      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+      assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'network');
+    } finally {
+      HOME.stamp = false; HOME.rich = wasRich;
+      await tv.evaluate(() => { for (const k of ['ytc:platform', 'ytc:shell', 'ytc:shell-log', 'ytc-test-noready']) localStorage.removeItem(k); }).catch(() => {});
       await tv.close();
     }
   });

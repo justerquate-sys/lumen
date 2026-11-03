@@ -86,6 +86,8 @@ enum Call {
     TelInfo,
     TelSet,
     TelFind,
+    /// The ready Home response the shell kept from the last run (a cold start asks once, with the token).
+    ReadyTake,
 }
 
 /// About & updates → Developer: the address field's form, and the flag that reopens the screen after the page
@@ -96,8 +98,10 @@ const ABOUT_AGAIN: &str = "ytc:tvabout";
 
 #[derive(Default)]
 pub(super) struct Tv {
-    /// The first page request waits for the shell's token (cold start).
+    /// The first page request waits for the shell's token (cold start), and for its kept ready Home response.
     pub(super) hold: bool,
+    token_in: bool,
+    ready_wait: bool,
     seq: u32,
     calls: HashMap<u32, Call>,
     code: Option<DeviceCode>,
@@ -172,6 +176,10 @@ impl App {
         self.tv_slot();
         self.tv_ask_token(self.tv.hold);
         if self.tv.hold {
+            // A cold start: the ready Home response kept from the last run comes with the token (both answered from
+            // the shell's memory), so Home paints it on its first frame.
+            self.tv.ready_wait = true;
+            self.tv_call("ready_take", "null", Call::ReadyTake);
             let id = self.timer(Timer::TvHold);
             bridge::timer(id, HOLD_MS);
         }
@@ -205,12 +213,26 @@ impl App {
         self.tv_call("auth_token", "{}", Call::Token { boot });
     }
 
+    /// The held first page goes out once the token and the kept ready response are in.
+    fn tv_try_release(&mut self) {
+        if self.tv.token_in && !self.tv.ready_wait {
+            self.tv_release();
+        }
+    }
+
     /// The held first page goes out (token answered, or the hold ran out).
     pub(super) fn tv_release(&mut self) {
         if std::mem::take(&mut self.tv.hold) {
             // The account as the shell answered it (the boot's snapshot predates the token).
             self.auth = tv::auth();
             self.tv_slot();
+            // Home: the ready response the shell kept from the last run (now this tab's copy) is the page, as at a boot.
+            if self.route == Route::Home && bridge::nav_type() != "back_forward" {
+                if let Some(r) = self.ready_take() {
+                    self.ready_show(r);
+                    return;
+                }
+            }
             self.start_route();
         }
     }
@@ -287,8 +309,9 @@ impl App {
                 }
                 let now = tv::bearer_at(bridge::epoch()).is_some();
                 crate::features::shared(|s| s.signed_in = now);
+                self.tv.token_in = true;
                 if self.tv.hold {
-                    self.tv_release();
+                    self.tv_try_release();
                 } else if was != now {
                     self.auth = tv::auth();
                     self.tv_slot();
@@ -348,6 +371,14 @@ impl App {
                 tv::set_bearer(None);
                 bridge::session_clear();
                 bridge::replace_doc("/");
+            }
+            Call::ReadyTake => {
+                if let Some(rec) = if ok { tv::parse_ready_take(json) } else { None } {
+                    // Into this tab's copy: the Home navigation takes it from there (re-validated: account, age).
+                    bridge::session_set(crate::ready::KEY, &rec);
+                }
+                self.tv.ready_wait = false;
+                self.tv_try_release();
             }
             Call::TelInfo => {
                 self.tv.tel = if ok { tv::parse_tel_info(json) } else { None };

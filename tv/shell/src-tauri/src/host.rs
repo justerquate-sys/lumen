@@ -116,8 +116,16 @@ mod imp {
             Some(lumen_tv_core::rules::Decision::Cors) => 2,
             // A page the client renders: the shell's own document (lumen_tv_core::rules::CLIENT_DOCUMENT).
             Some(_) if main_frame != 0 && lumen_tv_core::rules::client_page(&url) => 3,
+            // The client's Wasm (format 2): the bundle's, from here.
+            Some(_) if lumen_tv_core::rules::client_wasm(&url) => 4,
             _ => 0,
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_lumen_tv_Native_wasm(env: JNIEnv, _c: JClass) -> jni::sys::jbyteArray {
+        let b = crate::shell::get().map(|s| s.wasm()).unwrap_or_default();
+        env.byte_array_from_slice(&b).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut())
     }
 
     #[unsafe(no_mangle)]

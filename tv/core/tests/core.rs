@@ -239,7 +239,7 @@ fn update_from_a_fake_release() {
         seq: 100,
         client: "builtin".into(),
         source: "builtin",
-        files: Default::default(),
+        ..Default::default()
     };
 
     // A tampered file: nothing installed, the cache stays empty.
@@ -399,4 +399,84 @@ fn telemetry_reaches_the_debug_center() {
     assert_eq!((v["platform"].as_str(), v["build"].as_str(), v["kind"].as_str()), (Some("tv"), Some("0.10.0 (x) (TV 0.2.0, builtin)"), Some("perf")));
     *refuse.lock().unwrap() = true;
     assert!(tel::post(&http(), &url, &item).unwrap_err().contains("503"));
+}
+
+/// The ready Home response is kept for one account: the fingerprint names it without the token.
+#[test]
+fn account_fingerprint() {
+    let ep = || Endpoints { base: "http://127.0.0.1:9".into() };
+    let a = Account::new(ep(), "d".into(), Some("1//refresh-a".into()), Box::new(|_| {}));
+    let b = Account::new(ep(), "d".into(), Some("1//refresh-b".into()), Box::new(|_| {}));
+    let out = Account::new(ep(), "d".into(), None, Box::new(|_| {}));
+    assert!(a.fingerprint().starts_with("in:") && a.fingerprint().len() == 19 && !a.fingerprint().contains("refresh"));
+    assert_ne!(a.fingerprint(), b.fingerprint());
+    assert_eq!(a.fingerprint(), Account::new(ep(), "other".into(), Some("1//refresh-a".into()), Box::new(|_| {})).fingerprint());
+    assert_eq!(out.fingerprint(), "out");
+}
+
+/// Format 2 (the Wasm as a file the shell serves): its release needs shell 0.3.0 (`min_shell` 3000). A 0.2.0 shell
+/// keeps the bundle it runs and is offered the APK; a 0.3.0 shell installs it with its Wasm (binary, verified, cached).
+#[test]
+fn format_two_needs_the_new_app() {
+    let wasm: Vec<u8> = vec![0, 97, 115, 109, 1, 0, 0, 0, 0xff, 0xfe];
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("content.js", b"loader('/__lumen/client.wasm')".to_vec()),
+        ("client.css", b"a{}".to_vec()),
+        ("native.css", b"b{}".to_vec()),
+        ("rules.json", b"[]".to_vec()),
+        (release::WASM_FILE, wasm.clone()),
+    ];
+    let apk = b"PK-0.3.0".to_vec();
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    let man = manifest(500, &refs, 3000, Some(("lumen-tv-0.3.0.apk", &apk, 3000)));
+    let base = Arc::new(Mutex::new(String::new()));
+    let tamper = Arc::new(Mutex::new(false));
+    let (b2, t2, f2) = (base.clone(), tamper.clone(), files.clone());
+    let m = mock::start(Arc::new(move |_m, path, _b| {
+        let base = b2.lock().unwrap().clone();
+        match path {
+            "/repos/o/r/releases" => {
+                let names = ["lumen-tv-manifest.json", "lumen-tv-manifest.json.sig", "content.js", "client.css", "native.css", "rules.json", release::WASM_FILE, "lumen-tv-0.3.0.apk"];
+                let assets: Vec<Value> = names.iter().map(|n| json!({"name": n, "browser_download_url": format!("{base}/dl/{n}")})).collect();
+                (200, "application/json".into(), json!([{"tag_name": "tv-500", "assets": assets}]).to_string().into_bytes())
+            }
+            "/dl/lumen-tv-manifest.json" => (200, "application/json".into(), man.clone()),
+            "/dl/lumen-tv-manifest.json.sig" => (200, "text/plain".into(), sign(&man).into_bytes()),
+            "/dl/lumen-tv-0.3.0.apk" => (200, "application/octet-stream".into(), apk.clone()),
+            p => {
+                let n = p.trim_start_matches("/dl/");
+                let mut b = f2.iter().find(|(f, _)| *f == n).map(|x| x.1.clone()).unwrap_or_default();
+                if *t2.lock().unwrap() && n == release::WASM_FILE {
+                    b[9] ^= 1;
+                }
+                (if b.is_empty() { 404 } else { 200 }, "application/octet-stream".into(), b)
+            }
+        }
+    }));
+    *base.lock().unwrap() = m.base.clone();
+    let api = format!("{}/repos/o/r/releases", m.base);
+    let pk = key().verifying_key().to_bytes();
+    let dir = std::env::temp_dir().join(format!("lumen-tv-f2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cache = dir.join("bundle");
+    // A 0.2.0 app (version code 2000): nothing installed, it keeps what it runs, the new app is offered.
+    let old = release::check(&http(), &api, &pk, &cache, 100, 2000).unwrap();
+    assert!(old.needs_shell && old.bundle.is_none() && !cache.exists());
+    assert_eq!(old.apk.expect("the APK is offered").apk.version_code, 3000);
+    // A tampered Wasm: refused.
+    *tamper.lock().unwrap() = true;
+    assert!(release::check(&http(), &api, &pk, &cache, 100, 3000).unwrap_err().contains("hash mismatch"));
+    *tamper.lock().unwrap() = false;
+    // The 0.3.0 app: installed, the Wasm kept as bytes, cached and re-verified.
+    let new = release::check(&http(), &api, &pk, &cache, 100, 3000).unwrap();
+    let b = new.bundle.expect("installed");
+    assert_eq!(b.bin_file(release::WASM_FILE), &wasm[..]);
+    assert!(new.apk.is_none(), "this app is the offered one");
+    let c = release::load_cached(&cache, &pk).expect("cached");
+    assert_eq!(c.bin_file(release::WASM_FILE), &wasm[..]);
+    // The cached Wasm damaged on disk: the whole bundle is refused (content.js cannot run without it).
+    std::fs::write(cache.join(release::WASM_FILE), b"x").unwrap();
+    assert!(release::load_cached(&cache, &pk).is_none());
+    let _ = std::fs::remove_dir_all(&dir);
 }

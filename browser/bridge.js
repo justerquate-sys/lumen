@@ -523,14 +523,19 @@ const YTC = (() => {
     local_flag(key) { try { return localStorage.getItem(key) === '1'; } catch { return false; } },
     // ---- app shell (the TV app, tv/). An app shell sets YTC_PLATFORM ('tv') and YTC_SHELL before this
     // script runs (tv/shim/shim.js); localStorage 'ytc:platform' is a development switch for testing in a browser,
-    // and 'ytc:shell' (JSON {cmd: answer string, or null = the call fails}) stands in for the shell there.
+    // and 'ytc:shell' (JSON {cmd: answer string, or null = the call fails}) stands in for the shell there; with
+    // 'ytc:shell-log' set to '[]' every call made to the stand-in is appended to it ([cmd, json]).
     platform() { try { return String(globalThis.YTC_PLATFORM || localStorage.getItem('ytc:platform') || ''); } catch { return ''; } },
     // YTC_SHELL.call(cmd, json) → Promise<string>; answered by on_shell(seq, ok, json).
     shell(seq, cmd, json) {
       let s = globalThis.YTC_SHELL;
       if (!s) try {
         const t = JSON.parse(localStorage.getItem('ytc:shell') || 'null');
-        if (t) s = { call: c => typeof t[c] === 'string' ? Promise.resolve(t[c]) : Promise.reject(new Error(String(t.error || 'no shell'))) };
+        if (t) s = { call: (c, j) => {
+          const l = localStorage.getItem('ytc:shell-log');
+          if (l) localStorage.setItem('ytc:shell-log', JSON.stringify([...JSON.parse(l), [c, j]].slice(-200)));
+          return typeof t[c] === 'string' ? Promise.resolve(t[c]) : Promise.reject(new Error(String(t.error || 'no shell')));
+        } };
       } catch {}
       if (!s || typeof s.call !== 'function') { setTimeout(() => call('on_shell', seq, false, '"no shell"'), 0); return; }
       Promise.resolve().then(() => s.call(cmd, json)).then(r => call('on_shell', seq, true, String(r == null ? 'null' : r)), e => call('on_shell', seq, false, JSON.stringify(String((e && e.message) || e))));

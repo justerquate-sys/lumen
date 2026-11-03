@@ -29,6 +29,10 @@ const outDir = path.join(tv, 'out', 'release');
 const FILES = ['content.js', 'client.css', 'native.css', 'rules.json'];
 // Optional: signed when present (older apps ignore it).
 const DEV_FILE = 'content-dev.js';
+// Format 2 (shell 0.3.0+): the Wasm as files of their own, served to the page by the shell. A bundle that has them
+// runs only on a shell that serves them, so the manifest's min_shell is at least this app's version code: older apps
+// keep the bundle they run and are offered this APK (their update check reports needs_shell, and the APK).
+const WASM_FILE = 'client.wasm', DEV_WASM_FILE = 'client-dev.wasm', WASM_SHELL = '0.3.0';
 const LATEST_APK = 'lumen-tv.apk';
 
 function serve(port) {
@@ -63,12 +67,20 @@ async function main() {
   const sha = b => crypto.createHash('sha256').update(b).digest('hex');
   const files = {};
   for (const f of FILES) { const b = fs.readFileSync(path.join(bundle, f)); files[f] = { sha256: sha(b), size: b.length }; fs.writeFileSync(path.join(outDir, f), b); }
+  const add = f => { const b = fs.readFileSync(path.join(bundle, f)); files[f] = { sha256: sha(b), size: b.length }; fs.writeFileSync(path.join(outDir, f), b); };
+  // Format 2: content.js loads client.wasm (written with it by ./build.sh --tv): both or the release is broken.
+  const content = fs.readFileSync(path.join(bundle, 'content.js'), 'utf8');
+  const format2 = content.includes('/__lumen/client.wasm');
+  if (format2) {
+    if (!fs.existsSync(path.join(bundle, WASM_FILE))) throw new Error(`content.js loads ${WASM_FILE}, which is missing: run tv/scripts/build.sh`);
+    add(WASM_FILE);
+  }
   // The development variant must be built from the same sources as content.js (tv/scripts/build.sh builds both).
-  const devPath = path.join(bundle, DEV_FILE);
-  if (fs.existsSync(devPath) && fs.statSync(devPath).mtimeMs >= fs.statSync(path.join(bundle, 'content.js')).mtimeMs - 15 * 60e3) {
-    const b = fs.readFileSync(devPath); files[DEV_FILE] = { sha256: sha(b), size: b.length }; fs.writeFileSync(path.join(outDir, DEV_FILE), b);
-  } else console.warn(`no fresh ${DEV_FILE}: the release carries no telemetry variant`);
-  const manifest = { schema: 1, seq: +bseq, client, min_shell: +(process.env.MIN_SHELL || 1), files };
+  const fresh = f => fs.existsSync(path.join(bundle, f)) && fs.statSync(path.join(bundle, f)).mtimeMs >= fs.statSync(path.join(bundle, 'content.js')).mtimeMs - 15 * 60e3;
+  if (fresh(DEV_FILE) && (!format2 || fresh(DEV_WASM_FILE))) { add(DEV_FILE); if (format2) add(DEV_WASM_FILE); }
+  else console.warn(`no fresh ${DEV_FILE}: the release carries no telemetry variant`);
+  const minShell = Math.max(+(process.env.MIN_SHELL || 1), format2 ? versionCode(WASM_SHELL) : 1);
+  const manifest = { schema: 1, seq: +bseq, client, min_shell: minShell, files };
   if (fs.existsSync(apkPath)) {
     const apk = fs.readFileSync(apkPath);
     manifest.apk = { version_code: +(process.env.APK_VERSION_CODE || versionCode(apkVersion)), version: apkVersion, file: apkName, sha256: sha(apk), size: apk.length };
@@ -86,7 +98,7 @@ async function main() {
   if (!crypto.verify(null, mbytes, crypto.createPublicKey({ key: spki, format: 'der', type: 'spki' }), Buffer.from(sig, 'base64'))) throw new Error('signature does not verify with tv/keys/release.pub');
   fs.writeFileSync(path.join(outDir, 'lumen-tv-manifest.json'), mbytes);
   fs.writeFileSync(path.join(outDir, 'lumen-tv-manifest.json.sig'), sig + '\n');
-  console.log(`signed release in ${outDir}: client ${client}, seq ${bseq}, shell ${version}`);
+  console.log(`signed release in ${outDir}: client ${client}, seq ${bseq}, shell ${version}, min_shell ${minShell}${format2 ? ' (format 2: client.wasm)' : ''}`);
   if (has('--dry-run')) return;
 
   const repo = process.env.LUMEN_TV_REPO || 'justerquate-sys/lumen', token = process.env.GITHUB_TOKEN;

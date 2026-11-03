@@ -94,6 +94,9 @@ class MainActivity : TauriActivity() {
     stoppedAt = System.currentTimeMillis()
     // Leaving the app pauses playback (a TV app never plays on in the background).
     web?.evaluateJavascript("document.querySelectorAll('video,audio').forEach(m=>m.pause())", null)
+    // YouTube's cookies on disk now (the WebView writes them out only now and then): the next start can serve the
+    // shell's own document (Host.kt `visitor()`), and nothing is lost if Android ends the process.
+    android.webkit.CookieManager.getInstance().flush()
     super.onStop()
   }
 

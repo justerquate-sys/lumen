@@ -7,10 +7,12 @@
 //! - [`rules`]: `extension/rules.json` (the extension's declarativeNetRequest rules) for the WebView.
 //! - [`store`]: `chrome.storage.local` for the client, a JSON file in the app's private storage.
 //! - [`net`]: the HTTP agent (rustls, bundled roots, timeouts, statuses as values).
+//! - [`readystore`]: the ready Home response kept across app starts (sealed, one account, 10 min, read once).
 //! - [`tel`]: speed telemetry to the owner's debug center on their network (off unless turned on).
 
 pub mod auth;
 pub mod net;
+pub mod readystore;
 pub mod release;
 pub mod rules;
 pub mod store;

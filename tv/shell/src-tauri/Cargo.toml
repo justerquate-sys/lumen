@@ -1,6 +1,6 @@
 [package]
 name = "lumen-tv"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lumen for Google TV / Android TV: a thin Tauri shell around the shared client"
 authors = ["Lumen"]
 license = "MIT"

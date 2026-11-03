@@ -27,6 +27,12 @@ pub const FILES: [&str; 4] = ["content.js", "client.css", "native.css", "rules.j
 /// like the others when the release carries it; the app runs it only while its owner turned telemetry on
 /// (`crate::tel`). Apps from before it ignore it.
 pub const DEV_FILE: &str = "content-dev.js";
+/// Format 2 (shell 0.3.0+): the client's Wasm as a file of its own, served to the page by the shell
+/// (`/__lumen/client.wasm`) instead of travelling inside `content.js`; and the telemetry variant's. Binary, optional:
+/// a release that has them needs a shell that serves them (its manifest's `min_shell`).
+pub const WASM_FILE: &str = "client.wasm";
+pub const DEV_WASM_FILE: &str = "client-dev.wasm";
+const BIN_FILES: [&str; 2] = [WASM_FILE, DEV_WASM_FILE];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FileEntry {
@@ -89,18 +95,29 @@ pub fn check_file(m: &Manifest, name: &str, bytes: &[u8]) -> Result<(), String> 
 }
 
 /// A verified client bundle.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Bundle {
     pub seq: u64,
     pub client: String,
     /// "builtin" or "release"
     pub source: &'static str,
     pub files: BTreeMap<String, String>,
+    /// The binary files (format 2: `client.wasm`, `client-dev.wasm`).
+    pub bin: BTreeMap<String, Vec<u8>>,
 }
 
 impl Bundle {
     pub fn file(&self, name: &str) -> &str {
         self.files.get(name).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn bin_file(&self, name: &str) -> &[u8] {
+        self.bin.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The telemetry variant can run: its script, and in format 2 its own Wasm (the two are built together).
+    pub fn has_dev(&self) -> bool {
+        !self.file(DEV_FILE).is_empty() && (self.bin_file(WASM_FILE).is_empty() || !self.bin_file(DEV_WASM_FILE).is_empty())
     }
 }
 
@@ -121,11 +138,23 @@ pub fn load_cached(dir: &Path, key: &[u8; 32]) -> Option<Bundle> {
             files.insert(DEV_FILE.to_string(), t);
         }
     }
+    // Format 2: the Wasm the page asks for must be there and verify (its telemetry twin may be missing).
+    let mut bin = BTreeMap::new();
+    for f in BIN_FILES.into_iter().filter(|f| m.files.contains_key(*f)) {
+        match std::fs::read(dir.join(f)).ok().filter(|b| check_file(&m, f, b).is_ok()) {
+            Some(b) => {
+                bin.insert(f.to_string(), b);
+            }
+            None if f == WASM_FILE => return None,
+            None => {}
+        }
+    }
     Some(Bundle {
         seq: m.seq,
         client: m.client,
         source: "release",
         files,
+        bin,
     })
 }
 
@@ -230,6 +259,13 @@ pub fn check(http: &Http, api: &str, key: &[u8; 32], cache: &Path, current_seq: 
         std::fs::write(stage.join(f), &b).map_err(|e| e.to_string())?;
         files.insert(f.to_string(), String::from_utf8(b).map_err(|_| format!("{f} is not UTF-8"))?);
     }
+    let mut bin = BTreeMap::new();
+    for f in BIN_FILES.into_iter().filter(|f| m.files.contains_key(*f)) {
+        let b = get(f)?;
+        check_file(&m, f, &b)?;
+        std::fs::write(stage.join(f), &b).map_err(|e| e.to_string())?;
+        bin.insert(f.to_string(), b);
+    }
     std::fs::write(stage.join(MANIFEST), &mbytes).map_err(|e| e.to_string())?;
     std::fs::write(stage.join(SIG), sig.as_bytes()).map_err(|e| e.to_string())?;
     let old = sibling(cache, "old");
@@ -244,6 +280,7 @@ pub fn check(http: &Http, api: &str, key: &[u8; 32], cache: &Path, current_seq: 
         client: m.client,
         source: "release",
         files,
+        bin,
     });
     Ok(out)
 }

@@ -40,6 +40,12 @@ steps). `tests/live-*.cjs` talk to real YouTube or Deepgram: run them by hand, r
   SponsorBlock and Deepgram (README "Privacy").
 - **Never persist** feed or recommendation payloads, descriptions, continuation tokens, search-filter params
   or filter/website verdicts. They live in memory, or in this tab's `sessionStorage` for snapshots.
+  - The one exception (owner decision, 3 Nov 2026), in **Lumen for TV only**: the shell keeps the page's ready Home
+    response (YouTube's latest answer to the Home request, `src/ready.rs`) on disk for the next app start, so a cold
+    start paints Home at once. It is sealed with the Android Keystore key the shell uses for the account, kept for
+    that account only (signing out or another account deletes it), used only while younger than 10 minutes, and
+    deleted when it is read (once). Nothing else is persisted, and the desktop extension never persists it
+    (`tv/core/src/readystore.rs`).
 - `chrome.storage.local` holds only the documented, bounded keys (docs/architecture.md, "Privacy"): e.g. 100
   searches, 2,000 resume records, 50 blocked domains, 20 topics, 20 YouTube-chip records. A new key or a
   bigger bound needs a reason in the pull request.

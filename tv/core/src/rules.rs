@@ -139,6 +139,11 @@ pub fn client_page(url: &str) -> bool {
     !OWN.iter().any(|p| path.starts_with(p)) && !query.split('&').any(|kv| kv == "yt-native=1")
 }
 
+/// The URL the format-2 client fetches its Wasm from (`browser/build.cjs` `WASM_URL`), answered by the shell.
+pub fn client_wasm(url: &str) -> bool {
+    url.strip_prefix("https://www.youtube.com/__lumen/client.wasm").is_some_and(|r| r.is_empty() || r.starts_with(['?', '#']))
+}
+
 /// The document the shell serves for a [`client_page`] navigation instead of asking YouTube for its page: the client
 /// stops YouTube's document at its first byte (`window.stop()`) and writes its own, so YouTube's HTML (a round trip
 /// of 100–350 ms before the client can start, on every app start and reload) is never used.
@@ -232,6 +237,8 @@ mod tests {
         for u in ["https://www.youtube.com/", "https://www.youtube.com", "https://www.youtube.com/watch?v=abc&t=3", "https://www.youtube.com/results?search_query=a", "https://www.youtube.com/@x/videos", "https://www.youtube.com/feed/subscriptions", "https://www.youtube.com/?yt-native=10"] {
             assert!(super::client_page(u), "{u}");
         }
+        assert!(super::client_wasm("https://www.youtube.com/__lumen/client.wasm") && super::client_wasm("https://www.youtube.com/__lumen/client.wasm?x=1"));
+        assert!(!super::client_wasm("https://www.youtube.com/__lumen/client.wasm2") && !super::client_wasm("https://evil.com/__lumen/client.wasm") && !super::client_wasm("http://www.youtube.com/__lumen/client.wasm"));
         for u in ["https://www.youtube.com/watch?v=abc&yt-native=1", "https://www.youtube.com/embed/abc", "https://www.youtube.com/signin?x", "https://www.youtube.com/youtubei/v1/browse", "https://www.youtube.com.evil.com/", "http://www.youtube.com/", "https://m.youtube.com/", "https://www.youtube.com/s/player/x.js", "https://www.youtube.com/sw.js"] {
             assert!(!super::client_page(u), "{u}");
         }
