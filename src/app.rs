@@ -181,6 +181,10 @@ enum Timer {
     TvPoll { generation: u32 },
     /// TV: a focus check after a paint (the old page may drop the focus while it goes).
     TvFocus,
+    /// TV: the remote rested after scrubbing the seek bar (scrub generation): seek there.
+    TvScrub { generation: u32 },
+    /// TV: ask the shell about updates (repeats; `fast` = while an app update downloads).
+    TvUpdates { fast: bool },
 }
 
 #[derive(PartialEq)]
@@ -902,6 +906,8 @@ impl App {
                 if !self.first_ready_pending() {
                     bridge::html(MAIN, &render::skeleton(&self.route));
                 }
+                // TV: a focus while the page loads (the rail; the content takes it when it arrives).
+                self.tv_focus_check();
             }
         }
         self.load();
@@ -1069,6 +1075,8 @@ impl App {
             Some(Timer::TvHold) => self.tv_release(),
             Some(Timer::TvPoll { generation }) => self.tv_poll(generation),
             Some(Timer::TvFocus) => self.tv_focus_check(),
+            Some(Timer::TvScrub { generation }) => self.tv_scrub_rest(generation),
+            Some(Timer::TvUpdates { fast }) => self.tv_updates_tick(fast),
             Some(Timer::Bg) => {
                 self.tv_tick();
                 self.bg_check();
@@ -1415,6 +1423,7 @@ impl App {
         }
         crate::telemetry::input(if self.keyed() { "keyboard" } else { "pointer" });
         self.fx_searched(q);
+        self.tv_searched();
         self.suggest_q.clear();
         bridge::html(SUGGEST, "");
         let route = Route::Search { q: q.chars().take(500).collect(), sp: None };
@@ -2115,6 +2124,9 @@ impl App {
     fn render_watch(&mut self, w: &Watch) {
         let Route::Watch { v, .. } = self.route.clone() else { return };
         bridge::html(INFO, &render::watch_info(w, &v));
+        if crate::tv::on() {
+            self.tv.info = render::tv_info(w, &v);
+        }
         self.acts.on_watch(&v, w);
         self.player_chapters(&v, w);
         let mut s = String::with_capacity(w.related.items.len() * 1000);
@@ -2244,6 +2256,7 @@ impl App {
         p.no_recover = self.vision_block_until > bridge::now();
         p.attach();
         self.player = Some(p);
+        self.tv_mounted(v);
         self.player_wait = true;
         self.kick_player();
         self.after_player();
@@ -2409,6 +2422,8 @@ impl App {
         bridge::attr(player::ui::BOX, "class", "player failed");
         self.player_wait = false;
         self.player_failed = Some(PlayerFailed { v: v.to_string(), t, list });
+        // TV: the panel's first action takes the focus (the controls it replaced had it).
+        self.tv_failed();
     }
 
     /// One connectivity probe (same origin, tiny, never cached).
@@ -2434,6 +2449,7 @@ impl App {
         if !self.offline {
             self.offline = true;
             bridge::html(player::ui::BOX, &player::fail::panel(&f.v, player::fail::OFFLINE_REASON));
+            self.tv_failed();
         }
         let id = self.timer(Timer::NetProbe);
         bridge::timer(id, NET_PROBE_MS);

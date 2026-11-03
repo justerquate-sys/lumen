@@ -14,7 +14,7 @@
 use super::{App, Timer};
 use crate::api::Req;
 use crate::bridge;
-use crate::render::{LIST, MAIN};
+use crate::render::MAIN;
 use crate::route::Route;
 use crate::tv::{self, DeviceCode, Dir, Poll};
 use std::collections::HashMap;
@@ -22,22 +22,58 @@ use std::collections::HashMap;
 /// Focus stops for the remote (visible ones only; the bridge filters by visibility).
 const SEL: &str = "a[href]:not([tabindex='-1']),button:not([disabled]):not([tabindex='-1']),input:not([type=hidden]):not([tabindex='-1']),select,textarea,[tabindex='0']";
 /// Not stops on TV: the extra links/buttons inside a card (the card is one stop: its title link),
-/// the player's inside (reached through the player itself), the mic (no voice search on TV) and
-/// the search clear button.
-const SKIP: &str = ".c a:not(.t),.c button,#ytc-player *,#ytc-mic,.qx,#ytc-debug *";
+/// the player's inside (the watch keys walk it), the mic (no voice search on TV), the search clear
+/// button and the parts of the desktop page the TV hides anyway.
+const SKIP: &str = ".c a:not(.t),.c button,#ytc-player *,#ytc-player,#ytc-mic,.qx,.qs,#ytc-debug *,#ytc-hfx *,.fx-ed *,.fx-tx";
 /// Panels that keep the remote inside while open (the innermost one around the focus wins).
-const TRAPS: &str = "#ytc-tvsign.on,#ytc-keys.on,#ytc-imp.on,#ytc-player.menu #ytc-menu,.open[id^=ytc-fx-],#ytc-save-p.on,#ytc-share-p.on";
+const TRAPS: &str = "#ytc-tvabout.on,#ytc-tvsign.on,#ytc-keys.on,#ytc-imp.on,#ytc-player.menu #ytc-menu,.open[id^=ytc-fx-],#ytc-save-p.on,#ytc-share-p.on,#ytc[data-tvq='1'] #ytc-top,#ytc-tvinfo.on";
 /// Something is open that Escape closes (Back then means Escape).
-const OPEN: &str = "#ytc-tvsign.on,#ytc-keys.on,#ytc-imp.on,#ytc-player.menu #ytc-menu,.open[id^=ytc-fx-],#ytc [aria-expanded=true],#ytc-chap.open";
+const OPEN: &str = "#ytc-tvsign.on,#ytc-keys.on,#ytc-imp.on,#ytc-player.menu #ytc-menu,.open[id^=ytc-fx-],#ytc [aria-expanded=true]:not(#ytc-q),#ytc-chap.open";
+/// What `spatial_rects` marks: 1 = a card of the page's grid (rows keep one vertical place), 2 = the rail.
+const MARKS: &str = "#ytc-list a.t|#ytc-side *";
 const PLAYER: &str = "ytc-player";
-const PCTL: &str = "#ytc-player .pctl";
+const SEEK: &str = "ytc-seek";
+/// The overlay's button row and the Up next row (the related cards under it).
+const UPNEXT: &str = ".wr";
+const INFO: &str = "ytc-tvinfo";
+/// The Up next header (the autoplay countdown's Play now / Cancel).
+const UPNEXT_ID: &str = crate::render::UPNEXT;
 /// Hold the first page this long for the shell's token at a cold start, then go on signed out.
 const HOLD_MS: u32 = 4000;
+/// Scrubbing: the seek goes out once the remote rested this long; presses closer than `HELD_MS` are a
+/// held key (key repeat) and speed the steps up.
+const SCRUB_REST_MS: u32 = 450;
+const HELD_MS: f64 = 260.0;
 pub(super) const SIGN: &str = "ytc-tvsign";
 const ACCT: &str = "ytc-acct";
 
+/// Seconds per scrub step for the `n`-th press of one held run: 10 s, then faster the longer it is held.
+pub(super) fn scrub_step(n: u32) -> f64 {
+    match n {
+        0..=5 => 10.0,
+        6..=14 => 30.0,
+        15..=29 => 60.0,
+        _ => 120.0,
+    }
+}
+
+/// About & updates: the screen, and the small notice when an update is ready.
+const ABOUT: &str = "ytc-tvabout";
+const NOTICE: &str = "ytc-tvup";
+/// How often the page asks the shell whether its own check (launch + every 6 h) found something; the
+/// first look shortly after the shell's launch check.
+const UPDATES_FIRST_MS: u32 = 20_000;
+const UPDATES_EVERY_MS: u32 = 10 * 60_000;
+const UPDATES_FAST_MS: u32 = 700;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Call {
+    /// `shell_info` (`boot`: the bundle this page runs).
+    Info { boot: bool },
+    /// `shell_check` (Check for updates).
+    Check,
+    /// `shell_install` (Install update).
+    Install,
     /// `auth_token`; `boot`: the first page waits for it.
     Token { boot: bool },
     Start,
@@ -61,6 +97,24 @@ pub(super) struct Tv {
     /// The link last opened from each page (page URL → href): coming back focuses it again, as
     /// YouTube's TV app does.
     opened: HashMap<String, String>,
+    /// Scrub run: generation (a newer press ends the older rest timer), last press, presses held.
+    scrub_gen: u32,
+    scrub_at: f64,
+    scrub_n: u32,
+    /// The watch page's "More info" panel content (rendered with the page).
+    pub(super) info: String,
+    /// A search went out from the search screen: its results take the focus when they paint.
+    grid_focus: bool,
+    /// The page box holds the focus only because the page was still loading (no key since).
+    auto_rail: bool,
+    /// Updates: the shell's last answer, the bundle this page started with, the screen open, a line about the
+    /// last action, the seq of the update the notice was dismissed for.
+    shell: Option<tv::ShellInfo>,
+    running: u64,
+    running_client: String,
+    about: bool,
+    about_note: String,
+    noticed: u64,
 }
 
 impl Tv {
@@ -93,13 +147,19 @@ impl App {
             return;
         }
         bridge::back_hook();
-        bridge::append("ytc", &format!("<div id=\"{SIGN}\" class=\"tvs\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Sign in\"></div>"));
+        bridge::append("ytc", &format!("<div id=\"{SIGN}\" class=\"tvs\" role=\"dialog\" aria-modal=\"true\" aria-label=\"Sign in\"></div><aside id=\"{INFO}\" class=\"tvi\" role=\"dialog\" aria-label=\"More info\"></aside>"));
         self.tv_slot();
         self.tv_ask_token(self.tv.hold);
         if self.tv.hold {
             let id = self.timer(Timer::TvHold);
             bridge::timer(id, HOLD_MS);
         }
+        bridge::append("ytc", &format!("<div id=\"{ABOUT}\" class=\"tvs\" role=\"dialog\" aria-modal=\"true\" aria-label=\"About and updates\"></div><div id=\"{NOTICE}\" class=\"tvup\" role=\"status\"><span>Update ready</span><button type=\"button\" class=\"tvb\" data-act=\"tv-about\">See update</button></div>"));
+        self.tv_call("shell_info", "null", Call::Info { boot: true });
+        let id = self.timer(Timer::TvUpdates { fast: false });
+        bridge::timer(id, UPDATES_FIRST_MS);
+        // A focus from the first frame (the rail while the page loads).
+        self.tv_focus_check();
     }
 
     fn tv_call(&mut self, cmd: &str, arg: &str, what: Call) {
@@ -121,6 +181,8 @@ impl App {
     /// The held first page goes out (token answered, or the hold ran out).
     pub(super) fn tv_release(&mut self) {
         if std::mem::take(&mut self.tv.hold) {
+            // The account as the shell answered it (the boot's snapshot predates the token).
+            self.auth = tv::auth();
             self.tv_slot();
             self.start_route();
         }
@@ -149,6 +211,37 @@ impl App {
     pub fn on_shell(&mut self, seq: u32, ok: bool, json: &str) {
         let Some(call) = self.tv.calls.remove(&seq) else { return };
         match call {
+            Call::Info { .. } | Call::Check | Call::Install if !ok => {
+                // The shell refused (offline shell, or an app too old for the command).
+                let why = short(json);
+                self.tv.about_note = match call {
+                    Call::Install => format!("{} ({why})", tv::update_error(&why)),
+                    Call::Check => format!("The check did not run ({why})."),
+                    _ => String::new(),
+                };
+                self.tv_about_paint();
+            }
+            Call::Info { .. } | Call::Check | Call::Install => {
+                let boot = call == Call::Info { boot: true };
+                if let Some(i) = tv::parse_shell_info(json) {
+                    if boot || self.tv.running == 0 {
+                        self.tv.running = i.seq;
+                        self.tv.running_client = i.client.clone();
+                    }
+                    let busy = matches!(i.state, tv::UpdateState::Downloading(..) | tv::UpdateState::Checking);
+                    self.tv.shell = Some(i);
+                    if call != Call::Install {
+                        self.tv.about_note.clear();
+                    }
+                    // (After Install the shell starts in the background: follow it until it is done.)
+                    if (busy || call == Call::Install) && self.tv.about {
+                        let id = self.timer(Timer::TvUpdates { fast: true });
+                        bridge::timer(id, UPDATES_FAST_MS);
+                    }
+                }
+                self.tv_about_paint();
+                self.tv_notice();
+            }
             Call::Token { boot: _ } => {
                 self.tv.token_asked = false;
                 let was = tv::bearer_at(bridge::epoch()).is_some();
@@ -166,9 +259,11 @@ impl App {
                     tv::set_bearer(tok);
                 }
                 let now = tv::bearer_at(bridge::epoch()).is_some();
+                crate::features::shared(|s| s.signed_in = now);
                 if self.tv.hold {
                     self.tv_release();
                 } else if was != now {
+                    self.auth = tv::auth();
                     self.tv_slot();
                 }
             }
@@ -249,11 +344,16 @@ impl App {
 
     /// Writes the sign-in panel (`status`: a line under the code).
     fn tv_panel(&mut self, status: &str) {
-        self.tv.open = true;
         let signed = tv::bearer_at(bridge::epoch()).is_some();
         bridge::html(SIGN, &crate::render::tv_panel(self.tv.code.as_ref().map(|c| (c.user_code.as_str(), c.url.as_str())), signed, status));
+        if !self.tv.open || !bridge::any("#ytc-tvsign.on") {
+            bridge::focus_save("signin");
+        }
+        self.tv.open = true;
         bridge::attr(SIGN, "class", "tvs on");
-        bridge::focus_sel(SIGN, "button");
+        if !bridge::any("#ytc-tvsign :focus") {
+            bridge::focus_sel(SIGN, "button");
+        }
     }
 
     fn tv_close(&mut self) {
@@ -261,7 +361,9 @@ impl App {
         self.tv.generation += 1;
         self.tv.code = None;
         bridge::attr(SIGN, "class", "tvs");
-        bridge::focus_sel(ACCT, "button");
+        if !bridge::focus_load("signin") {
+            bridge::focus_sel(ACCT, "button");
+        }
     }
 
     /// `tv-*` clicks.
@@ -279,43 +381,269 @@ impl App {
                 self.tv_call("auth_signout", "{}", Call::SignOut);
             }
             "tv-close" => self.tv_close(),
+            "tv-search" => self.tv_search_open(),
+            "tv-about" => self.tv_about_open(),
+            "tv-about-close" => self.tv_about_close(),
+            "tv-check" => {
+                if let Some(i) = self.tv.shell.as_mut() {
+                    i.state = tv::UpdateState::Checking;
+                }
+                self.tv.about_note.clear();
+                self.tv_about_paint();
+                self.tv_call("shell_check", "null", Call::Check);
+            }
+            "tv-apply" => {
+                // The shell has the new interface in place (verified, injected for the next load): load it now,
+                // here (the sign-in lives in the shell and this tab's session mirror).
+                bridge::replace_doc(&self.url.clone());
+            }
+            "tv-install" => {
+                self.tv.about_note.clear();
+                self.tv_call("shell_install", "null", Call::Install);
+            }
+            "tv-info" => self.tv_info_open(),
             _ => return false,
         }
         true
     }
 
-    /// The platform Back button: true = handled here (else the shell goes back or leaves the app).
-    pub fn on_back(&mut self) -> bool {
+    // ---------------------------------------------------------- search screen
+
+    /// The search screen is open (the header shown as a full screen: the field, recent searches and
+    /// suggestions as a list; client.css `#ytc[data-tvq]`).
+    pub(super) fn tv_search_on(&self) -> bool {
+        tv::on() && bridge::any("#ytc[data-tvq='1']")
+    }
+
+    fn tv_search_open(&mut self) {
+        if !self.tv_search_on() {
+            bridge::focus_save("search");
+        }
+        bridge::attr("ytc", "data-tvq", "1");
+        bridge::focus("ytc-q");
+    }
+
+    /// Closes the search screen; `refocus`: the focus returns to where it was before it opened.
+    pub(super) fn tv_search_close(&mut self, refocus: bool) {
+        if !self.tv_search_on() {
+            return;
+        }
+        bridge::attr("ytc", "data-tvq", "");
+        self.fx_sug_end();
+        if refocus && !bridge::focus_load("search") {
+            bridge::focus_sel("ytc-side", "[data-nav=search]");
+        }
+    }
+
+    /// The search field took the focus (D-pad or OK): on TV it always shows as the search screen.
+    pub(super) fn tv_search_focus(&mut self, on: bool) {
+        if tv::on() && on && !self.tv_search_on() {
+            bridge::focus_save("search");
+            bridge::attr("ytc", "data-tvq", "1");
+        }
+    }
+
+    /// A search was submitted (field or list): the screen closes and the results take the focus.
+    pub(super) fn tv_searched(&mut self) {
+        if tv::on() {
+            self.tv.grid_focus = true;
+            self.tv_search_close(false);
+        }
+    }
+
+    // ---------------------------------------------------------- watch page
+
+    /// A player was mounted: the overlay's Save button (Watch later, signed in only).
+    pub(super) fn tv_mounted(&mut self, v: &str) {
+        if !tv::on() {
+            return;
+        }
+        self.tv.info.clear();
+        let mut out = String::new();
+        crate::features::wl_button(&mut out, v);
+        bridge::html(crate::player::ui::TVWL, &out);
+        self.tv_focus_check();
+    }
+
+    /// The autoplay countdown appeared (Play now takes the focus) or went (the focus returns to the bar).
+    pub(super) fn tv_countdown(&mut self, pending: bool) {
+        if !tv::on() {
+            return;
+        }
+        if pending {
+            bridge::focus_sel(UPNEXT_ID, "#ytc-up-now");
+            self.tv_wake();
+        } else if !bridge::any(":focus") || bridge::any("body:focus") {
+            bridge::focus(SEEK);
+        }
+    }
+
+    // ---------------------------------------------------------- About & updates
+
+    fn tv_about_open(&mut self) {
+        if !self.tv.about {
+            bridge::focus_save("about");
+        }
+        self.tv.about = true;
+        self.tv.noticed = self.tv.shell.as_ref().map_or(0, |i| i.seq.max(1));
+        bridge::attr(NOTICE, "class", "tvup");
+        self.tv_about_paint();
+        bridge::attr(ABOUT, "class", "tvs on");
+        bridge::focus_sel(ABOUT, ".tvb");
+        // Fresh from the shell (what its own check found meanwhile).
+        self.tv_call("shell_info", "null", Call::Info { boot: false });
+    }
+
+    fn tv_about_close(&mut self) {
+        self.tv.about = false;
+        bridge::attr(ABOUT, "class", "tvs");
+        if !bridge::focus_load("about") {
+            bridge::focus_sel("ytc-side", "[data-nav=about]");
+        }
+    }
+
+    /// Writes the screen (when open), keeping the focus on the button with the same action if it is still there.
+    fn tv_about_paint(&mut self) {
+        if !self.tv.about {
+            return;
+        }
+        let html = crate::render::tv_about(self.tv.shell.as_ref(), self.tv.running, &self.tv.running_client, bridge::epoch(), &self.tv.about_note);
+        if html == bridge::get_html(ABOUT) {
+            return;
+        }
+        let had = bridge::any("#ytc-tvabout :focus");
+        bridge::focus_save("about-btn");
+        bridge::html(ABOUT, &html);
+        if had && !bridge::focus_load("about-btn") {
+            bridge::focus_sel(ABOUT, ".tvb");
+        }
+    }
+
+    /// An update is ready (a newer interface in the shell, or a newer app offered): the rail's item gets a mint dot
+    /// and, away from videos, a small notice the remote can reach (top right) until the screen was opened for it.
+    fn tv_notice(&mut self) {
+        let Some(i) = &self.tv.shell else { return };
+        let ready = (self.tv.running > 0 && i.seq > self.tv.running) || i.apk.is_some();
+        bridge::class_all("#ytc-side .rl[data-nav=about]", "upd", ready);
+        let show = ready && !self.tv.about && self.tv.noticed != i.seq.max(1);
+        bridge::attr(NOTICE, "class", if show { "tvup on" } else { "tvup" });
+    }
+
+    pub(super) fn tv_updates_tick(&mut self, fast: bool) {
+        if !tv::on() {
+            return;
+        }
+        if fast && !self.tv.about {
+            return;
+        }
+        self.tv_call("shell_info", "null", Call::Info { boot: false });
+        if !fast {
+            let id = self.timer(Timer::TvUpdates { fast: false });
+            bridge::timer(id, UPDATES_EVERY_MS);
+        }
+    }
+
+    // ---------------------------------------------------------- more info
+
+    fn tv_info_open(&mut self) {
+        if self.tv.info.is_empty() {
+            return;
+        }
+        bridge::focus_save("info");
+        bridge::html(INFO, &self.tv.info);
+        bridge::attr(INFO, "class", "tvi on");
+        bridge::focus_sel(INFO, ".tvd");
+    }
+
+    fn tv_info_close(&mut self) {
+        bridge::attr(INFO, "class", "tvi");
+        if !bridge::focus_load("info") {
+            bridge::focus(SEEK);
+        }
+    }
+
+    // ---------------------------------------------------------- Back
+
+    /// The platform Back button: 1 = handled here, 0 = the shell goes back (or leaves the app when there is
+    /// nothing to go back to), 2 = leave the app (Back on the rail at Home).
+    pub fn on_back(&mut self) -> u32 {
+        if !tv::on() {
+            return 0;
+        }
         if self.tv.open {
             self.tv_close();
-            return true;
+            return 1;
+        }
+        if self.tv.about {
+            self.tv_about_close();
+            return 1;
+        }
+        if self.tv_search_on() {
+            self.tv_search_close(true);
+            return 1;
+        }
+        if bridge::any("#ytc-tvinfo.on") {
+            self.tv_info_close();
+            return 1;
         }
         if bridge::any(OPEN) {
             self.on_key("Escape", false);
-            return true;
+            return 1;
         }
-        // Inside the player's control bar: back to the player.
-        if matches!(self.route, Route::Watch { .. }) && bridge::any(&format!("{PCTL} :focus")) {
-            bridge::focus(PLAYER);
-            return true;
+        if matches!(self.route, Route::Watch { .. }) {
+            if bridge::any("#ytc-up .upc") {
+                // The autoplay countdown: Back cancels it.
+                self.up_cancel();
+                bridge::focus(SEEK);
+                return 1;
+            }
+            let Some(p) = self.player.as_mut() else { return 0 };
+            if p.tv_scrubbing() {
+                p.tv_scrub_end();
+                return 1;
+            }
+            // Up next → the buttons; the overlay open while playing → it hides; else the watch page is left.
+            if bridge::any(".wr :focus") {
+                if !bridge::focus_load("row") {
+                    bridge::focus_sel(PLAYER, ".prow .pb");
+                }
+                p.wake();
+                return 1;
+            }
+            if !p.paused() && !p.idle() && bridge::any("#ytc-player :focus") {
+                p.rest();
+                bridge::focus(SEEK);
+                return 1;
+            }
+            return 0;
+        }
+        if !bridge::any("#ytc-side :focus") {
+            // Back from the content focuses the rail (on the page's own item).
+            bridge::focus_save("content");
+            self.tv_rail_focus();
+            return 1;
         }
         if matches!(self.route, Route::Home) {
-            // Home: first back to the top (focus on the first card), then the app may close.
-            if bridge::scroll_y() > 4.0 || !bridge::any("#ytc-side :focus") {
-                bridge::scroll_to(0.0);
-                bridge::focus_sel("ytc-side", "a[data-nav=home]");
-                return true;
-            }
-            return false;
+            return 2;
         }
-        false
+        0
     }
+
+    /// The rail's item for this page (else Home).
+    fn tv_rail_focus(&mut self) {
+        let nav = self.route.nav_key();
+        let nav = if crate::render::side_index(nav).is_some() { nav } else { "home" };
+        bridge::focus_sel("ytc-side", &format!("[data-nav={nav}]"));
+    }
+
+    // ---------------------------------------------------------- keys
 
     /// TV keys (before the desktop handling). Some(handled) ends the key here.
     pub(super) fn tv_key(&mut self, key: &str, editable: bool) -> Option<bool> {
         if !tv::on() {
             return None;
         }
+        self.tv.auto_rail = false;
         let watch = matches!(self.route, Route::Watch { .. });
         if let Some(r) = tv::remote(key) {
             if !watch {
@@ -323,78 +651,255 @@ impl App {
             }
             let paused = self.player.as_ref().is_none_or(|p| p.paused());
             let k = tv::remote_player_key(r, paused)?;
+            if let Some(p) = self.player.as_mut() {
+                p.wake();
+            }
             return Some(self.on_key(k, false));
         }
         let d = tv::dir(key);
         if editable {
-            // The search field: ↑/↓ leave it unless its suggestion list is open (that list owns them).
+            // The search field: ↓ goes to the screen's list (its first row; the remove buttons are → from a row),
+            // ↑/↓ otherwise leave it (the field keeps the TV keyboard's arrows while the keyboard is up: those
+            // never reach the page).
+            if d == Some(Dir::Down) && self.tv_search_on() && bridge::any("#ytc-sug .sg a") {
+                bridge::focus_sel(crate::render::SUGGEST, ".sg a");
+                return Some(true);
+            }
             return match d {
-                Some(Dir::Up | Dir::Down) if !bridge::any("#ytc-q[aria-expanded=true]") => Some(self.tv_move(d.unwrap_or(Dir::Down))),
+                Some(dir @ (Dir::Up | Dir::Down)) => Some(self.tv_move(dir)),
                 _ => None,
             };
         }
+        if bridge::any("#ytc-tvinfo.on") {
+            // More info: ↑/↓ scroll the description, nothing else moves.
+            if let Some(dir @ (Dir::Up | Dir::Down)) = d {
+                bridge::scroll_box(INFO, if dir == Dir::Up { -0.3 } else { 0.3 });
+            }
+            return d.map(|_| true);
+        }
         if watch {
-            // A player menu opened from the remote owns the arrows (the player walks its rows).
-            if bridge::any("#ytc-player.menu #ytc-menu") {
-                return None;
-            }
-            let on_player = bridge::any("#ytc-player:focus") || !bridge::any(":focus");
-            let in_bar = bridge::any(&format!("{PCTL} :focus"));
-            if on_player {
-                return match (key, d) {
-                    ("Enter", _) | (" ", _) => {
-                        bridge::focus(PLAYER);
-                        Some(self.on_key("k", false))
-                    }
-                    (_, Some(Dir::Left)) => Some(self.on_key("j", false)),
-                    (_, Some(Dir::Right)) => Some(self.on_key("l", false)),
-                    (_, Some(Dir::Down)) => {
-                        // Into the control bar at its play button (focus inside keeps the bar shown).
-                        bridge::focus_sel(PLAYER, ".prow .pb");
-                        Some(true)
-                    }
-                    (_, Some(Dir::Up)) => Some(self.tv_move(Dir::Up)),
-                    _ => None,
-                };
-            }
-            if in_bar {
-                if let Some(d) = d {
-                    if self.tv_move_in(PCTL, d) {
-                        return Some(true);
-                    }
-                    return Some(match d {
-                        Dir::Up => {
-                            bridge::focus(PLAYER);
-                            true
-                        }
-                        Dir::Down => self.tv_move(Dir::Down),
-                        _ => true,
-                    });
-                }
-                return None;
-            }
+            return self.tv_watch_key(key, d);
         }
         d.map(|d| self.tv_move(d))
     }
 
+    /// The watch page: the picture with the overlay (time, seek bar, buttons) and the Up next row under it.
+    fn tv_watch_key(&mut self, key: &str, d: Option<Dir>) -> Option<bool> {
+        // A player menu opened from the remote owns the arrows (the player walks its rows).
+        if bridge::any("#ytc-player.menu #ytc-menu") {
+            return None;
+        }
+        let ok = matches!(key, "Enter" | " ");
+        if !ok && d.is_none() {
+            return None;
+        }
+        if bridge::any("#ytc-player .pfail") {
+            // The failure panel: ←/→ between its actions (OK presses the focused one).
+            if !bridge::any("#ytc-player .pfail :focus") {
+                bridge::focus_sel(PLAYER, ".pfail .pfbt");
+                return Some(true);
+            }
+            return match d {
+                Some(d @ (Dir::Left | Dir::Right)) => {
+                    self.tv_move_in("#ytc-player .pfb", d);
+                    Some(true)
+                }
+                Some(_) => Some(true),
+                None => None,
+            };
+        }
+        if bridge::any("#ytc-player .pstuck :focus") {
+            // The stuck status: ←/→ between its actions, ↓ back to the bar (OK presses the focused one).
+            return match d {
+                Some(d @ (Dir::Left | Dir::Right)) => {
+                    self.tv_move_in("#ytc-player .pstuck", d);
+                    Some(true)
+                }
+                Some(_) => {
+                    bridge::focus(SEEK);
+                    Some(true)
+                }
+                None => None,
+            };
+        }
+        let in_up = bridge::any(".wr :focus");
+        let on_seek = bridge::any("#ytc-seek:focus");
+        let in_row = bridge::any("#ytc-player .prow :focus");
+        let in_row_or_skip = in_row || bridge::any("#ytc-sbtb:focus");
+        let hidden = self.player.as_ref().is_some_and(|p| p.idle()) && !in_up;
+        if hidden || !(in_up || on_seek || in_row_or_skip) {
+            // The overlay is hidden (or nothing of it has the focus): the first key shows it on the seek bar.
+            // OK plays/pauses, ←/→ already scrub, ↑/↓ only show it.
+            bridge::focus(SEEK);
+            return Some(match d {
+                Some(Dir::Left) => self.tv_scrub(-1.0),
+                Some(Dir::Right) => self.tv_scrub(1.0),
+                _ if ok => self.tv_toggle(),
+                _ => {
+                    self.tv_wake();
+                    true
+                }
+            });
+        }
+        self.tv_wake();
+        if on_seek {
+            return Some(match d {
+                Some(Dir::Left) => self.tv_scrub(-1.0),
+                Some(Dir::Right) => self.tv_scrub(1.0),
+                Some(Dir::Down) => {
+                    if !bridge::focus_load("row") {
+                        bridge::focus_sel(PLAYER, ".prow .pb");
+                    }
+                    true
+                }
+                Some(Dir::Up) => {
+                    // The stuck status's actions (Try again, Open on YouTube) sit above, top right.
+                    if bridge::any("#ytc-player.stuck .pstuck .pfbt") {
+                        bridge::focus_sel(PLAYER, ".pstuck .pfbt");
+                    }
+                    true
+                }
+                None => {
+                    // OK on the bar: a running scrub seeks now, else play/pause.
+                    if self.player.as_ref().is_some_and(|p| p.tv_scrubbing()) {
+                        if let Some(p) = self.player.as_mut() {
+                            p.tv_scrub_end();
+                        }
+                        true
+                    } else {
+                        self.tv_toggle()
+                    }
+                }
+            });
+        }
+        let d = d?;
+        let skip = bridge::any("#ytc-player .psbt.on");
+        if bridge::any("#ytc-sbtb:focus") {
+            // The skip notice (above the row's right end).
+            match d {
+                Dir::Up => bridge::focus(SEEK),
+                Dir::Down | Dir::Left => {
+                    if !bridge::focus_load("row") {
+                        bridge::focus_sel(PLAYER, ".prow > :last-child");
+                    }
+                }
+                Dir::Right => {}
+            }
+            return Some(true);
+        }
+        if in_row {
+            let last = bridge::any("#ytc-player .prow > :last-child:focus");
+            return Some(match d {
+                Dir::Left | Dir::Right => {
+                    if !self.tv_move_in("#ytc-player .prow", d) && d == Dir::Right && skip {
+                        bridge::focus_save("row");
+                        bridge::focus(crate::player::ui::SBTB);
+                    }
+                    true
+                }
+                Dir::Up => {
+                    bridge::focus_save("row");
+                    if last && skip {
+                        bridge::focus(crate::player::ui::SBTB);
+                    } else {
+                        bridge::focus(SEEK);
+                    }
+                    true
+                }
+                Dir::Down => {
+                    bridge::focus_save("row");
+                    if !bridge::focus_load("up") {
+                        self.tv_up_first();
+                    }
+                    true
+                }
+            });
+        }
+        // The Up next row.
+        Some(match d {
+            Dir::Left | Dir::Right => {
+                self.tv_move_in(UPNEXT, d);
+                bridge::focus_save("up");
+                true
+            }
+            Dir::Up => {
+                bridge::focus_save("up");
+                if !bridge::focus_load("row") {
+                    bridge::focus_sel(PLAYER, ".prow .pb");
+                }
+                true
+            }
+            Dir::Down => true,
+        })
+    }
+
+    /// The first related card in view of the Up next row.
+    fn tv_up_first(&mut self) {
+        bridge::focus_sel("ytc-watch", ".wr #ytc-list a.t");
+    }
+
+    fn tv_wake(&mut self) {
+        if let Some(p) = self.player.as_mut() {
+            p.wake();
+        }
+    }
+
+    fn tv_toggle(&mut self) -> bool {
+        self.tv_wake();
+        self.on_key("k", false)
+    }
+
+    /// ←/→ on the seek bar: one step (faster while the key is held); the seek goes out when the remote rests.
+    fn tv_scrub(&mut self, dir: f64) -> bool {
+        let now = bridge::now();
+        self.tv.scrub_n = if now - self.tv.scrub_at < HELD_MS { self.tv.scrub_n + 1 } else { 0 };
+        self.tv.scrub_at = now;
+        let step = scrub_step(self.tv.scrub_n);
+        let Some(p) = self.player.as_mut() else { return true };
+        if !p.tv_scrub(dir * step) {
+            // Live: plain 10 s seeks.
+            return self.on_key(if dir < 0.0 { "j" } else { "l" }, false);
+        }
+        self.after_player();
+        self.tv.scrub_gen += 1;
+        let id = self.timer(Timer::TvScrub { generation: self.tv.scrub_gen });
+        bridge::timer(id, SCRUB_REST_MS);
+        true
+    }
+
+    pub(super) fn tv_scrub_rest(&mut self, generation: u32) {
+        if generation != self.tv.scrub_gen {
+            return;
+        }
+        if let Some(p) = self.player.as_mut() {
+            if p.tv_scrubbing() {
+                p.tv_scrub_end();
+            }
+        }
+        self.after_player();
+    }
+
     /// Moves focus inside `scope` only; false when nothing lies that way.
     fn tv_move_in(&mut self, scope: &str, d: Dir) -> bool {
-        let flat = bridge::spatial_rects(scope, SEL, "");
-        let Some((rects, cur)) = split(&flat) else { return false };
+        let flat = bridge::spatial_rects(scope, SEL, "", "");
+        let Some((rects, _, cur)) = split(&flat) else { return false };
         let Some(c) = cur else { return false };
         match tv::pick(rects[c], &rects, d, Some(c)) {
             Some(i) => {
-                bridge::spatial_focus(i as u32);
+                bridge::spatial_focus(i as u32, -1.0);
                 true
             }
             None => false,
         }
     }
 
-    /// Moves focus in direction `d` (inside an open panel when there is one).
+    /// Moves focus in direction `d` (inside an open panel when there is one). A card of the page's grid
+    /// lands where the first row sits (the focused row keeps one vertical place; instant, so a held key
+    /// never waits); entering the rail focuses this page's item and leaving it returns to where the
+    /// focus was in the content.
     fn tv_move(&mut self, d: Dir) -> bool {
-        let flat = bridge::spatial_rects(TRAPS, SEL, SKIP);
-        let Some((rects, cur)) = split(&flat) else {
+        let flat = bridge::spatial_rects(TRAPS, SEL, SKIP, MARKS);
+        let Some((rects, marks, cur)) = split(&flat) else {
             self.tv_focus_default();
             return true;
         };
@@ -402,15 +907,43 @@ impl App {
             self.tv_focus_default();
             return true;
         };
-        match tv::pick(rects[c], &rects, d, Some(c)) {
-            Some(i) => bridge::spatial_focus(i as u32),
-            None => {
-                if d == Dir::Up {
-                    bridge::scroll_to(0.0);
-                }
+        // In the rail ↑/↓ walk the rail only (the open rail lies over the cards).
+        let pick = if marks[c] == 2 && matches!(d, Dir::Up | Dir::Down) {
+            let only: Vec<tv::Rect> = rects.iter().zip(&marks).map(|(r, m)| if *m == 2 { *r } else { tv::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 } }).collect();
+            tv::pick(rects[c], &only, d, Some(c))
+        } else {
+            tv::pick(rects[c], &rects, d, Some(c))
+        };
+        let Some(i) = pick else {
+            if d == Dir::Up && marks[c] != 2 {
+                bridge::scroll_to(0.0);
             }
+            return true;
+        };
+        let in_rail = marks[c] == 2;
+        if !in_rail && marks[i] == 2 && !self.tv_search_on() {
+            bridge::focus_save("content");
+            self.tv_rail_focus();
+            return true;
+        }
+        if in_rail && marks[i] != 2 && bridge::focus_load("content") {
+            return true;
+        }
+        let y = if marks[i] == 1 { tv::row_scroll(&rects, &marks, c, i) } else { -1.0 };
+        bridge::spatial_focus(i as u32, y);
+        if self.held.is_some() && bridge::scroll_y() < 1.0 {
+            // A fresher feed arrived while the page was scrolled down (the desktop's "New videos" pill): it takes
+            // the place once the focus is back at the top.
+            self.on_click("", "fresh", "", 32);
         }
         true
+    }
+
+    /// The player's failure panel replaced the controls: its first action takes the focus.
+    pub(super) fn tv_failed(&mut self) {
+        if tv::on() {
+            bridge::focus_sel(PLAYER, ".pfail .pfbt");
+        }
     }
 
     /// A link was opened (remote or pointer): remembered for coming back to this page.
@@ -423,22 +956,42 @@ impl App {
         }
     }
 
-    /// Nothing focused: the player on watch pages, else the link last opened from this page, else
-    /// the first card in view, else the first stop.
+    /// Nothing focused: the seek bar on watch pages, else the link last opened from this page, else
+    /// the first card in view, else the first stop of the page, else the rail.
     pub(super) fn tv_focus_default(&mut self) {
-        if matches!(self.route, Route::Watch { .. }) {
-            bridge::attr(PLAYER, "tabindex", "0");
-            bridge::focus(PLAYER);
+                if matches!(self.route, Route::Watch { .. }) {
+            if bridge::any("#ytc-player .pfail .pfbt") {
+                bridge::focus_sel(PLAYER, ".pfail .pfbt");
+                return;
+            }
+            bridge::focus(SEEK);
+            if !bridge::any("#ytc-seek:focus") {
+                bridge::attr(PLAYER, "tabindex", "-1");
+                bridge::focus(PLAYER);
+            }
             return;
         }
         if let Some(h) = self.tv.opened.get(&self.url) {
             bridge::focus_sel(MAIN, &format!("a.t[href=\"{h}\"]"));
-            if bridge::any(&format!("{} :focus", "#ytc-main")) {
+            if bridge::any("#ytc-main :focus") {
                 return;
             }
         }
-        if !bridge::focus_grid(LIST, "a.t", 0) {
-            bridge::focus_sel(MAIN, "a[href],button");
+        // The first card whose top is in view, its row put where the first row sits.
+        let flat = bridge::spatial_rects("", SEL, SKIP, MARKS);
+        if let Some((rects, marks, _)) = split(&flat) {
+            if let Some(i) = (0..rects.len()).find(|&i| marks[i] == 1 && rects[i].y >= 0.0).or_else(|| marks.iter().position(|&m| m == 1)) {
+                bridge::spatial_focus(i as u32, tv::row_scroll(&rects, &marks, usize::MAX, i));
+                return;
+            }
+        }
+        bridge::focus_sel(MAIN, ".tvb,a[href],button");
+        if !bridge::any("#ytc-main :focus") {
+            // Nothing in the page yet (loading): the page itself holds the focus (no ring, the rail stays closed)
+            // until the content arrives and takes it.
+            bridge::attr(MAIN, "tabindex", "-1");
+            bridge::focus_sel("ytc", "#ytc-main");
+            self.tv.auto_rail = true;
         }
     }
 
@@ -447,8 +1000,10 @@ impl App {
         if !tv::on() {
             return;
         }
-        if matches!(self.route, Route::Watch { .. }) {
-            bridge::attr(PLAYER, "tabindex", "0");
+        if std::mem::take(&mut self.tv.grid_focus) && !matches!(self.route, Route::Watch { .. }) {
+            // The search went out from the search screen: its results take the focus.
+            bridge::blur();
+            bridge::scroll_to(0.0);
         }
         self.tv_focus_check();
         // The page that was left may still drop the focus while it is torn down (the player): look
@@ -459,21 +1014,37 @@ impl App {
 
     /// Focus is never lost on TV: nothing focused → the default stop.
     pub(super) fn tv_focus_check(&mut self) {
-        if tv::on() && (!bridge::any(":focus") || bridge::any("body:focus")) {
+        if !tv::on() {
+            return;
+        }
+
+        if !bridge::any(":focus") || bridge::any("body:focus") {
+            self.tv.auto_rail = false;
+            self.tv_focus_default();
+        } else if bridge::any("#ytc-player:focus") && bridge::any("#ytc-seek,#ytc-player .pfail .pfbt") {
+            // The player box held the focus until its controls were written.
+            self.tv_focus_default();
+        } else if bridge::any("#ytc-main:focus") && bridge::any("#ytc-main a.t,#ytc-main .tvb,#ytc-player .pfail .pfbt,#ytc-seek") {
+            // The page only held the focus while it loaded: the content takes it.
+            self.tv.auto_rail = false;
+            bridge::blur();
             self.tv_focus_default();
         }
     }
 }
 
-/// `[x, y, w, h]*n, current` → rects and the focused index.
-fn split(flat: &[f64]) -> Option<(Vec<tv::Rect>, Option<usize>)> {
-    if flat.len() < 5 {
+/// `[x, y, w, h, m]*n, current` → rects, marks and the focused index.
+fn split(flat: &[f64]) -> Option<(Vec<tv::Rect>, Vec<u8>, Option<usize>)> {
+    if flat.len() < 6 {
         return None;
     }
-    let n = (flat.len() - 1) / 4;
+    let n = (flat.len() - 1) / 5;
     let cur = flat[flat.len() - 1];
     let cur = (cur >= 0.0 && (cur as usize) < n).then_some(cur as usize);
-    Some((tv::rects(&flat[..n * 4]), cur))
+    let rows = &flat[..n * 5];
+    let rects = rows.chunks_exact(5).map(|c| tv::Rect { x: c[0], y: c[1], w: c[2], h: c[3] }).collect();
+    let marks = rows.chunks_exact(5).map(|c| c[4] as u8).collect();
+    Some((rects, marks, cur))
 }
 
 fn short(json: &str) -> String {
@@ -485,10 +1056,17 @@ fn short(json: &str) -> String {
 mod tests {
     #[test]
     fn split_reads_the_bridge_answer() {
-        let (r, c) = super::split(&[0.0, 0.0, 10.0, 10.0, 20.0, 0.0, 10.0, 10.0, 1.0]).unwrap();
-        assert_eq!((r.len(), c), (2, Some(1)));
-        let (_, c) = super::split(&[0.0, 0.0, 10.0, 10.0, -1.0]).unwrap();
+        let (r, m, c) = super::split(&[0.0, 0.0, 10.0, 10.0, 0.0, 20.0, 0.0, 10.0, 10.0, 2.0, 1.0]).unwrap();
+        assert_eq!((r.len(), m, c), (2, vec![0, 2], Some(1)));
+        let (_, _, c) = super::split(&[0.0, 0.0, 10.0, 10.0, 1.0, -1.0]).unwrap();
         assert_eq!(c, None);
         assert!(super::split(&[-1.0]).is_none());
+    }
+
+    #[test]
+    fn scrub_speeds_up_while_held() {
+        assert_eq!(super::scrub_step(0), 10.0);
+        assert_eq!(super::scrub_step(5), 10.0);
+        assert!(super::scrub_step(6) > 10.0 && super::scrub_step(20) > super::scrub_step(6) && super::scrub_step(40) > super::scrub_step(20));
     }
 }

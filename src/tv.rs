@@ -170,10 +170,6 @@ impl Rect {
     }
 }
 
-/// `[x, y, w, h]*n` from the bridge.
-pub fn rects(flat: &[f64]) -> Vec<Rect> {
-    flat.chunks_exact(4).map(|c| Rect { x: c[0], y: c[1], w: c[2], h: c[3] }).collect()
-}
 
 /// Gap between two intervals (0 when they overlap).
 fn gap(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
@@ -220,6 +216,18 @@ pub fn pick(cur: Rect, rects: &[Rect], d: Dir, skip: Option<usize>) -> Option<us
     best.map(|b| b.1)
 }
 
+/// The window scroll that puts grid card `i` where the grid's first row sits, so the focused row keeps one
+/// vertical place while the remote walks down and up (`rects` in viewport coordinates, `marks` = 1 for the
+/// grid's cards; the focused card `cur` is left out: it is drawn scaled). Equals target − first row, which
+/// does not depend on the current scroll.
+pub fn row_scroll(rects: &[Rect], marks: &[u8], cur: usize, i: usize) -> f64 {
+    let first = rects.iter().zip(marks).enumerate().filter(|(k, (_, m))| **m == 1 && *k != cur).map(|(_, (r, _))| r.y).fold(f64::INFINITY, f64::min);
+    if !first.is_finite() {
+        return -1.0;
+    }
+    (rects[i].y - first).max(0.0)
+}
+
 /// What a key means on the remote.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Remote {
@@ -259,6 +267,135 @@ pub fn remote_player_key(r: Remote, paused: bool) -> Option<&'static str> {
         Remote::Forward => Some("l"),
         Remote::Stop => (!paused).then_some("k"),
         Remote::Next | Remote::Prev => None,
+    }
+}
+
+// ------------------------------------------------------------- updates (About & updates)
+
+/// The shell's `shell_info` / `shell_check` answer (tv/shell/src-tauri/src/shell.rs).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShellInfo {
+    /// The app (shell) version.
+    pub version: String,
+    /// The client bundle the shell holds now (a newer one than the page runs = an update is ready).
+    pub seq: u64,
+    pub client: String,
+    pub source: String,
+    pub state: UpdateState,
+    /// When the last check ran (epoch ms; 0 = none yet).
+    pub at: f64,
+    /// A newer app (APK) the latest release offers: its version.
+    pub apk: Option<String>,
+    /// The release's interface needs a newer app first.
+    pub needs_shell: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    Checking,
+    Ok,
+    Failed(String),
+    /// The app update downloads: bytes so far, of (0 = unknown).
+    Downloading(u64, u64),
+    /// Android's installer was opened.
+    Installing,
+}
+
+pub fn parse_shell_info(json: &str) -> Option<ShellInfo> {
+    let v = crate::json::parse_str(json)?;
+    let b = v.get("bundle")?;
+    let u = v.get("update");
+    let st = u.and_then(|u| u.get("state")).and_then(|x| x.as_str()).unwrap_or("idle");
+    let num = |k: &str| u.and_then(|u| u.get(k)).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let text = |x: Option<&crate::json::Value>| x.and_then(|x| x.as_str()).map(|s| s.chars().take(300).collect::<String>());
+    let state = match st {
+        "checking" => UpdateState::Checking,
+        "ok" => UpdateState::Ok,
+        "failed" => UpdateState::Failed(text(u.and_then(|u| u.get("error"))).unwrap_or_default()),
+        "downloading" => UpdateState::Downloading(num("got") as u64, num("total") as u64),
+        "installing" => UpdateState::Installing,
+        _ => UpdateState::Idle,
+    };
+    let apk = text(u.and_then(|u| u.get("apk")).and_then(|a| a.get("version"))).or_else(|| text(v.get("offer").and_then(|o| o.get("version"))));
+    Some(ShellInfo {
+        version: text(v.get("version")).unwrap_or_default(),
+        seq: b.get("seq").and_then(|x| x.as_f64()).unwrap_or(0.0) as u64,
+        client: text(b.get("client")).unwrap_or_default(),
+        source: text(b.get("source")).unwrap_or_default(),
+        state,
+        at: num("at"),
+        apk: apk.filter(|a| !a.is_empty()),
+        needs_shell: u.and_then(|u| u.get("needs_shell")).and_then(|x| x.as_bool()).unwrap_or(false),
+    })
+}
+
+/// What the About & updates screen says now (`running` = the bundle seq this page started with).
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateView {
+    NotChecked,
+    Checking,
+    UpToDate,
+    /// A newer interface is in place: one reload runs it.
+    Ready,
+    /// A newer app: Install update.
+    App(String),
+    /// The app update downloads (percent, None = unknown size).
+    Downloading(Option<u8>),
+    Installing,
+    /// The release's interface needs the newer app (offered, or not yet published).
+    NeedsApp,
+    Failed(String),
+}
+
+pub fn update_view(i: &ShellInfo, running: u64) -> UpdateView {
+    match &i.state {
+        UpdateState::Downloading(got, total) => return UpdateView::Downloading((*total > 0).then(|| ((*got * 100) / *total).min(100) as u8)),
+        UpdateState::Installing => return UpdateView::Installing,
+        UpdateState::Checking => return UpdateView::Checking,
+        _ => {}
+    }
+    if running > 0 && i.seq > running {
+        return UpdateView::Ready;
+    }
+    if let Some(v) = &i.apk {
+        return UpdateView::App(v.clone());
+    }
+    match &i.state {
+        UpdateState::Failed(e) => UpdateView::Failed(e.clone()),
+        _ if i.needs_shell => UpdateView::NeedsApp,
+        UpdateState::Ok => UpdateView::UpToDate,
+        _ => UpdateView::NotChecked,
+    }
+}
+
+/// A failed check in words (the raw reason stays under it).
+pub fn update_error(e: &str) -> &'static str {
+    let l = e.to_ascii_lowercase();
+    if l.contains("403") || l.contains("429") || l.contains("rate limit") {
+        "GitHub's limit for update checks was reached. Try again in an hour."
+    } else if l.contains("signature") || l.contains("hash mismatch") || l.contains("verify") {
+        "The download did not pass Lumen's signature check, so nothing was installed."
+    } else if l.contains("dns") || l.contains("connect") || l.contains("resolve") || l.contains("timed out") || l.contains("timeout") || l.contains("network") || l.contains("io:") {
+        "No connection to GitHub. Check the TV's network and try again."
+    } else if l.contains("apk") || l.contains("larger than") || l.contains("body") {
+        "The app update could not be downloaded. Try again."
+    } else if l.contains("unknown command") {
+        "This app installs app updates from its own Update Lumen dialog (it appears after a check, once a new app is published); the next one installs from here."
+    } else {
+        "The update check did not work."
+    }
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+pub fn ago(at: f64, now: f64) -> String {
+    let m = ((now - at) / 60_000.0).max(0.0) as u64;
+    match m {
+        0 => "just now".into(),
+        1..=59 => format!("{m} min ago"),
+        60..=2879 => format!("{} h ago", m / 60),
+        _ => format!("{} days ago", m / 1440),
     }
 }
 
@@ -329,6 +466,60 @@ mod tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn shell_info_reads_every_update_state() {
+        let i = parse_shell_info(r#"{"version":"0.1.0","version_code":1000,"bundle":{"seq":200,"client":"0.9.0","source":"release"},"update":{"state":"ok","at":1000,"needs_shell":false,"installed":{"client":"0.9.0","seq":200},"apk":{"version":"0.2.0","version_code":2000}},"offer":null,"repo":"o/r"}"#).unwrap();
+        assert_eq!((i.version.as_str(), i.seq, i.client.as_str(), i.source.as_str(), &i.state, i.at, i.apk.as_deref()), ("0.1.0", 200, "0.9.0", "release", &UpdateState::Ok, 1000.0, Some("0.2.0")));
+        let d = parse_shell_info(r#"{"version":"0.1.0","bundle":{"seq":1,"client":"x","source":"builtin"},"update":{"state":"downloading","got":512,"total":2048,"apk":{"version":"0.2.0"}}}"#).unwrap();
+        assert_eq!(d.state, UpdateState::Downloading(512, 2048));
+        let f = parse_shell_info(r#"{"version":"0.1.0","bundle":{"seq":1,"client":"x","source":"builtin"},"update":{"state":"failed","at":5,"error":"release lookup: HTTP 403"}}"#).unwrap();
+        assert_eq!(f.state, UpdateState::Failed("release lookup: HTTP 403".into()));
+        assert!(update_error("release lookup: HTTP 403").contains("limit"));
+        assert!(update_error("manifest signature does not verify").contains("signature"));
+        assert!(update_error("io: failed to lookup address (dns error)").contains("connection"));
+        assert!(update_error("APK: hash mismatch").contains("signature"));
+        assert!(update_error("APK: HTTP 404").contains("could not be downloaded"));
+        // An old shell (no offer key, idle) and a broken answer.
+        let o = parse_shell_info(r#"{"version":"0.1.0","bundle":{"seq":7,"client":"0.8.7","source":"builtin"},"update":{"state":"idle"}}"#).unwrap();
+        assert_eq!((&o.state, &o.apk), (&UpdateState::Idle, &None));
+        assert!(parse_shell_info("null").is_none());
+        // What the screen shows: a newer interface than the page runs first, then an app update, else the check.
+        assert_eq!(update_view(&i, 100), UpdateView::Ready);
+        assert_eq!(update_view(&i, 200), UpdateView::App("0.2.0".into()));
+        assert_eq!(update_view(&d, 1), UpdateView::Downloading(Some(25)));
+        assert_eq!(update_view(&f, 1), UpdateView::Failed("release lookup: HTTP 403".into()));
+        assert_eq!(update_view(&o, 7), UpdateView::NotChecked);
+        let ok = ShellInfo { state: UpdateState::Ok, seq: 7, ..o.clone() };
+        assert_eq!(update_view(&ok, 7), UpdateView::UpToDate);
+        assert_eq!(ago(0.0, 30_000.0), "just now");
+        assert_eq!(ago(0.0, 5.0 * 60_000.0), "5 min ago");
+        assert_eq!(ago(0.0, 3.0 * 3_600_000.0), "3 h ago");
+        assert_eq!(ago(0.0, 3.0 * 86_400_000.0), "3 days ago");
+    }
+
+    #[test]
+    fn rows_keep_one_vertical_place() {
+        // The grid scrolled by 150: the first row's cards sit at y = 80 - 150; the header is not marked.
+        let mut g = grid();
+        for c in g.iter_mut().skip(2) {
+            c.y -= 150.0;
+        }
+        let mut marks = vec![0u8; g.len()];
+        for m in marks.iter_mut().skip(2) {
+            *m = 1;
+        }
+        // From row 1 (focused, index 7) down to row 2 col 1 (index 11): row 2 lands where row 0 sits at scroll 0.
+        assert_eq!(row_scroll(&g, &marks, 7, 11), 400.0);
+        // Back up to row 0: the top.
+        assert_eq!(row_scroll(&g, &marks, 7, 3), 0.0);
+        // The focused card (drawn scaled) is never the reference, even when it is the first one.
+        let mut s = g.clone();
+        s[2].y -= 9.0;
+        assert_eq!(row_scroll(&s, &marks, 2, 7), 200.0);
+        // No other grid card: no anchoring.
+        assert_eq!(row_scroll(&g[..3], &marks[..3], 2, 2), -1.0);
     }
 
     #[test]

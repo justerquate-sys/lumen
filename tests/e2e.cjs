@@ -5437,179 +5437,608 @@ chrome.runtime.onMessage.addListener(m => {
     } finally { await sw.evaluate(() => chrome.storage.local.remove('ytcTelemetryV1')); }
   });
 
-  await step('TV mode (the TV app\'s platform flag, here without its shell): D-pad walks the grid, OK opens our player, ↓ enters the control bar, no autofocus on Home', async () => {
-    // The TV app sets YTC_PLATFORM; localStorage ytc:platform is the development switch for the same mode.
+  // ---- TV mode (the TV app's platform flag and a stand-in for its shell: localStorage ytc:platform and ytc:shell,
+  // the development switches for what tv/shim/shim.js provides). localStorage e2e:tv picks the shell's answers:
+  // 'code' = a sign-in code whose polls fail with a long unbroken reason, 'nocode' = the code request fails,
+  // 'signed' = a signed-in account. YTC_SHOTS=<dir> saves one screenshot per screen and size.
+  const TVSIZES = [[960, 540], [1920, 1080]];
+  const tvShots = process.env.YTC_SHOTS;
+  const tvOpen = async () => {
     const tv = await ctx.newPage();
-    const tvErrors = [];
-    tv.on('pageerror', e => tvErrors.push(String(e)));
-    try {
-      await tv.addInitScript(() => { try { localStorage.setItem('ytc:platform', 'tv'); } catch {} });
-      await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
-      await tv.waitForSelector('.hero');
-      assert.equal(await tv.getAttribute('html', 'data-ytc-tv'), '1');
-      assert.equal(await tv.locator('.hero input[autofocus]').count(), 0, 'no autofocus: the TV keyboard would take the arrows');
-      assert.equal(await tv.locator('.hero [data-act=tv-signin]').count(), 1, 'device sign-in instead of the Google page');
-      await tv.goto('https://www.youtube.com/results?search_query=lofi', { waitUntil: 'commit' });
-      await tv.waitForSelector('#ytc-list .c a.t');
-      const focused = () => tv.evaluate(() => { const a = document.activeElement, r = a.getBoundingClientRect(); return { href: a.getAttribute('href'), cls: a.className, x: Math.round(r.left), y: Math.round(r.top) }; });
-      await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
-      const a = await focused();
-      await tv.keyboard.press('ArrowRight');
-      const b = await focused();
-      assert.ok(b.href !== a.href && b.x > a.x && Math.abs(b.y - a.y) < 4, `→ moves along the row: ${JSON.stringify([a, b])}`);
-      await tv.keyboard.press('ArrowDown');
-      const c = await focused();
-      assert.ok(c.y > b.y + 40 && Math.abs(c.x - b.x) < 4, `↓ lands on the card below: ${JSON.stringify([b, c])}`);
-      await tv.keyboard.press('ArrowUp');
-      assert.equal((await focused()).href, b.href, '↑ comes back');
-      await tv.keyboard.press('Enter');
-      await tv.waitForFunction(() => location.pathname === '/watch', null, { timeout: 8000 }).catch(async e => { throw new Error(e.message + ' at ' + tv.url() + ' focus ' + JSON.stringify(await focused())); });
-      assert.equal(new URL(tv.url()).pathname + new URL(tv.url()).search, b.href.replace(/&amp;/g, '&'));
-      await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-player', null, { timeout: 8000 });
-      await tv.waitForSelector('#ytc-player video');
-      await tv.keyboard.press('ArrowDown');
-      assert.ok(await tv.evaluate(() => !!document.activeElement.closest('#ytc-player .pctl')), '↓ from the player enters the control bar');
-      await tv.keyboard.press('ArrowUp');
-      assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-player', '↑ from the bar returns to the player');
-      assert.deepEqual(tvErrors, []);
-    } finally {
-      await tv.evaluate(() => localStorage.removeItem('ytc:platform')).catch(() => {});
-      await tv.close();
+    tv.errors = [];
+    tv.on('pageerror', e => tv.errors.push(String(e)));
+    await tv.addInitScript(() => {
+      const mode = localStorage.getItem('e2e:tv') || 'code';
+      const why = 'https://oauth2.googleapis.com/device/token?' + 'x'.repeat(80);
+      localStorage.setItem('ytc:platform', 'tv');
+      const answers = {
+        auth_token: mode === 'signed' ? JSON.stringify({ token: 'ya29.' + 'a'.repeat(60), exp: Date.now() + 3600e3 }) : '{"token":null}',
+        auth_start: mode === 'nocode' ? null : JSON.stringify({ user_code: 'WMB-QZX-TPR', verification_url: 'https://www.google.com/device', interval: 1, expires_in: 1800 }),
+        auth_poll: JSON.stringify({ state: 'error', error: why }),
+        auth_signout: '{}',
+        error: 'HTTP 503 ' + why,
+        shell_info: JSON.stringify({ version: '0.1.0', version_code: 1000, bundle: { seq: 100, client: '0.9.0', source: 'builtin' }, update: { state: 'idle' }, offer: null }),
+      };
+      // (e2e:tvshell: answers a step puts in place of these, kept across reloads.)
+      localStorage.setItem('ytc:shell', JSON.stringify(Object.assign(answers, JSON.parse(localStorage.getItem('e2e:tvshell') || '{}'))));
+    });
+    return tv;
+  };
+  const tvClose = async tv => {
+    await tv.evaluate(() => { for (const k of ['e2e:tv', 'e2e:tvshell', 'ytc:platform', 'ytc:shell']) localStorage.removeItem(k); }).catch(() => {});
+    await tv.close();
+  };
+  // A fresh page load in `mode` at `url` (sessionStorage cleared: no snapshot, no token mirror).
+  const tvGo = async (tv, mode, url) => {
+    await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+    // (The page going away writes its feed snapshot on pagehide: cleared after it, so each load starts cold.)
+    await tv.evaluate(m => { localStorage.setItem('e2e:tv', m); sessionStorage.clear(); addEventListener('pagehide', () => sessionStorage.clear()); }, mode);
+    await tv.goto(url, { waitUntil: 'commit' });
+    await tv.waitForFunction(() => document.documentElement.dataset.ytcTv === '1' && document.querySelector('#ytc-side .rl'));
+  };
+  const tvShot = async (tv, name) => {
+    if (!tvShots) return;
+    await tv.waitForTimeout(260); // the focus scale and panel slides settle (≤ 220 ms)
+    const vp = tv.viewportSize();
+    await tv.screenshot({ path: path.join(tvShots, `${name}-${vp.width}.png`) });
+  };
+  const focusedInfo = tv => tv.evaluate(() => { const a = document.activeElement, r = a.getBoundingClientRect(); return { tag: a.tagName, id: a.id, cls: String(a.className), href: a.getAttribute('href'), nav: a.dataset.nav || '', x: r.left, y: r.top, w: r.width, h: r.height }; });
+  // The 10-foot audit of what is on screen now (the TV rules, measured): 1. the focused stop exists, is shown and,
+  // with its ring and its scale, lies inside the overscan-safe area (5 % per side) and no ancestor clips it;
+  // 2. every focus stop fixed to the screen (rail, overlay, panels) lies in the safe area; 3. every text shown on
+  // screen is at least 22 px at 1080p (11 CSS px at 540); 4. the root font-size is 1/60 of the width.
+  const tvAudit = (tv, what) => tv.evaluate(what => {
+    const W = innerWidth, H = innerHeight, sx = W * 0.05, sy = H * 0.05, e = 1, bad = [];
+    const px = v => Math.round(v);
+    const shown = el => el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) && el.getClientRects().length > 0;
+    const inSafe = (r, ext) => r.left - ext >= sx - e && r.top - ext >= sy - e && r.right + ext <= W - sx + e && r.bottom + ext <= H - sy + e;
+    if (Math.abs(parseFloat(getComputedStyle(document.documentElement).fontSize) - W / 60) > 0.05) bad.push('root font-size is not 100vw/60');
+    const a = document.activeElement;
+    if (!a || a === document.body || !shown(a)) bad.push(`no focus shown (${a && a.tagName}#${a && a.id})`);
+    else if (a.id === 'ytc-main') {
+      // Loading: the page box holds the focus (no ring) until the content takes it; nothing scrolled for it.
+      if (scrollY > 0 || !document.querySelector('#ytc-main .sk')) bad.push('the page box holds the focus outside loading');
+    } else {
+      const s = getComputedStyle(a), r = a.getBoundingClientRect();
+      const ring = s.outlineStyle !== 'none' ? Math.max(0, parseFloat(s.outlineWidth) + parseFloat(s.outlineOffset)) : 0;
+      // A card's ring is on its thumbnail: check the whole card.
+      const card = a.closest('.c');
+      const box = card ? card.getBoundingClientRect() : r;
+      const ext = card ? parseFloat(getComputedStyle(card.querySelector('.th')).outlineWidth) * 2 : ring;
+      if (!inSafe(box, ext)) bad.push(`focus ${a.tagName}.${a.className}#${a.id} ${[box.left, box.top, box.right, box.bottom].map(px)} +${px(ext)} outside the safe area of ${W}×${H}`);
+      for (let p = (card || a).parentElement, q = card || a; p && p !== document.documentElement; q = p, p = p.parentElement) {
+        // (Above a fixed box only the viewport clips.)
+        if (getComputedStyle(q).position === 'fixed') break;
+        const ps = getComputedStyle(p);
+        const clips = !(ps.overflowX === 'visible' && ps.overflowY === 'visible') || ps.clipPath !== 'none' || (ps.contentVisibility === 'auto');
+        if (!clips) continue;
+        const pr = p.getBoundingClientRect();
+        if (box.left - ext < pr.left - e || box.right + ext > pr.right + e || box.top - ext < pr.top - e || box.bottom + ext > pr.bottom + e) bad.push(`the focus ring of ${a.tagName}.${a.className} is cut by ${p.tagName.toLowerCase()}#${p.id}.${p.className}`);
+      }
     }
-  });
-  await step('TV panels fit the screen at 960×540 and 1920×1080 inside the overscan-safe area: Home\'s sign-in nudge, the sign-in panel (code + a long status, no code, signed in), the control bar, the player menus (and the remote walks the bar after one closed), skip button, captions', async () => {
-    // The TV mode with a stand-in for the TV app's shell (localStorage ytc:platform and ytc:shell, the
-    // development switches for what tv/shim/shim.js provides). localStorage e2e:tv picks its answers: 'code' = a sign-in code whose polls fail with a long unbroken reason, 'nocode' =
-    // the code request fails, 'signed' = a signed-in account.
-    const tv = await ctx.newPage();
-    const tvErrors = [];
-    tv.on('pageerror', e => tvErrors.push(String(e)));
+    const SEL = "a[href]:not([tabindex='-1']),button:not([disabled]):not([tabindex='-1']),input:not([type=hidden]):not([tabindex='-1']),[tabindex='0']";
+    for (const el of document.querySelectorAll(SEL)) {
+      if (!shown(el) || el.closest('[inert],[aria-hidden="true"],[hidden]')) continue;
+      let fixed = false;
+      for (let p = el; p; p = p.parentElement) if (getComputedStyle(p).position === 'fixed') { fixed = true; break; }
+      if (!fixed || el.closest('.wr #ytc-list')) continue; // (the Up next row scrolls sideways under the focus)
+      const r = el.getBoundingClientRect();
+      if (r.right < 0 || r.left > W || r.bottom < 0 || r.top > H) continue;
+      if (!inSafe(r, 0)) bad.push(`fixed stop ${el.tagName}.${el.className}#${el.id} ${[r.left, r.top, r.right, r.bottom].map(px)} outside the safe area`);
+    }
+    const min = 22 * H / 1080 - 0.01;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const p = n.parentElement;
+      if (!n.data.trim() || !p || !shown(p) || p.closest('#ytc-debug,[aria-hidden="true"],.sk')) continue;
+      const rg = document.createRange(); rg.selectNodeContents(n);
+      const q = rg.getBoundingClientRect();
+      if (!q.width || q.right < 0 || q.left > W || q.bottom < 0 || q.top > H) continue;
+      const fs = parseFloat(getComputedStyle(p).fontSize);
+      if (fs < min) bad.push(`text ${JSON.stringify(n.data.trim().slice(0, 24))} at ${fs.toFixed(1)} px < ${min.toFixed(1)}`);
+    }
+    return [...new Set(bad)].slice(0, 12).map(b => `${what}: ${b}`);
+  }, what);
+  // The D-pad graph of the focus stops reachable from the current focus (each stop tried in all four directions):
+  // every stop reached has a way on (no dead end), and the stops of `want` (a selector of what must be reachable,
+  // judged on screen at the start) are all reached.
+  const tvWalk = async (tv, want, max = 60) => {
+    await tv.evaluate(() => { let i = 0; for (const el of document.querySelectorAll('a[href],button,input,[tabindex]')) el.dataset.e2ek = String(i++); });
+    const start = await tv.evaluate(() => document.activeElement.dataset.e2ek);
+    const need = await tv.evaluate(sel => [...document.querySelectorAll(sel)].filter(el => el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) && el.getClientRects().length && (r => r.bottom > 0 && r.top < innerHeight)(el.getBoundingClientRect())).map(el => el.dataset.e2ek), want);
+    const seen = new Set([start]), queue = [start], dead = [];
+    while (queue.length && seen.size < max) {
+      const k = queue.shift();
+      let out = 0;
+      for (const key of ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp']) {
+        // (A page that re-rendered under the walk — a fresher feed taking its place — ends that branch.)
+        if (!await tv.evaluate(k => { const el = document.querySelector(`[data-e2ek="${k}"]`); if (el) el.focus({ preventScroll: true }); return !!el; }, k)) { out++; break; }
+        await tv.keyboard.press(key);
+        // (An element written after the walk started gets its key now.)
+        const to = await tv.evaluate(() => { const a = document.activeElement; if (a && a !== document.body && !a.dataset.e2ek) a.dataset.e2ek = 'n' + (globalThis.__e2en = (globalThis.__e2en || 0) + 1); return a.dataset.e2ek; });
+        if (to && to !== k) { out++; if (!seen.has(to)) { seen.add(to); queue.push(to); } }
+      }
+      if (!out) dead.push(k);
+    }
+    const gone = await tv.evaluate(ks => ks.filter(k => !document.querySelector(`[data-e2ek="${k}"]`)), need);
+    const missing = need.filter(k => !seen.has(k) && !gone.includes(k));
+    const name = k => tv.evaluate(k => { const el = document.querySelector(`[data-e2ek="${k}"]`); return el ? `${el.tagName}.${el.className}${el.dataset.nav ? '[' + el.dataset.nav + ']' : ''}` : k; }, k);
+    return { dead: await Promise.all(dead.map(name)), missing: await Promise.all(missing.map(name)), reached: seen.size };
+  };
+  // The remote's Back (what the TV shell's YTC_BACK() does, through the bridge's `ytc-back` event).
+  const back = tv => tv.evaluate(() => { document.dispatchEvent(new Event('ytc-back')); const r = document.documentElement.dataset.ytcBack; return { handled: r === '1', exit: r === '2' }; });
+
+  // One layout at every resolution: the boxes of `sel` as fractions of the screen.
+  const tvGeometry = (tv, sel) => tv.evaluate(sel => [...document.querySelectorAll(sel)].filter(e => e.getClientRects().length).map(e => { const r = e.getBoundingClientRect(); return [r.left / innerWidth, r.top / innerHeight, r.width / innerWidth, r.height / innerHeight]; }), sel);
+  const sameGeometry = (a, b, what) => {
+    assert.equal(a.length, b.length, `${what}: same boxes`);
+    const d = a.map((r, i) => Math.max(...r.map((v, k) => Math.abs(v - b[i][k]) * (k % 2 ? 540 : 960))));
+    const worst = Math.max(0, ...d), at = d.indexOf(worst);
+    assert.ok(worst <= 1, `${what}: the 960×540 and 1920×1080 layouts differ by ${worst.toFixed(2)} px (at 960×540) at box ${at}: ${JSON.stringify([a[at], b[at]])}`);
+  };
+  await step('TV browsing (960×540 and 1920×1080): rail, Home signed out and in, topic chips, the grid walk with its fixed row, Search screen and results, channel, playlist, a failed page; every screen inside the safe area, ≥ 22 px type, rings never clipped, no dead ends, Back rules', async () => {
+    const tv = await tvOpen();
+    const geo = {};
     try {
-      await tv.addInitScript(() => {
-        const mode = localStorage.getItem('e2e:tv') || 'code';
-        const why = 'https://oauth2.googleapis.com/device/token?' + 'x'.repeat(80);
-        localStorage.setItem('ytc:platform', 'tv');
-        localStorage.setItem('ytc:shell', JSON.stringify({
-          auth_token: mode === 'signed' ? JSON.stringify({ token: 'ya29.' + 'a'.repeat(60), exp: Date.now() + 3600e3 }) : '{"token":null}',
-          auth_start: mode === 'nocode' ? null : JSON.stringify({ user_code: 'WWW-WWW-WWW', verification_url: 'https://www.google.com/device', interval: 1, expires_in: 1800 }),
-          auth_poll: JSON.stringify({ state: 'error', error: why }),
-          auth_signout: '{}',
-          error: 'HTTP 503 ' + why,
-        }));
-      });
-      // Every box (elements and text lines) of `sel` inside its own content box (horizontally: a tall state
-      // scrolls inside the panel), the focused control with its ring inside the panel's padding, the box
-      // itself inside the overscan-safe area (5 % per side: 48 × 27 px at 960 × 540), nothing clipped.
-      const fit = (sel, inner) => tv.evaluate(([sel, inner]) => {
-        const el = document.querySelector(sel), W = innerWidth, H = innerHeight, cs = getComputedStyle(el);
-        const r = el.getBoundingClientRect(), bad = [], e = 0.5, sx = W * 0.05, sy = H * 0.05;
-        const px = v => Math.round(v);
-        // A full-bleed bar (inner = 'bleed') keeps its content box in the safe area, a panel its whole box.
-        const sr = inner === 'bleed' ? { left: r.left + parseFloat(cs.paddingLeft), top: r.top + parseFloat(cs.paddingTop), right: r.right - parseFloat(cs.paddingRight), bottom: r.bottom - parseFloat(cs.paddingBottom) } : r;
-        if (sr.left < sx - e || sr.top < sy - e || sr.right > W - sx + e || sr.bottom > H - sy + e) bad.push(`${sel} ${[sr.left, sr.top, sr.right, sr.bottom].map(px)} outside the safe area of ${W}×${H}`);
-        if (el.scrollWidth > el.clientWidth + 1 && cs.overflowX !== 'visible') bad.push(`${sel} scrolls sideways (${el.scrollWidth} > ${el.clientWidth})`);
-        const pad = inner ? [parseFloat(cs.paddingLeft), parseFloat(cs.paddingRight)] : [0, 0];
-        const out = (q, what, ring) => {
-          // (In a full-bleed bar everything, rings included, stays inside the safe area.)
-          const l = inner === 'bleed' ? sx : ring ? r.left : r.left + pad[0], rt = inner === 'bleed' ? W - sx : ring ? r.right : r.right - pad[1];
-          if (q.width && q.height && (q.left < l - e || q.right > rt + e)) bad.push(`${what} ${[q.left, q.right].map(px)} outside ${[l, rt].map(px)}`);
-        };
-        const seen = { checkOpacity: true, checkVisibilityCSS: true }; // (opacity 0 anywhere up the tree = not shown)
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-          if (n.nodeType === 3) {
-            if (!n.data.trim() || !n.parentElement.checkVisibility(seen)) continue;
-            const rg = document.createRange(); rg.selectNodeContents(n);
-            for (const q of rg.getClientRects()) out(q, JSON.stringify(n.data.slice(0, 30)));
-            continue;
-          }
-          if (!n.checkVisibility(seen)) continue;
-          const ns = getComputedStyle(n), q = n.getBoundingClientRect(), what = n.tagName.toLowerCase() + '.' + n.className;
-          if (n === document.activeElement && ns.outlineStyle !== 'none') {
-            const o = parseFloat(ns.outlineWidth) + parseFloat(ns.outlineOffset);
-            out({ left: q.left - o, right: q.right + o, width: q.width, height: q.height }, what + ' (focus ring)', true);
-            // …and no ancestor that clips (overflow other than visible) cuts the ring.
-            for (let p = n.parentElement; p && p !== el.parentElement; p = p.parentElement) {
-              const ps = getComputedStyle(p), pr = p.getBoundingClientRect();
-              if (ps.overflowX === 'visible' && ps.overflowY === 'visible') continue;
-              if (q.left - o < pr.left - e || q.right + o > pr.right + e || q.top - o < pr.top - e || q.bottom + o > pr.bottom + e) bad.push(`${what}'s focus ring is cut by ${p.tagName.toLowerCase()}.${p.className}`);
-            }
-          } else out(q, what);
-          if (n.scrollWidth > n.clientWidth + 1 && ns.overflowX !== 'visible') bad.push(`${what} clips its text (${n.scrollWidth} > ${n.clientWidth})`);
-          if (n.scrollHeight > n.clientHeight + 1 && /hidden|clip/.test(ns.overflowY)) bad.push(`${what} cuts its content off (${n.scrollHeight} > ${n.clientHeight})`);
-        }
-        return bad;
-      }, [sel, inner]);
-      const shots = process.env.YTC_SHOTS;
-      for (const [W, H] of [[960, 540], [1920, 1080]]) {
+      for (const [W, H] of TVSIZES) {
         await tv.setViewportSize({ width: W, height: H });
-        for (const mode of ['signed', 'nocode', 'code']) {
-          await tv.goto('https://www.youtube.com/', { waitUntil: 'commit' });
-          await tv.evaluate(m => { localStorage.setItem('e2e:tv', m); sessionStorage.clear(); }, mode);
-          await tv.reload({ waitUntil: 'commit' });
-          await tv.waitForSelector('#ytc-acct .tva');
-          if (mode !== 'signed') {
-            // Home's sign-in nudge (signed out): the text and the focused button with its ring.
-            await tv.waitForSelector('.hero [data-act=tv-signin]');
-            await tv.focus('.hero [data-act=tv-signin]');
-            await tv.waitForTimeout(250);
-            if (shots && mode === 'code') await tv.screenshot({ path: path.join(shots, `tv-home-${W}.png`) });
-            assert.deepEqual(await fit('#ytc .hero', false), [], `Home nudge at ${W}×${H}`);
-          }
-          await tv.focus('#ytc-acct .tva');
+        // Home signed out: the calm card, its Sign in focused; the rail (Lumen mark, Search … Sign in).
+        await tvGo(tv, 'code', 'https://www.youtube.com/');
+        await tv.waitForSelector('.tvpc .tvb');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('.tvpc .tvb'));
+        assert.equal(await tv.locator('#ytc-top .logo:visible, #ytc-search:visible, .hero').count(), 0, 'no header bar, no search box on Home');
+        assert.deepEqual(await tv.$$eval('#ytc-side .rl', a => a.map(e => e.dataset.nav)), ['search', 'home', 'subs', 'history', 'wl', 'playlists', 'liked', 'acct', 'about']);
+        assert.equal(await tv.textContent('#ytc-side .rmk b'), 'Lumen');
+        assert.deepEqual(await tvAudit(tv, `home signed out ${W}`), []);
+        await tvShot(tv, 'home-signed-out');
+        const w0 = await tvWalk(tv, '#ytc-side .rl,.tvpc .tvb');
+        assert.deepEqual([w0.dead, w0.missing], [[], []], `home signed out walk ${W}`);
+        // Back from the content focuses the rail (this page's item); Back on the rail at Home leaves the app.
+        await tv.focus('.tvpc .tvb');
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.equal((await focusedInfo(tv)).nav, 'home');
+        assert.ok(await tv.evaluate(() => document.getElementById('ytc-side').matches(':focus-within')), 'the rail opened');
+        await tvShot(tv, 'rail-open');
+        assert.deepEqual(await tvAudit(tv, `rail open ${W}`), []);
+        const railW = await tv.evaluate(() => document.querySelector('#ytc-side .rl[data-nav=subs]').getBoundingClientRect().width);
+        assert.ok(railW > W * 0.15, `the open rail shows the labels (${railW})`);
+        const gridX = await tv.evaluate(() => document.querySelector('.tvcd').getBoundingClientRect().left);
+        assert.deepEqual(await back(tv), { handled: false, exit: true }, 'Back on the rail at Home leaves the app');
+        // → from the rail returns to where the focus was in the content.
+        await tv.keyboard.press('ArrowRight');
+        assert.ok(await tv.evaluate(() => document.activeElement.matches('.tvpc .tvb')), '→ leaves the rail back to the content');
+        assert.equal(await tv.evaluate(() => document.querySelector('.tvcd').getBoundingClientRect().left), gridX, 'the content never moved under the rail');
+
+        // Signed in: Home's feed with YouTube's chips, four cards per row.
+        HOME.rich = true; FX.homeChips = true;
+        await tvGo(tv, 'signed', 'https://www.youtube.com/');
+        await tv.waitForSelector('#ytc-list .c a.t');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+        await tv.waitForSelector('#ytc-fx-tc .fx-ch');
+        await tv.waitForTimeout(300);
+        await tvShot(tv, 'home');
+        const cols = await tv.evaluate(() => { const xs = [...document.querySelectorAll('#ytc-list .c')].map(c => c.offsetTop); return xs.filter(y => y === xs[0]).length; });
+        assert.equal(cols, 4, 'four cards per row');
+        await tv.evaluate(() => document.activeElement.blur());
+        await tv.waitForTimeout(400);
+        geo[W] = await tvGeometry(tv, '#ytc-side .rl,.rmk .lmk,#ytc-list .c:nth-child(-n+8),#ytc-list .c:nth-child(-n+8) .th'); // (text-sized boxes like chips follow the font's own metrics)
+        await tv.focus('#ytc-list .c a.t');
+        assert.deepEqual(await tvAudit(tv, `home ${W}`), []);
+        const w1 = await tvWalk(tv, '#ytc-side .rl,#ytc-fx-tc .fx-ch,#ytc-list a.t', 90);
+        assert.deepEqual(w1.dead, [], `home walk: dead ends ${W}`);
+        assert.deepEqual(w1.missing.filter(m => !/^A\.t/.test(m)), [], `home walk: unreachable ${W}`);
+        // The grid walk: ↓ keeps the focused row where the first row sits (instant), ↑ comes back; the focus is
+        // never off screen; a held key never waits.
+        await tv.evaluate(() => scrollTo(0, 0));
+        await tv.focus('#ytc-list .c:nth-child(2) a.t');
+        // (Layout positions: the focused card's scale is still settling when a key lands.)
+        const cardY = () => tv.evaluate(() => { let e = document.activeElement.closest('.c'), y = 0; for (let p = e; p; p = p.offsetParent) y += p.offsetTop; return y - scrollY; });
+        const rowY = await cardY();
+        const ys = [];
+        for (let i = 0; i < 3; i++) { await tv.keyboard.press('ArrowDown'); ys.push(await cardY()); }
+        assert.ok(ys.every(y => Math.abs(y - rowY) < 1.5), `the focused row keeps its place: ${rowY} → ${ys}`);
+        assert.deepEqual(await tvAudit(tv, `home scrolled ${W}`), []);
+        await tvShot(tv, 'home-scrolled');
+        const t0 = Date.now();
+        for (let i = 0; i < 12; i++) await tv.keyboard.press(i % 2 ? 'ArrowLeft' : 'ArrowRight', { delay: 0 });
+        assert.ok(Date.now() - t0 < 12 * 120, `12 moves keep up with key repeat (${Date.now() - t0} ms)`);
+        for (let i = 0; i < 3; i++) await tv.keyboard.press('ArrowUp');
+        { const y = await cardY(), sy = await tv.evaluate(() => scrollY); assert.ok(Math.abs(y - rowY) < 1.5 && sy < 2, `back on the first row at the top: ${JSON.stringify([y, rowY, sy])}`); }
+        await tv.keyboard.press('ArrowUp');
+        assert.ok(await tv.evaluate(() => document.activeElement.matches('#ytc-fx-tc .fx-ch')), '↑ from the first row reaches the chips');
+        assert.deepEqual(await tvAudit(tv, `chips ${W}`), []);
+        await tvShot(tv, 'home-chips');
+        // A card opened and Back: the card has the focus again.
+        await tv.keyboard.press('ArrowDown');
+        await tv.keyboard.press('ArrowRight');
+        const opened = (await focusedInfo(tv)).href;
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => location.pathname === '/watch');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-seek', null, { timeout: 8000 });
+        assert.equal(await tv.evaluate(() => getComputedStyle(document.getElementById('ytc-player')).position), 'fixed', 'the video plays full screen at once');
+        await tv.goBack({ waitUntil: 'commit' });
+        await tv.waitForFunction(h => document.activeElement && document.activeElement.getAttribute('href') === h, opened, { timeout: 5000 });
+        HOME.rich = false; FX.homeChips = false;
+
+        // Loading: the skeleton grid in the final geometry (a slow search).
+        IMG.search = 2500;
+        try {
+          await tvGo(tv, 'code', 'https://www.youtube.com/results?search_query=slow+tv');
+          await tv.waitForSelector('.grid .c.sk');
+          await tvShot(tv, 'loading');
+          assert.deepEqual(await tvAudit(tv, `loading ${W}`), []);
+        } finally { IMG.search = 0; }
+
+        // Search: the rail's Search opens its screen (the field focused, recent searches as a list).
+        await tvGo(tv, 'code', 'https://www.youtube.com/');
+        await sw.evaluate(now => chrome.storage.local.set({ yourTubeHistoryV1: { version: 1, startedAt: now - 9e5, entries: [{ query: 'lofi', at: now }, { query: 'roblox tycoon tutorial', at: now - 1000 }, { query: 'rain sounds', at: now - 2000 }] } }), Date.now());
+        await tv.reload({ waitUntil: 'commit' });
+        await tv.waitForSelector('#ytc-main section:not(:has(.sk))');
+        await tv.waitForTimeout(300);
+        await tv.focus('#ytc-side .rl[data-nav=search]');
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-q');
+        assert.equal(await tv.getAttribute('#ytc', 'data-tvq'), '1');
+        await tv.waitForTimeout(300);
+        { const q = await tv.evaluate(() => document.getElementById('ytc-q').getBoundingClientRect().height); assert.ok(q >= W / 60 * 2.95, `the large field (${q} px)`); }
+        assert.deepEqual(await tvAudit(tv, `search ${W}`), []);
+        await tvShot(tv, 'search');
+        await tv.keyboard.press('ArrowDown');
+        assert.ok(await tv.evaluate(() => document.activeElement.closest('#ytc-sug') !== null), '↓ from the field walks the list');
+        const sugTop = (await focusedInfo(tv)).y;
+        await tvShot(tv, 'search-list');
+        assert.deepEqual(await tvAudit(tv, `search list ${W}`), []);
+        await tv.keyboard.press('ArrowDown');
+        assert.ok((await focusedInfo(tv)).y > sugTop, 'the next row');
+        await tv.keyboard.press('ArrowUp'); await tv.keyboard.press('ArrowUp');
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-q');
+        // Typing (the TV keyboard) shows YouTube's suggestions under the recent searches.
+        await tv.keyboard.type('rob');
+        await tv.waitForSelector('#ytc-sug .sg:not(.hs)', { timeout: 5000 });
+        await tvShot(tv, 'search-typed');
+        assert.deepEqual(await tvAudit(tv, `search typed ${W}`), []);
+        assert.ok(await tv.evaluate(() => [...document.querySelectorAll('#ytc-sug .sg')].filter(e => e.getClientRects().length).every(e => e.getBoundingClientRect().bottom <= innerHeight * 0.95 + 1)), 'every row inside the safe area');
+        // Back closes the screen and the focus returns to the rail's Search.
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.equal(await tv.getAttribute('#ytc', 'data-tvq'), '');
+        assert.equal((await focusedInfo(tv)).nav, 'search');
+        // A search from the screen: the results grid takes the focus; the query stays on top as the field.
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-q');
+        await tv.fill('#ytc-q', 'lofi');
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => location.pathname === '/results');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+        assert.equal(await tv.getAttribute('#ytc', 'data-tvq'), '');
+        await tv.waitForTimeout(200);
+        assert.deepEqual(await tvAudit(tv, `results ${W}`), []);
+        await tvShot(tv, 'search-results');
+        await tv.keyboard.press('ArrowUp');
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-q', '↑ from the results reaches the field');
+        assert.equal(await tv.getAttribute('#ytc', 'data-tvq'), '1', 'the field opens the search screen');
+        await back(tv);
+
+        // Channel and playlist pages.
+        await tvGo(tv, 'code', 'https://www.youtube.com/channel/UCaZO-66UcqyVT9btiqdDryA');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+        await tv.waitForTimeout(200);
+        assert.deepEqual(await tvAudit(tv, `channel ${W}`), []);
+        await tvShot(tv, 'channel');
+        await tvGo(tv, 'code', 'https://www.youtube.com/playlist?list=PLe2eTVplaylist');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+        await tv.waitForTimeout(200);
+        assert.deepEqual(await tvAudit(tv, `playlist ${W}`), []);
+        await tvShot(tv, 'playlist');
+        // Signed out on an account page: the calm sign-in card. A page that failed: the reason and Try again.
+        await tvGo(tv, 'code', 'https://www.youtube.com/playlist?list=WL');
+        await tv.waitForSelector('.tvpc [data-act=tv-signin]');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('.tvpc .tvb'));
+        assert.deepEqual(await tvAudit(tv, `needs sign-in ${W}`), []);
+        await tvShot(tv, 'needs-sign-in');
+        await tvGo(tv, 'signed', 'https://www.youtube.com/feed/history');
+        await tv.waitForSelector('.tvpc a.tvb[data-act=retry]');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('.tvpc .tvb'));
+        assert.deepEqual(await tvAudit(tv, `failed page ${W}`), []);
+        await tvShot(tv, 'page-failed');
+      }
+      sameGeometry(geo[960], geo[1920], 'Home');
+      assert.deepEqual(tv.errors, []);
+    } finally { HOME.rich = false; FX.homeChips = false; HOME.delay = 0; await tvClose(tv); }
+  });
+
+  await step('TV sign-in and account screens (960×540 and 1920×1080): full screen, the code large, the URL and its QR code, Back first and focused', async () => {
+    const tv = await tvOpen();
+    try {
+      for (const [W, H] of TVSIZES) {
+        await tv.setViewportSize({ width: W, height: H });
+        for (const mode of ['code', 'nocode', 'signed']) {
+          await tvGo(tv, mode, 'https://www.youtube.com/');
+          await tv.waitForSelector('#ytc-acct .rl');
+          await tv.focus('#ytc-acct .rl');
           await tv.keyboard.press('Enter');
           await tv.waitForSelector('#ytc-tvsign.on');
-          if (mode === 'code') await tv.waitForSelector('#ytc-tvsign .tvc + .m ~ .tvst', { timeout: 5000 });
+          if (mode === 'code') await tv.waitForSelector('#ytc-tvsign .tvc', { timeout: 5000 });
           if (mode === 'nocode') await tv.waitForSelector('#ytc-tvsign [data-act=tv-newcode]');
           if (mode === 'signed') await tv.waitForSelector('#ytc-tvsign [data-act=tv-signout]');
-          await tv.waitForTimeout(400); // the panel's scale-in
-          if (shots) await tv.screenshot({ path: path.join(shots, `tv-signin-${mode}-${W}.png`) });
-          assert.deepEqual(await fit('#ytc-tvsign .tvp', true), [], `${mode} at ${W}×${H}`);
-          assert.ok(await tv.evaluate(() => document.activeElement.closest('#ytc-tvsign') !== null), 'the focus is in the panel');
+          await tv.waitForTimeout(300);
+          assert.equal(await tv.evaluate(() => document.activeElement.dataset.act), 'tv-close', 'Back is focused');
+          const box = await tv.evaluate(() => { const r = document.querySelector('#ytc-tvsign').getBoundingClientRect(); return [r.width, r.height]; });
+          assert.deepEqual(box, [W, H], 'a full screen');
+          if (mode === 'code') {
+            const code = await tv.evaluate(() => { const c = document.querySelector('.tvc'); return { text: c.textContent, size: parseFloat(getComputedStyle(c).fontSize) }; });
+            assert.ok(code.text === 'WMB-QZX-TPR' && code.size >= H * 0.09, `the code is large: ${JSON.stringify(code)}`);
+            assert.equal(await tv.textContent('.tvu'), 'google.com/device', 'the URL the device flow returned');
+            const qr = await tv.evaluate(() => { const s = document.querySelector('.tvq'); const r = s.getBoundingClientRect(); return { w: r.width, d: s.querySelector('path').getAttribute('d').length, vb: s.getAttribute('viewBox') }; });
+            assert.ok(qr.w >= H * 0.3 && qr.d > 200 && (+qr.vb.split(' ')[2] - 29) % 4 === 0, `a QR code: ${JSON.stringify(qr)}`);
+          }
+          assert.deepEqual(await tvAudit(tv, `sign-in ${mode} ${W}`), []);
+          await tvShot(tv, mode === 'signed' ? 'account' : `signin-${mode}`);
+          const w = await tvWalk(tv, '#ytc-tvsign button');
+          assert.deepEqual([w.dead, w.missing], [[], []], `sign-in ${mode} walk ${W}`);
           await tv.focus('#ytc-tvsign [data-act=tv-close]');
-          await tv.keyboard.press('Enter');
+          assert.deepEqual(await back(tv), { handled: true, exit: false });
           await tv.waitForSelector('#ytc-tvsign:not(.on)', { state: 'attached' });
+          assert.equal((await focusedInfo(tv)).nav, 'acct', 'Back returns to the rail item');
         }
-        // The player's menus from the control bar (OK on a menu button), signed out (the last panel's shell said so).
-        await tv.evaluate(() => localStorage.setItem('e2e:tv', 'code'));
-        await tv.goto('https://www.youtube.com/results?search_query=lofi', { waitUntil: 'commit' });
-        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
-        await tv.focus('#ytc-list a.t[href^="/watch"]');
-        await tv.keyboard.press('Enter');
-        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-player', null, { timeout: 8000 });
-        await tv.waitForSelector('#ytc-player video');
+      }
+      assert.deepEqual(tv.errors, []);
+    } finally { await tvClose(tv); }
+  });
+
+  await step('TV About & updates (960×540 and 1920×1080): the rail\'s last item, signed out too; versions and the last check; Check for updates → up to date / failed with the reason and Retry / Update ready → Update now reloads into the new interface / a new app → Install update with its progress, then the installer; an app too old to install from here; the Update ready notice', async () => {
+    const tv = await tvOpen();
+    // The shell's answer (shell.rs `shell_info`): bundle seq, update state, an offered APK.
+    const info = (seq, update, offer = null) => JSON.stringify({ version: '0.1.0', version_code: 1000, bundle: { seq, client: '0.9.' + (seq / 100), source: seq > 100 ? 'release' : 'builtin' }, update, offer, repo: 'o/r' });
+    // (Kept across reloads too: e2e:tvshell is merged into the test shell on every load.)
+    const answer = (cmd, json) => tv.evaluate(([c, j]) => { for (const k of ['ytc:shell', 'e2e:tvshell']) { const t = JSON.parse(localStorage.getItem(k) || '{}'); if (j == null) delete t[c]; else t[c] = j; localStorage.setItem(k, JSON.stringify(t)); } }, [cmd, json]);
+    const screen = () => tv.evaluate(() => ({ head: document.querySelector('#ytc-tvabout .tvus b')?.textContent, text: document.getElementById('ytc-tvabout').textContent, focus: document.activeElement.dataset.act || document.activeElement.className }));
+    const press = async (act, until) => { await tv.focus(`#ytc-tvabout [data-act=${act}]`); await tv.keyboard.press('Enter'); await tv.waitForFunction(re => new RegExp(re).test(document.querySelector('#ytc-tvabout .tvus b')?.textContent || ''), until, { timeout: 5000 }); await tv.waitForTimeout(250); };
+    try {
+      for (const [W, H] of TVSIZES) {
+        await tv.setViewportSize({ width: W, height: H });
+        await tv.evaluate(() => localStorage.removeItem('e2e:tvshell')).catch(() => {});
+        await tvGo(tv, 'code', 'https://www.youtube.com/');
+        await tv.waitForSelector('.tvpc .tvb');
+        // The rail's last item, under Sign in (signed out).
+        assert.deepEqual(await tv.$$eval('#ytc-side .rla .rl', a => a.map(e => e.dataset.nav)), ['acct', 'about']);
+        await tv.focus('#ytc-side .rl[data-nav=acct]');
         await tv.keyboard.press('ArrowDown');
-        if (shots) await tv.screenshot({ path: path.join(shots, `tv-controls-${W}.png`) });
-        assert.deepEqual(await fit('#ytc-player .pctl', 'bleed'), [], `control bar at ${W}×${H}`);
-        for (const b of ['#ytc-speed', '#ytc-qual']) {
+        assert.equal((await focusedInfo(tv)).nav, 'about', '↓ from Sign in');
+        assert.deepEqual(await tvAudit(tv, `rail about ${W}`), []);
+        await tvShot(tv, 'rail-about');
+        await tv.keyboard.press('Enter');
+        await tv.waitForSelector('#ytc-tvabout.on');
+        await tv.waitForTimeout(300);
+        let sc = await screen();
+        assert.ok(sc.focus === 'tv-check' && /Lumen for TV 0\.1\.0/.test(sc.text) && /0\.9\.0 · build 100/.test(sc.text) && /not yet/.test(sc.text), `versions, Check for updates focused: ${JSON.stringify(sc)}`);
+        assert.deepEqual(await tvAudit(tv, `about ${W}`), []);
+        await tvShot(tv, 'about');
+        // Up to date.
+        await answer('shell_check', info(100, { state: 'ok', at: Date.now() - 60e3, needs_shell: false }));
+        await press('tv-check', 'up to date');
+        sc = await screen();
+        assert.ok(/1 min ago · up to date/.test(sc.text) && sc.focus === 'tv-check', JSON.stringify(sc));
+        await tvShot(tv, 'about-uptodate');
+        // Failed: the reason in words, the raw one under it, Retry focused.
+        await answer('shell_check', info(100, { state: 'failed', at: Date.now(), error: 'release lookup: HTTP 403' }));
+        await press('tv-check', 'limit');
+        sc = await screen();
+        assert.ok(/HTTP 403/.test(sc.text) && /Retry/.test(sc.text) && sc.focus === 'tv-check', JSON.stringify(sc));
+        assert.deepEqual(await tvAudit(tv, `about failed ${W}`), []);
+        await tvShot(tv, 'about-failed');
+        // Update ready (the shell installed a newer interface): Update now loads it, still signed in the same.
+        await answer('shell_check', info(200, { state: 'ok', at: Date.now(), needs_shell: false, installed: { client: '0.9.2', seq: 200 } }));
+        await press('tv-check', 'Update ready');
+        sc = await screen();
+        assert.ok(sc.focus === 'tv-apply' && /build 200/.test(sc.text), JSON.stringify(sc));
+        await tvShot(tv, 'about-ready');
+        await answer('shell_info', info(200, { state: 'ok', at: Date.now(), needs_shell: false }));
+        await tv.evaluate(() => { window.__e2eOld = 1; });
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => !window.__e2eOld && document.querySelector('#ytc-side .rl[data-nav=about]'), null, { timeout: 8000 });
+        await tv.focus('#ytc-side .rl[data-nav=about]');
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => /up to date/.test(document.querySelector('#ytc-tvabout .tvus b')?.textContent || ''), null, { timeout: 5000 });
+        assert.match((await screen()).text, /0\.9\.2 · build 200/, 'the new interface runs');
+        // A new app: Install update, its download progress, then the installer.
+        await answer('shell_check', info(200, { state: 'ok', at: Date.now(), needs_shell: false, apk: { version: '0.2.0', version_code: 2000 } }));
+        await press('tv-check', 'Lumen 0\\.2\\.0 is available');
+        assert.equal((await screen()).focus, 'tv-install');
+        await tvShot(tv, 'about-app');
+        await answer('shell_install', info(200, { state: 'downloading', at: Date.now(), got: 4e6, total: 1e7, apk: { version: '0.2.0' } }));
+        await answer('shell_info', info(200, { state: 'downloading', at: Date.now(), got: 4e6, total: 1e7, apk: { version: '0.2.0' } }));
+        await press('tv-install', 'Downloading the update… 40 %');
+        const pg = await tv.evaluate(() => getComputedStyle(document.querySelector('#ytc-tvabout .tvpg')).getPropertyValue('--pg'));
+        assert.equal(pg.trim(), '0.4');
+        assert.deepEqual(await tvAudit(tv, `about downloading ${W}`), []);
+        await tvShot(tv, 'about-downloading');
+        await answer('shell_info', info(200, { state: 'installing', at: Date.now(), apk: { version: '0.2.0' } }));
+        await tv.waitForFunction(() => /installer/.test(document.querySelector('#ytc-tvabout .tvus b')?.textContent || ''), null, { timeout: 5000 });
+        await tvShot(tv, 'about-installing');
+        // An app from before shell_install: the reason, nothing else breaks.
+        await answer('shell_info', info(200, { state: 'ok', at: Date.now(), needs_shell: false, apk: { version: '0.2.0' } }));
+        await answer('shell_install', null);
+        await answer('error', 'unknown command shell_install');
+        await tv.waitForFunction(() => document.querySelector('#ytc-tvabout [data-act=tv-install]'), null, { timeout: 5000 }).catch(() => {});
+        await tv.focus('#ytc-tvabout [data-act=tv-install]').catch(() => {});
+        await tv.keyboard.press('Enter');
+        await tv.waitForFunction(() => /its own Update Lumen dialog/.test(document.getElementById('ytc-tvabout').textContent), null, { timeout: 5000 });
+        // Back closes it, the focus returns to the rail item.
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.equal((await focusedInfo(tv)).nav, 'about');
+        // The notice: a new app offered when the page starts → a small notice top right and the rail's dot; its
+        // button opens the screen (and it goes).
+        await answer('error', 'HTTP 503');
+        await tv.evaluate(j => localStorage.setItem('e2e:tvshell', JSON.stringify({ shell_info: j })), info(100, { state: 'ok', at: Date.now(), apk: { version: '0.2.0' } }));
+        await tvGo(tv, 'code', 'https://www.youtube.com/');
+        await tv.waitForSelector('#ytc-tvup.on');
+        await tv.waitForTimeout(300);
+        assert.ok(await tv.evaluate(() => document.querySelector('#ytc-side .rl[data-nav=about]').classList.contains('upd')), 'the rail item carries the dot');
+        await tv.focus('#ytc-tvup .tvb');
+        assert.deepEqual(await tvAudit(tv, `notice ${W}`), []);
+        await tvShot(tv, 'update-notice');
+        await tv.keyboard.press('Enter');
+        await tv.waitForSelector('#ytc-tvabout.on');
+        assert.equal(await tv.locator('#ytc-tvup.on').count(), 0, 'the notice went');
+        await tv.evaluate(() => localStorage.removeItem('e2e:tvshell'));
+      }
+      assert.deepEqual(tv.errors, []);
+    } finally { await tvClose(tv); }
+  });
+
+  await step('TV player (960×540 and 1920×1080): full screen at once, overlay on any key and gone 4 s after, title/time/thick bar/round buttons in the safe area, ←/→ scrub with the storyboard frame and one seek, menus as a right panel on the current value, captions bottom-centre above the bar, the skip notice, More info, Up next, Back rules, failure and offline panels', async () => {
+    const tv = await tvOpen();
+    try {
+      for (const [W, H] of TVSIZES) {
+        await tv.setViewportSize({ width: W, height: H });
+        await tvGo(tv, 'signed', `https://www.youtube.com/watch?v=descchaps01`);
+        await tv.waitForSelector('#ytc-player video');
+        await tv.waitForTimeout(1500);
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-seek', null, { timeout: 8000 });
+        await tv.waitForFunction(() => { const v = document.querySelector('#ytc-player video'); return v && v.currentTime > 0.3; }, null, { timeout: 15000 });
+        const full = await tv.evaluate(() => { const r = document.getElementById('ytc-player').getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; });
+        assert.deepEqual(full, [0, 0, W, H], 'the player fills the screen');
+        assert.equal(await tv.locator('#ytc-player :is([data-act=p-mute],[data-act=p-theater],[data-act=p-fs],.pvol,.pct)').count(), 0, 'no volume, theater, fullscreen or caption sizing');
+        // Any key shows the overlay; 4 s without one hides it while playing.
+        await tv.keyboard.press('ArrowDown');
+        assert.ok(await tv.evaluate(() => !document.getElementById('ytc-player').classList.contains('idle')), 'shown');
+        await tv.waitForTimeout(300);
+        await tvShot(tv, 'player-overlay');
+        const lay = await tv.evaluate(() => {
+          const r = s => { const e = document.querySelector(s); const q = e.getBoundingClientRect(); return { l: q.left, t: q.top, r: q.right, b: q.bottom, w: q.width, h: q.height }; };
+          return { title: r('#ytc-info .wt'), seek: r('#ytc-seek .psegs'), time: r('#ytc-time'), rem: r('#ytc-trem'), play: r('#ytc-player .prow .pb'), row: [...document.querySelectorAll('#ytc-player .prow > .pb, #ytc-player .prow .wl')].filter(b => b.checkVisibility()).map(b => (b.getAttribute('aria-label') || b.className).replace(/:.*/, '')) };
+        });
+        assert.ok(lay.title.l >= W * 0.05 - 1 && lay.title.t >= H * 0.05 - 1 && lay.title.t < H * 0.12, `title top-left: ${JSON.stringify(lay.title)}`);
+        assert.ok(lay.time.b <= lay.seek.t && lay.rem.r <= W * 0.95 + 1 && lay.rem.l > W / 2, `elapsed / remaining over the bar ends: ${JSON.stringify([lay.time, lay.rem])}`);
+        assert.ok(lay.seek.h >= H * 0.0074 - 0.5, `a thick bar (${lay.seek.h})`);
+        assert.ok(lay.play.w >= H * 0.088 && Math.abs(lay.play.w - lay.play.h) < 1, `large round buttons (${lay.play.w})`);
+        assert.deepEqual(lay.row, ['Play/pause', 'Captions', 'Speed', 'Quality', 'I like this', 'Save to Watch later', 'More info'], JSON.stringify(lay.row));
+        assert.deepEqual(await tvAudit(tv, `overlay ${W}`), []);
+        const wk = await tvWalk(tv, '#ytc-seek,#ytc-player .prow :is(.pb,.wl)', 20);
+        assert.deepEqual([wk.dead, wk.missing], [[], []], `overlay walk ${W}`);
+        await tv.focus('#ytc-seek');
+        await tv.keyboard.press('ArrowUp');
+        await tv.waitForFunction(() => document.getElementById('ytc-player').classList.contains('idle'), null, { timeout: 6000 });
+        // Scrub: ←/→ move the target (the storyboard frame and the time above it), the seek goes out once.
+        // (From near the start, so two steps never reach the end however long the page took.)
+        await tv.evaluate(() => { document.querySelector('#ytc-player video').currentTime = 2; });
+        await tv.waitForTimeout(300);
+        const t0 = await tv.evaluate(() => document.querySelector('#ytc-player video').currentTime);
+        await tv.keyboard.press('ArrowRight');
+        assert.ok(await tv.evaluate(() => { const p = document.getElementById('ytc-player'); return !p.classList.contains('idle') && p.classList.contains('drag'); }), 'the first → shows the overlay and scrubs');
+        await tv.keyboard.press('ArrowRight');
+        await tv.waitForTimeout(120);
+        const tip = await tv.evaluate(() => ({ t: document.getElementById('ytc-tipt').textContent, op: getComputedStyle(document.getElementById('ytc-tip')).opacity, frame: getComputedStyle(document.querySelector('#ytc-tip .ptf')).display }));
+        assert.ok(tip.op === '1' && tip.frame !== 'none' && /^0:[23]\d$/.test(tip.t), `the preview over the target: ${JSON.stringify(tip)}`);
+        await tvShot(tv, 'player-scrub');
+        assert.deepEqual(await tvAudit(tv, `scrub ${W}`), []);
+        await tv.waitForFunction(() => !document.getElementById('ytc-player').classList.contains('drag'), null, { timeout: 3000 });
+        const t1 = await tv.evaluate(() => document.querySelector('#ytc-player video').currentTime);
+        assert.ok(t1 >= t0 + 17 && t1 <= t0 + 23, `two steps of 10 s: ${t0} → ${t1}`);
+        // Menus: a panel from the right edge with the focus on the current value; Back closes it.
+        for (const b of ['#ytc-speed', '#ytc-qual', '#ytc-ccb']) {
           await tv.focus(b);
           await tv.keyboard.press('Enter');
           await tv.waitForSelector('#ytc-player.menu #ytc-menu');
           await tv.waitForTimeout(300);
-          if (shots) await tv.screenshot({ path: path.join(shots, `tv-menu-${b.slice(5)}-${W}.png`) });
-          assert.deepEqual(await fit('#ytc-menu', false), [], `${b} menu at ${W}×${H}`);
-          await tv.keyboard.press('Escape');
+          const m = await tv.evaluate(() => { const r = document.getElementById('ytc-menu').getBoundingClientRect(); const a = document.activeElement; return { l: r.left, r: r.right, t: r.top, b: r.bottom, inMenu: !!a.closest('#ytc-menu'), on: a.classList.contains('on') || !!a.closest('.mtab') }; });
+          assert.ok(m.r === W && m.t === 0 && m.b === H && m.l > W / 2 && m.inMenu, `${b}: a right-side panel ${JSON.stringify(m)}`);
+          if (b === '#ytc-speed') assert.ok(m.on, 'the current speed is focused');
+          assert.ok(+await tv.evaluate(() => getComputedStyle(document.querySelector('#ytc-watch .wp'), '::before').opacity) < 0.05, 'no scrim over the panel');
+          if (b === '#ytc-qual') assert.ok(await tv.evaluate(() => document.activeElement.matches('.mql button.on')), 'the current quality is focused');
+          assert.deepEqual(await tvAudit(tv, `menu ${b} ${W}`), []);
+          await tvShot(tv, `player-menu-${b.slice(5)}`);
+          await tv.keyboard.press('ArrowDown');
+          assert.ok(await tv.evaluate(() => !!document.activeElement.closest('#ytc-menu')), 'the remote walks the menu');
+          assert.deepEqual(await back(tv), { handled: true, exit: false });
           await tv.waitForSelector('#ytc-player.menu', { state: 'detached', timeout: 3000 });
-          // Closed (its content stays for the fade-out): the remote walks the bar again, ← leaves the shortcut.
-          assert.equal(await tv.evaluate(() => document.activeElement.id), b.slice(1));
-          const x0 = await tv.evaluate(() => document.activeElement.getBoundingClientRect().left);
-          await tv.keyboard.press('ArrowLeft');
-          assert.ok(await tv.evaluate(x0 => { const a = document.activeElement; return !!a.closest('.pctl') && a.getBoundingClientRect().left < x0; }, x0), `← moves along the bar after the ${b} menu closed`);
+          assert.equal(await tv.evaluate(() => document.activeElement.id), b.slice(1), 'Back returns to its button');
         }
-        // The skip-sponsor button (shown here at rest: the fixture's segment passes in a moment) and the caption window.
-        // (Captions may be off from earlier steps: c turns them on.)
-        if (!(await tv.locator('#ytc-player.cctext').count())) { await tv.focus('#ytc-player'); await tv.keyboard.press('c'); }
-        await tv.waitForSelector('#ytc-player.cctext .pcw', { timeout: 5000 });
-        await tv.evaluate(() => document.querySelector('#ytc-player .psbt').classList.add('on'));
-        await tv.waitForTimeout(500);
-        if (shots) await tv.screenshot({ path: path.join(shots, `tv-skip-${W}.png`) });
-        for (const sel of ['#ytc-player .psbt', '#ytc-player .pcw']) assert.deepEqual(await fit(sel, false), [], `${sel} at ${W}×${H}`);
+        // Captions: bottom centre; above the bar while the overlay shows, near the bottom when it is gone.
+        if (!(await tv.locator('#ytc-player.cc').count())) { await tv.focus('#ytc-ccb'); await tv.keyboard.press('c'); }
+        await tv.waitForSelector('#ytc-player.cctext .pcw', { timeout: 8000 });
+        await tv.focus('#ytc-seek'); await tv.keyboard.press('ArrowUp');
+        await tv.waitForTimeout(300);
+        const ccOn = await tv.evaluate(() => { const c = document.getElementById('ytc-cc').getBoundingClientRect(), s = document.querySelector('#ytc-seek').getBoundingClientRect(); return { cx: (c.left + c.right) / 2, b: c.bottom, seek: s.top, fs: parseFloat(getComputedStyle(document.getElementById('ytc-cc')).fontSize) }; });
+        assert.ok(Math.abs(ccOn.cx - W / 2) < W * 0.01 && ccOn.b < ccOn.seek - 10, `captions centred above the bar: ${JSON.stringify(ccOn)}`);
+        assert.ok(ccOn.fs >= H * 0.035, `large captions (${ccOn.fs})`);
+        await tvShot(tv, 'player-captions-overlay');
+        await tv.waitForFunction(() => document.getElementById('ytc-player').classList.contains('idle'), null, { timeout: 6000 });
+        await tv.waitForTimeout(400);
+        const ccOff = await tv.evaluate(() => { const c = document.getElementById('ytc-cc').getBoundingClientRect(); return { cx: (c.left + c.right) / 2, b: c.bottom }; });
+        assert.ok(Math.abs(ccOff.cx - W / 2) < W * 0.01 && ccOff.b <= H * 0.95 + 1 && ccOff.b > H * 0.85, `captions bottom-centre in the safe area: ${JSON.stringify(ccOff)}`);
+        await tvShot(tv, 'player-captions');
+        // More info: the description as a right panel; Back closes it.
+        await tv.keyboard.press('ArrowDown');
+        await tv.focus('#ytc-player [data-act=tv-info]');
+        await tv.keyboard.press('Enter');
+        await tv.waitForSelector('#ytc-tvinfo.on');
+        await tv.waitForTimeout(300);
+        assert.ok(await tv.evaluate(() => document.activeElement.matches('#ytc-tvinfo .tvd')), 'the description has the focus');
+        assert.deepEqual(await tvAudit(tv, `info ${W}`), []);
+        await tvShot(tv, 'player-info');
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.ok(await tv.evaluate(() => document.activeElement.dataset.act === 'tv-info'), 'Back returns to More info');
+        // Up next: ↓ from the buttons slides the overlay up and shows the related row; ↑ returns; Back too.
+        await tv.keyboard.press('ArrowDown');
+        await tv.waitForTimeout(300);
+        assert.ok(await tv.evaluate(() => !!document.activeElement.closest('.wr #ytc-list')), '↓ reaches Up next');
+        assert.deepEqual(await tvAudit(tv, `up next ${W}`), []);
+        await tvShot(tv, 'player-upnext');
+        await tv.keyboard.press('ArrowRight');
+        assert.ok(await tv.evaluate(() => { const r = document.activeElement.closest('.c').getBoundingClientRect(); return r.right <= innerWidth * 0.95 + 1; }), 'the next card is brought into the safe area');
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.ok(await tv.evaluate(() => !!document.activeElement.closest('#ytc-player .prow')), 'Back from Up next returns to the buttons');
+        // Back with the overlay open while playing hides it; with it hidden, the watch page is left (the shell goes back).
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        assert.ok(await tv.evaluate(() => document.getElementById('ytc-player').classList.contains('idle')), 'Back hid the overlay');
+        assert.deepEqual(await back(tv), { handled: false, exit: false }, 'Back with the overlay hidden leaves the video');
+
+        // The end: YouTube's autoplay countdown, Play now focused (bottom right); Back cancels it.
+        await tvGo(tv, 'code', 'https://www.youtube.com/watch?v=-Bxc4gJluC0&t=35');
+        await tv.waitForSelector('#ytc-up .upc', { timeout: 20000 });
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.id === 'ytc-up-now', null, { timeout: 3000 });
+        assert.deepEqual(await tvAudit(tv, `countdown ${W}`), []);
+        await tvShot(tv, 'player-end');
+        assert.deepEqual(await back(tv), { handled: true, exit: false });
+        await tv.waitForSelector('#ytc-up .upc', { state: 'detached', timeout: 3000 });
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-seek', 'Back cancelled the countdown');
+
+        // The skip notice (SponsorBlock: the fixture's sponsor at 8–14 s is skipped): bottom right, its button a stop.
+        await tvGo(tv, 'code', `https://www.youtube.com/watch?v=${SB_ID}&t=6`);
+        await tv.waitForSelector('#ytc-player .psbt.on', { timeout: 15000 });
+        await tv.focus('#ytc-seek'); await tv.keyboard.press('ArrowDown');
+        await tv.focus('#ytc-player .prow .pb[data-act=tv-info]');
+        await tv.keyboard.press('ArrowUp');
+        assert.equal(await tv.evaluate(() => document.activeElement.id), 'ytc-sbtb', '↑ from the row\'s end reaches the skip notice');
+        const sb = await tv.evaluate(() => { const r = document.querySelector('#ytc-player .psbt').getBoundingClientRect(); return { r: r.right, b: r.bottom, l: r.left }; });
+        assert.ok(sb.r <= W * 0.95 + 1 && sb.l > W / 2, `bottom right: ${JSON.stringify(sb)}`);
+        assert.deepEqual(await tvAudit(tv, `skip ${W}`), []);
+        await tvShot(tv, 'player-skip');
+
+        // Failure: the panel in the middle, Try again focused, ←/→ between its actions.
+        await tvGo(tv, 'code', 'https://www.youtube.com/watch?v=unplayable1');
+        await tv.waitForSelector('#ytc-player .pfail');
+        await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-player .pfbt'), null, { timeout: 5000 });
+        await tv.waitForTimeout(400); // (the panel fades in)
+        assert.deepEqual(await tvAudit(tv, `failure ${W}`), []);
+        await tvShot(tv, 'player-failed');
+        await tv.keyboard.press('ArrowRight');
+        assert.equal(await tv.evaluate(() => document.activeElement.textContent), 'Open on YouTube');
+        await tv.keyboard.press('ArrowLeft');
+        assert.equal(await tv.evaluate(() => document.activeElement.textContent), 'Try again');
+        // Offline: "No connection" (the network drops mid-video).
+        NET.down = true;
+        try {
+          await tvGo(tv, 'code', 'https://www.youtube.com/watch?v=netdown0001');
+          await tv.waitForSelector('#ytc-player .pfail', { timeout: 20000 });
+          await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-player .pfbt'), null, { timeout: 5000 });
+          await tvShot(tv, 'player-offline');
+          assert.deepEqual(await tvAudit(tv, `offline ${W}`), []);
+        } finally { NET.down = false; }
       }
-      assert.deepEqual(tvErrors, []);
-    } finally {
-      await tv.evaluate(() => { for (const k of ['e2e:tv', 'ytc:platform', 'ytc:shell']) localStorage.removeItem(k); }).catch(() => {});
-      await tv.close();
-    }
+      assert.deepEqual(tv.errors, []);
+    } finally { NET.down = false; await tvClose(tv); }
   });
   await step('no live network traffic; no YouTube player JS or embed ever requested', async () => {
     assert.ok(log.external.every(u => /ytimg\.com|ggpht\.com|googleusercontent\.com/.test(new URL(u).hostname)), log.external.filter(u => !/ytimg|ggpht|googleusercontent/.test(u)).join(','));

@@ -85,7 +85,13 @@ client; the bot-check recovery skips the cookie account route when a bearer is u
 
 **`src/render.rs`** — `home_nudge`: no `autofocus` on TV (the on-screen keyboard would take the
 remote's arrows) and a "Sign in with your phone" button instead of the Google sign-in link;
-new `tv_slot(signed_in)` and `tv_panel(code, signed_in, status)` (shows youtube.com/activate).
+new `tv_slot(signed_in)` (the rail's account item), `tv_panel(code, signed_in, status)` (the full-screen
+sign-in with the device flow's URL and its QR code, `src/qr.rs`), `tv_rail`, `tv_prompt`, `tv_info`; on TV
+`shell` writes the rail instead of the sidebar, `message`/`home_nudge` write calm cards, card images use `vw` sizes.
+
+**`src/player/ui.rs`** — `shell_tv` (the 10-foot overlay: time row, focusable seek bar, round buttons; `player::html`
+picks it on TV); **`src/player/own.rs`** — TV idle 4 s, `wake`, `rest`, `idle`, `tv_scrub`/`tv_scrub_end`, no blur after
+a pressed control, elapsed/remaining in `TIME`/`TREM`.
 
 **`src/parse.rs`** — TV renderers: `tileRenderer` (`tile()`), `tvSecondaryNavRenderer` (the
 selected tab), the TV containers in the walk lists (`tvBrowseRenderer`, `tvSurfaceContentRenderer`,

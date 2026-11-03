@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Lumen for TV: look sheet</title>
+<!--
+  The design reference for the TV app's 10-foot interface (tv/design/README.md has the tokens).
+  Static and self-contained: every screen is one 1920×1080 frame. Sizes are in rem on the TV grid
+  (1rem = 1/60 of the screen width: 32 px here at 1920, 16 CSS px on a 960×540 WebView), so the
+  frames are exactly what the app draws at any resolution. Render: node tv/design/render.cjs
+-->
+<style>
+:root{--bg:#101315;--pn:#151a1d;--rs:#1c2428;--cb:#212b2e;--hv:#293936;--on:#233d36;--bd:#2c3639;
+  --tx:#edf3f3;--mu:#a0afb1;--fa:#7d8c90;--ac:#b7ebca;--er:#ff9a8f;
+  --sx:3rem;--sy:1.6875rem;--ring:.1875rem}
+html{font-size:32px;background:#000}
+body{margin:0;font-family:Roboto,"SF Pro Text",system-ui,sans-serif;color:var(--tx);-webkit-font-smoothing:antialiased}
+.screen{position:relative;width:60rem;height:33.75rem;overflow:hidden;background:var(--bg);margin:0 0 40px}
+.lab{font:600 22px system-ui;color:#888;margin:28px 0 10px}
+svg{display:block;flex:none}
+.i{width:1.25rem;height:1.25rem;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+/* the overscan-safe guide (only in the sheet) */
+.safe{position:absolute;inset:var(--sy) var(--sx);outline:1px dashed rgba(255,120,120,.35);pointer-events:none;z-index:99}
+/* ---- rail */
+.rail{position:absolute;left:0;top:0;bottom:0;width:17rem;z-index:5}
+.rail .mk{position:absolute;left:3.75rem;top:var(--sy);display:flex;align-items:center;gap:.625rem}
+.mk svg{width:2rem;height:2rem}
+.mk b{font-size:1.125rem;font-weight:600;letter-spacing:-.02em;opacity:0}
+.rail a{position:absolute;left:3.375rem;width:2.5rem;height:2.5rem;border-radius:.8125rem;display:flex;align-items:center;gap:1rem;padding:0 .625rem;box-sizing:border-box;color:var(--mu);font-size:.9375rem;font-weight:500;white-space:nowrap;overflow:hidden}
+.rail a span{opacity:0}
+.rail a.cur{background:var(--on);color:var(--ac)}
+.rail a.f{background:var(--cb);color:var(--tx);outline:var(--ring) solid var(--ac);outline-offset:.125rem;scale:1.04}
+.rail.open{background:linear-gradient(90deg,var(--pn) 15.5rem,rgba(21,26,29,0) 17rem)}
+.rail.open a{width:12.5rem}
+.rail.open a span,.rail.open .mk b{opacity:1}
+.rail.open a.cur{color:var(--ac)}
+.under{position:absolute;inset:0;opacity:.45}
+/* ---- content */
+.content{position:absolute;left:7.75rem;right:3.75rem;top:var(--sy)}
+.chips{display:flex;gap:.75rem;height:2.25rem}
+.chip{height:2.25rem;padding:0 1.125rem;border-radius:1.125rem;background:var(--cb);display:flex;align-items:center;font-size:.875rem;font-weight:500;color:var(--tx)}
+.chip.on{background:var(--ac);color:var(--bg);font-weight:600}
+.chip.f{outline:var(--ring) solid var(--ac);outline-offset:.1875rem;scale:1.06;background:var(--hv)}
+.chip.on.f{background:var(--ac)}
+h1{margin:0;font-size:1.5rem;line-height:2.25rem;font-weight:600;letter-spacing:-.01em}
+.grid{position:absolute;left:0;right:0;top:3.5625rem;display:grid;grid-template-columns:repeat(4,11rem);gap:1.5rem 1.5rem}
+.c{width:11rem}
+.th{position:relative;width:11rem;height:6.1875rem;border-radius:.625rem;background:linear-gradient(135deg,var(--a,#30474a),var(--b,#1a2427))}
+.th b{position:absolute;right:.375rem;bottom:.375rem;padding:.0625rem .3125rem;border-radius:.25rem;background:rgba(10,13,14,.82);font-size:.6875rem;font-weight:600}
+.th .pg{position:absolute;left:0;right:0;bottom:0;height:.1875rem;border-radius:0 0 .625rem .625rem;background:rgba(255,255,255,.18)}
+.th .pg i{display:block;height:100%;width:40%;background:var(--ac)}
+.c .t{margin:.625rem 0 .25rem;font-size:.875rem;line-height:1.09375rem;font-weight:500;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;height:2.1875rem}
+.c .m{font-size:.75rem;line-height:1rem;color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.c.f{scale:1.06;z-index:2;position:relative}
+.c.f .th{outline:var(--ring) solid var(--ac);outline-offset:.1875rem}
+.c.f .t{color:var(--ac)}
+.scrim{position:absolute;left:0;right:0;top:0;height:4.5rem;background:linear-gradient(var(--bg) 83%,rgba(16,19,21,0));z-index:3}
+.sk .th,.sk .t,.sk .m{background:var(--rs);color:transparent;border-radius:.375rem}
+.sk .t{height:1.75rem}.sk .m{height:.75rem;margin:.25rem 0;width:70%}
+/* ---- prompt / empty */
+.prompt{position:absolute;left:7.75rem;right:3.75rem;top:0;bottom:0;display:grid;place-items:center}
+.card{width:30rem;padding:2.25rem 2.5rem;border-radius:1.25rem;background:var(--pn);display:grid;gap:1rem;justify-items:start}
+.card h2{margin:0;font-size:1.75rem;line-height:2.125rem;font-weight:600;letter-spacing:-.015em}
+.card p{margin:0;font-size:.875rem;line-height:1.3125rem;color:var(--mu)}
+.btns{display:flex;gap:1rem;margin-top:.5rem}
+.bt{height:2.75rem;padding:0 1.5rem;border-radius:1.375rem;background:var(--cb);display:flex;align-items:center;gap:.625rem;font-size:.9375rem;font-weight:600;color:var(--tx)}
+.bt.p{background:var(--ac);color:var(--bg)}
+.bt.f{outline:var(--ring) solid var(--ac);outline-offset:.1875rem;scale:1.06}
+.bt.f:not(.p){background:var(--hv)}
+.empty{position:absolute;left:0;right:0;top:9rem;text-align:center}
+.empty h2{margin:0;font-size:1.375rem;font-weight:600}.empty p{margin:.5rem 0 0;font-size:.875rem;color:var(--mu)}
+/* ---- search */
+.q{height:3rem;border-radius:1.5rem;background:var(--rs);display:flex;align-items:center;gap:.875rem;padding:0 1.25rem;font-size:1.125rem;color:var(--fa);box-sizing:border-box;border:.0625rem solid var(--bd)}
+.q.f{outline:var(--ring) solid var(--ac);outline-offset:.1875rem;background:var(--cb);color:var(--tx)}
+.q .i{width:1.25rem;height:1.25rem;color:var(--mu)}
+.hint{margin:.75rem 0 0 1.25rem;font-size:.75rem;color:var(--mu)}
+.sl{margin-top:1.5rem;width:30rem;display:grid;gap:.25rem}
+.sl h3{margin:0 0 .375rem 1rem;font-size:.75rem;font-weight:600;color:var(--mu);letter-spacing:.04em;text-transform:uppercase}
+.sl a{height:2.5rem;border-radius:.75rem;display:flex;align-items:center;gap:.875rem;padding:0 1rem;font-size:.9375rem}
+.sl a .i{width:1.125rem;height:1.125rem;color:var(--mu)}
+.sl a.f{background:var(--cb);outline:var(--ring) solid var(--ac);outline-offset:.125rem;scale:1.02}
+.sl a.f .i{color:var(--ac)}
+/* ---- channel / playlist head */
+.ch{display:flex;align-items:center;gap:1.25rem;height:4rem}
+.av{width:4rem;height:4rem;border-radius:50%;background:linear-gradient(135deg,#5b8f7a,#27403a)}
+.ch h1{font-size:1.75rem}.meta{font-size:.875rem;color:var(--mu);margin-top:.125rem}
+/* ---- player */
+.vid{position:absolute;inset:0;background:radial-gradient(circle at 70% 40%,#5d6b4c,#20291f 55%,#0d100c)}
+.top{position:absolute;left:0;right:0;top:0;height:10rem;background:linear-gradient(rgba(10,13,14,.82),rgba(10,13,14,0))}
+.bot{position:absolute;left:0;right:0;bottom:0;height:15rem;background:linear-gradient(rgba(10,13,14,0),rgba(10,13,14,.9))}
+.ttl{position:absolute;left:var(--sx);top:var(--sy);width:42rem}
+.ttl h1{font-size:1.5rem;line-height:1.875rem}
+.own{display:flex;align-items:center;gap:.625rem;margin-top:.5rem;font-size:.9375rem;color:var(--mu)}
+.own i{width:1.5rem;height:1.5rem;border-radius:50%;background:#5b8f7a}
+.ctl{position:absolute;left:3.625rem;right:3.625rem;bottom:2.125rem}
+.times{display:flex;justify-content:space-between;font-size:.875rem;font-variant-numeric:tabular-nums;color:var(--tx);margin-bottom:.625rem}
+.times em{font-style:normal;color:var(--mu);margin-left:.75rem}
+.bar{position:relative;height:.25rem;border-radius:.125rem;background:rgba(237,243,243,.25);display:flex;gap:.1875rem}
+.bar.f{height:.375rem}
+.bar .seg{flex:1;background:rgba(237,243,243,.25);border-radius:.125rem;position:relative}
+.bar .fill{position:absolute;left:0;top:0;bottom:0;border-radius:.125rem;background:var(--ac)}
+.bar .buf{position:absolute;left:0;top:0;bottom:0;background:rgba(237,243,243,.35);border-radius:.125rem}
+.knob{position:absolute;top:50%;width:1rem;height:1rem;margin:-.5rem 0 0 -.5rem;border-radius:50%;background:var(--ac);box-shadow:0 0 0 .25rem rgba(183,235,202,.25)}
+.row{display:flex;gap:1rem;margin-top:1.5rem;align-items:center}
+.rb{width:3rem;height:3rem;border-radius:1.5rem;background:rgba(33,43,46,.85);display:grid;place-items:center;color:var(--tx);font-size:.875rem;font-weight:600}
+.rb.w{width:auto;padding:0 1.125rem;min-width:3rem;box-sizing:border-box}
+.rb .i{width:1.375rem;height:1.375rem}
+.rb.on{color:var(--ac)}
+.rb.f{background:var(--ac);color:var(--bg);outline:var(--ring) solid var(--ac);outline-offset:.1875rem;scale:1.08}
+.rb.sp{margin-left:auto}
+.prev{position:absolute;bottom:.875rem;width:10rem;margin-left:-5rem}
+.prev .fr{height:5.625rem;border-radius:.5rem;background:linear-gradient(135deg,#7d8f63,#2a3424);outline:.125rem solid var(--tx)}
+.prev b{display:block;width:max-content;margin:.5rem auto 0;padding:.125rem .625rem;border-radius:.5rem;background:rgba(10,13,14,.85);font-size:.875rem;font-variant-numeric:tabular-nums}
+.up{position:absolute;left:3.75rem;right:0;bottom:2.125rem}
+.up h3{margin:0 0 .75rem;font-size:.75rem;font-weight:600;color:var(--mu);letter-spacing:.04em;text-transform:uppercase}
+.up .r{display:flex;gap:1.25rem}
+.up .c{width:8.5rem}.up .th{width:8.5rem;height:4.78rem}
+.panel{position:absolute;top:0;right:0;bottom:0;width:19.5rem;background:var(--pn);padding:var(--sy) var(--sx) var(--sy) 1.5rem;box-sizing:border-box;box-shadow:-2rem 0 3rem rgba(0,0,0,.45)}
+.panel h2{margin:0 0 1rem;font-size:1.125rem;font-weight:600}
+.panel .o{height:2.5rem;border-radius:.75rem;display:flex;align-items:center;justify-content:space-between;padding:0 1rem;font-size:.9375rem;margin-bottom:.25rem}
+.panel .o.cur{color:var(--ac);font-weight:600}
+.panel .o.f{background:var(--cb);outline:var(--ring) solid var(--ac);outline-offset:-.1875rem}
+.panel .o .i{width:1.125rem;height:1.125rem;stroke-width:2.4}
+.panel.wide{width:26rem}
+.panel .ds{font-size:.875rem;line-height:1.3125rem;color:var(--tx);white-space:pre-line}
+.panel .ds.f{outline:var(--ring) solid var(--ac);outline-offset:.25rem;border-radius:.5rem}
+.cap{position:absolute;left:50%;translate:-50% 0;max-width:46rem;text-align:center;font:1.375rem/1.3 Arial,sans-serif;color:#2fd6e6;text-shadow:0 0 .1rem #000,0 0 .1rem #000,.06rem .06rem .08rem #000}
+.skip{position:absolute;right:3.375rem;height:2.75rem;border-radius:1.375rem;display:flex;align-items:center;gap:.75rem;padding:0 .5rem 0 1.25rem;background:rgba(21,26,29,.92);font-size:.9375rem}
+.skip span{color:var(--mu)}
+.skip .bt{height:2rem;padding:0 1rem;font-size:.875rem;background:var(--ac);color:var(--bg);border-radius:1rem}
+.skip .bt.f{outline-offset:.125rem}
+.toast{position:absolute;left:50%;top:var(--sy);translate:-50% 0;height:2.25rem;padding:0 1.25rem;border-radius:1.125rem;background:rgba(21,26,29,.94);display:flex;align-items:center;gap:.625rem;font-size:.875rem;font-weight:500}
+.toast.e{color:var(--er)}
+.fail{position:absolute;inset:0;display:grid;place-items:center;background:rgba(10,13,14,.72)}
+.fail .card{width:32rem;justify-items:center;text-align:center}
+.fail .card .btns{justify-content:center}
+/* ---- sign in */
+.sign{position:absolute;inset:0;background:var(--bg)}
+.sign .mk{position:absolute;left:var(--sx);top:var(--sy);display:flex;align-items:center;gap:.625rem}
+.sign .mk b{opacity:1}
+.sign .l{position:absolute;left:7.75rem;top:6.5rem;width:27rem}
+.sign h2{margin:0;font-size:1.75rem;line-height:2.25rem;font-weight:600;letter-spacing:-.015em}
+.sign ol{margin:1.25rem 0 0;padding:0;list-style:none;display:grid;gap:.375rem;font-size:.9375rem;color:var(--mu)}
+.sign .u{display:block;font-size:1.25rem;font-weight:600;color:var(--tx);margin:.125rem 0 .625rem}
+.sign .code{margin:.375rem 0 0;font:600 3.25rem/1.1 "SF Mono",ui-monospace,Menlo,monospace;letter-spacing:.08em;color:var(--ac)}
+.sign .st{margin-top:1rem;font-size:.75rem;color:var(--mu)}
+.sign .btns{position:absolute;left:7.75rem;bottom:3.5rem}
+.qr{position:absolute;right:7rem;top:7.25rem;width:13rem}
+.qr .tile{width:13rem;height:13rem;border-radius:1rem;background:var(--tx);display:grid;place-items:center}
+.qr p{margin:.75rem 0 0;text-align:center;font-size:.75rem;color:var(--mu)}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="mark" viewBox="0 0 48 48"><rect width="48" height="48" rx="14" fill="#b7ebca"/><path d="M17.5 12.5v21h14" fill="none" stroke="#101315" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="32" cy="15.5" r="4" fill="#101315"/></symbol>
+<symbol id="search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></symbol>
+<symbol id="home" viewBox="0 0 24 24"><path d="M4 10.5 12 4l8 6.5V20h-5v-6h-6v6H4z"/></symbol>
+<symbol id="subs" viewBox="0 0 24 24"><path d="M5 8h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2zm2-3h10M10.5 11.5v5l4-2.5z"/></symbol>
+<symbol id="hist" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4v3.5H8M12 8v4l3 2"/></symbol>
+<symbol id="wl" viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16zm0 4v4l3 2"/></symbol>
+<symbol id="pl" viewBox="0 0 24 24"><path d="M4 6h12M4 11h12M4 16h7m6-3v7l4.5-3.5z"/></symbol>
+<symbol id="like" viewBox="0 0 24 24"><path d="M7.5 10.5V20H4v-9.5zm0 0 3.8-6.5c1.4 0 2.4 1 2.1 2.5l-.7 3.5H19a2 2 0 0 1 2 2.3l-1.1 6a2 2 0 0 1-2 1.7H7.5"/></symbol>
+<symbol id="acct" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5"/><path d="M5 19.5c1.2-3.2 3.8-5 7-5s5.8 1.8 7 5"/></symbol>
+<symbol id="pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1.2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="cc" viewBox="0 0 24 24"><path d="M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM10 9H8a1.5 1.5 0 0 0-1.5 1.5v3A1.5 1.5 0 0 0 8 15h2M17.5 9h-2a1.5 1.5 0 0 0-1.5 1.5v3a1.5 1.5 0 0 0 1.5 1.5h2"/></symbol>
+<symbol id="save" viewBox="0 0 24 24"><path d="M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1z"/></symbol>
+<symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.6v.1"/></symbol>
+<symbol id="check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+</defs></svg>
+
+<!-- a reusable rail: classes on the <nav> pick open/closed; cur/f on the links -->
+<template id="t"></template>
+
+<div class="lab">01 · Home, signed in: rail collapsed (icons), topic chips, 4 cards per row, the focused card lifted with the mint ring</div>
+<section class="screen" id="home">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg><b>Lumen</b></div>
+  <a style="top:5.25rem"><svg class="i"><use href="#search"/></svg><span>Search</span></a>
+  <a class="cur" style="top:8.125rem"><svg class="i"><use href="#home"/></svg><span>Home</span></a>
+  <a style="top:11rem"><svg class="i"><use href="#subs"/></svg><span>Subscriptions</span></a>
+  <a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg><span>History</span></a>
+  <a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg><span>Watch later</span></a>
+  <a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg><span>Playlists</span></a>
+  <a style="top:22.5rem"><svg class="i"><use href="#like"/></svg><span>Liked videos</span></a>
+  <a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg><span>Account</span></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg><span>About &amp; updates</span></a>
+ </nav>
+ <div class="content">
+  <div class="chips"><span class="chip on">All</span><span class="chip">Music</span><span class="chip">Gaming</span><span class="chip">Podcasts</span><span class="chip">Roblox scripting</span><span class="chip">Live</span><span class="chip">Recently uploaded</span></div>
+  <div class="grid">
+   <div class="c"><div class="th" style="--a:#3e6b5c"><b>12:04</b></div><div class="t">How we built a tiny game engine in a weekend, and what broke</div><div class="m">Monkey Developer</div><div class="m">214K views · 3 days ago</div></div>
+   <div class="c f"><div class="th" style="--a:#6b5a3e"><b>48:10</b><div class="pg"><i></i></div></div><div class="t">The quiet hour: three hours of rain on a tin roof</div><div class="m">Night Sounds</div><div class="m">1.2M views · 1 year ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e4f6b"><b>9:31</b></div><div class="t">Every Roblox scripting pattern you need for tycoon games</div><div class="m">Studio Notes</div><div class="m">88K views · 2 weeks ago</div></div>
+   <div class="c"><div class="th" style="--a:#5f3e6b"><b>22:45</b></div><div class="t">Live from the RDC keynote</div><div class="m">Roblox</div><div class="m">3.4M views · 1 month ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b3e45"><b>15:02</b></div><div class="t">A short history of the font on every TV menu</div><div class="m">Type Talk</div><div class="m">51K views · 5 days ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e6b6a"><b>1:02:13</b></div><div class="t">Podcast #212 — making things people keep</div><div class="m">The Long Game</div><div class="m">96K views · 6 days ago</div></div>
+   <div class="c"><div class="th" style="--a:#506b3e"><b>7:48</b></div><div class="t">I tried the minimum-latency guitar rig</div><div class="m">Signal Path</div><div class="m">402K views · 2 months ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b623e"><b>31:19</b></div><div class="t">Cooking for one: twelve dinners from one shop</div><div class="m">Small Kitchen</div><div class="m">730K views · 8 months ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e4a6b"></div><div class="t">Row three peeks in under the safe area</div><div class="m">Channel</div></div>
+   <div class="c"><div class="th" style="--a:#6b3e5e"></div><div class="t">…</div></div>
+   <div class="c"><div class="th" style="--a:#3e6b4c"></div><div class="t">…</div></div>
+   <div class="c"><div class="th" style="--a:#6b4c3e"></div><div class="t">…</div></div>
+  </div>
+ </div>
+</section>
+
+<div class="lab">02 · Rail open: focus entered the rail (← from the first column); it expands over the content with labels, nothing reflows</div>
+<section class="screen" id="rail">
+ <div class="safe"></div>
+ <div class="under"><div class="content"><div class="chips"><span class="chip on">All</span><span class="chip">Music</span><span class="chip">Gaming</span><span class="chip">Podcasts</span></div><div class="grid">
+  <div class="c"><div class="th" style="--a:#3e6b5c"></div><div class="t">How we built a tiny game engine in a weekend</div><div class="m">Monkey Developer</div></div>
+  <div class="c"><div class="th" style="--a:#6b5a3e"></div><div class="t">The quiet hour: three hours of rain</div><div class="m">Night Sounds</div></div>
+  <div class="c"><div class="th" style="--a:#3e4f6b"></div><div class="t">Every Roblox scripting pattern</div><div class="m">Studio Notes</div></div>
+  <div class="c"><div class="th" style="--a:#5f3e6b"></div><div class="t">Live from the RDC keynote</div><div class="m">Roblox</div></div>
+ </div></div></div>
+ <nav class="rail open"><div class="mk"><svg><use href="#mark"/></svg><b>Lumen</b></div>
+  <a style="top:5.25rem"><svg class="i"><use href="#search"/></svg><span>Search</span></a>
+  <a class="cur" style="top:8.125rem"><svg class="i"><use href="#home"/></svg><span>Home</span></a>
+  <a class="f" style="top:11rem"><svg class="i"><use href="#subs"/></svg><span>Subscriptions</span></a>
+  <a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg><span>History</span></a>
+  <a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg><span>Watch later</span></a>
+  <a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg><span>Playlists</span></a>
+  <a style="top:22.5rem"><svg class="i"><use href="#like"/></svg><span>Liked videos</span></a>
+  <a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg><span>Account</span></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg><span>About &amp; updates</span></a>
+ </nav>
+</section>
+
+<div class="lab">03 · Home, signed out: a calm prompt card (Sign in focused), search works without an account</div>
+<section class="screen" id="home-out">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div>
+  <a style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a>
+  <a class="cur" style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a>
+  <a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a>
+  <a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a>
+  <a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a>
+  <a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a>
+  <a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a>
+  <a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a>
+ </nav>
+ <div class="prompt"><div class="card"><svg style="width:2.5rem;height:2.5rem"><use href="#mark"/></svg><h2>Make Lumen yours</h2><p>Sign in with your phone to see your recommendations, subscriptions, history and Watch later here. Search works without an account.</p><div class="btns"><span class="bt p f">Sign in with your phone</span><span class="bt"><svg class="i"><use href="#search"/></svg>Search</span></div></div></div>
+</section>
+
+<div class="lab">04 · Search: its own screen, a large field (OK opens the TV keyboard; its mic dictates), recent searches and suggestions as a list</div>
+<section class="screen" id="search">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div>
+  <a class="cur" style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a>
+  <a style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a>
+ </nav>
+ <div class="content">
+  <div class="q"><svg class="i"><use href="#search"/></svg><span style="color:var(--tx)">roblox tyc</span></div>
+  <div class="hint">OK opens the keyboard · its microphone dictates</div>
+  <div class="sl"><h3>Recent and suggested</h3>
+   <a class="f"><svg class="i"><use href="#hist"/></svg>roblox tycoon tutorial</a>
+   <a><svg class="i"><use href="#hist"/></svg>roblox tycoon scripting</a>
+   <a><svg class="i"><use href="#search"/></svg>roblox tycoon game</a>
+   <a><svg class="i"><use href="#search"/></svg>roblox tycoon codes</a>
+   <a><svg class="i"><use href="#search"/></svg>roblox tycoon 2026</a>
+   <a><svg class="i"><use href="#search"/></svg>roblox tycoon how to make</a>
+  </div>
+ </div>
+</section>
+
+<div class="lab">05 · Search results: the query stays on top as the field (↑ reaches it), the results are the card grid</div>
+<section class="screen" id="results">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div>
+  <a class="cur" style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a>
+  <a style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a>
+ </nav>
+ <div class="content">
+  <div class="q"><svg class="i"><use href="#search"/></svg><span style="color:var(--tx)">lofi</span></div>
+  <div class="grid" style="top:4.375rem">
+   <div class="c f"><div class="th" style="--a:#3e6b5c"><b>3:12:04</b></div><div class="t">lofi hip hop radio — beats to relax to</div><div class="m">Lofi Girl</div><div class="m">54M views · 2 years ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b5a3e"><b>1:00:00</b></div><div class="t">1 hour of cozy lofi for studying</div><div class="m">Chill Corner</div><div class="m">3.1M views · 1 year ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e4f6b"><b>2:41:10</b></div><div class="t">Rainy night in Tokyo · lofi mix</div><div class="m">Tokyo Tapes</div><div class="m">812K views · 4 months ago</div></div>
+   <div class="c"><div class="th" style="--a:#5f3e6b"><b>45:02</b></div><div class="t">Lofi for coding — no vocals, no ads in the middle</div><div class="m">Focus FM</div><div class="m">1.4M views · 7 months ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b3e45"></div><div class="t">Second row</div><div class="m">Channel</div></div><div class="c"><div class="th" style="--a:#3e6b6a"></div><div class="t">…</div></div><div class="c"><div class="th" style="--a:#506b3e"></div><div class="t">…</div></div><div class="c"><div class="th" style="--a:#6b623e"></div><div class="t">…</div></div>
+  </div>
+ </div>
+</section>
+
+<div class="lab">06 · Scrolled feed: the focused row keeps the first row's position; a scrim fades what passed under the top edge</div>
+<section class="screen" id="scrolled">
+ <div class="safe"></div>
+ <nav class="rail" style="z-index:6"><div class="mk"><svg><use href="#mark"/></svg></div>
+  <a style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a><a style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a class="cur" style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a>
+ </nav>
+ <div class="scrim"></div>
+ <div class="content" style="top:-10.3125rem">
+  <div class="grid" style="top:3.5625rem">
+   <div class="c"><div class="th" style="--a:#3e6b5c"></div><div class="t">Previous row (scrolled away)</div><div class="m">Channel</div><div class="m">meta</div></div><div class="c"><div class="th"></div><div class="t">…</div><div class="m">x</div><div class="m">x</div></div><div class="c"><div class="th"></div><div class="t">…</div><div class="m">x</div><div class="m">x</div></div><div class="c"><div class="th"></div><div class="t">…</div><div class="m">x</div><div class="m">x</div></div>
+   <div class="c"><div class="th" style="--a:#6b3e45"><b>15:02</b></div><div class="t">A short history of the font on every TV menu</div><div class="m">Type Talk</div><div class="m">51K views · 5 days ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e6b6a"><b>1:02:13</b></div><div class="t">Podcast #212 — making things people keep</div><div class="m">The Long Game</div><div class="m">96K views · 6 days ago</div></div>
+   <div class="c f"><div class="th" style="--a:#506b3e"><b>7:48</b></div><div class="t">I tried the minimum-latency guitar rig and here is what happened</div><div class="m">Signal Path</div><div class="m">402K views · 2 months ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b623e"><b>31:19</b></div><div class="t">Cooking for one: twelve dinners from one shop</div><div class="m">Small Kitchen</div><div class="m">730K views · 8 months ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e4a6b"></div><div class="t">Next row</div><div class="m">Channel</div><div class="m">meta</div></div><div class="c"><div class="th" style="--a:#6b3e5e"></div><div class="t">…</div></div><div class="c"><div class="th" style="--a:#3e6b4c"></div><div class="t">…</div></div><div class="c"><div class="th" style="--a:#6b4c3e"></div><div class="t">…</div></div>
+   <div class="c"><div class="th" style="--a:#4c3e6b"></div></div><div class="c"><div class="th"></div></div><div class="c"><div class="th"></div></div><div class="c"><div class="th"></div></div>
+  </div>
+ </div>
+</section>
+
+<div class="lab">07 · Channel: avatar, name and subscribers on top, its videos as the grid</div>
+<section class="screen" id="channel">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div><a style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a><a style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a></nav>
+ <div class="content">
+  <div class="ch"><div class="av"></div><div><h1>Monkey Developer</h1><div class="meta">@monkeydeveloper · 412K subscribers · 380 videos</div></div></div>
+  <div class="grid" style="top:5.75rem">
+   <div class="c f"><div class="th" style="--a:#3e6b5c"><b>12:04</b></div><div class="t">How we built a tiny game engine in a weekend</div><div class="m">214K views · 3 days ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b5a3e"><b>18:40</b></div><div class="t">Physics in 200 lines</div><div class="m">98K views · 2 weeks ago</div></div>
+   <div class="c"><div class="th" style="--a:#3e4f6b"><b>9:31</b></div><div class="t">Why our first tycoon failed</div><div class="m">301K views · 1 month ago</div></div>
+   <div class="c"><div class="th" style="--a:#5f3e6b"><b>22:45</b></div><div class="t">Shipping on Fridays</div><div class="m">77K views · 1 month ago</div></div>
+   <div class="c"><div class="th" style="--a:#6b3e45"></div><div class="t">…</div></div><div class="c"><div class="th"></div></div><div class="c"><div class="th"></div></div><div class="c"><div class="th"></div></div>
+  </div>
+ </div>
+</section>
+
+<div class="lab">08 · Playlist / Watch later: title and count on top; empty and loading states keep the same geometry</div>
+<section class="screen" id="playlist">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div><a style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a><a style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a class="cur" style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a></nav>
+ <div class="content">
+  <h1>Watch later</h1><div class="meta">24 videos · updated today</div>
+  <div class="grid" style="top:4.75rem">
+   <div class="c f"><div class="th" style="--a:#3e6b5c"><b>12:04</b><div class="pg"><i></i></div></div><div class="t">How we built a tiny game engine in a weekend</div><div class="m">Monkey Developer</div><div class="m">214K views</div></div>
+   <div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div>
+  </div>
+ </div>
+</section>
+
+<div class="lab">09 · Empty page (History off / nothing saved): one calm line, the rail keeps the focus</div>
+<section class="screen" id="empty">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div><a style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a><a style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a class="cur f" style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a></nav>
+ <div class="content"><h1>History</h1><div class="empty"><h2>Nothing here yet</h2><p>Videos you watch appear here, on every device signed in to your account.</p></div></div>
+</section>
+
+<div class="lab">10 · Player overlay (any key while playing; hides after 4 s): title + channel, thick bar with chapter gaps, elapsed / remaining, large round buttons</div>
+<section class="screen" id="player">
+ <div class="vid"></div><div class="top"></div><div class="bot"></div><div class="safe"></div>
+ <div class="ttl"><h1>The quiet hour: three hours of rain on a tin roof</h1><div class="own"><i></i>Night Sounds · 1.2M views</div></div>
+ <div class="ctl">
+  <div class="times"><span>12:41<em>Chapter 3 · Thunder</em></span><span>−2:47:19</span></div>
+  <div class="bar f"><div class="seg"><div class="fill" style="width:100%"></div></div><div class="seg"><div class="fill" style="width:100%"></div></div><div class="seg" style="flex:3"><div class="buf" style="width:30%"></div><div class="fill" style="width:12%"></div></div><div class="seg" style="flex:2"></div><div class="knob" style="left:30.8%"></div></div>
+  <div class="row"><span class="rb f"><svg class="i"><use href="#pause"/></svg></span><span class="rb"><svg class="i"><use href="#cc"/></svg></span><span class="rb w">1×</span><span class="rb w">1080p</span><span class="rb on"><svg class="i"><use href="#like"/></svg></span><span class="rb"><svg class="i"><use href="#save"/></svg></span><span class="rb"><svg class="i"><use href="#info"/></svg></span></div>
+ </div>
+</section>
+
+<div class="lab">11 · Seeking: ←/→ on the bar (10 s, faster while held); the storyboard frame rides above the target</div>
+<section class="screen" id="scrub">
+ <div class="vid"></div><div class="bot"></div><div class="safe"></div>
+ <div class="ctl">
+  <div class="times"><span>1:31:10<em>Chapter 5 · Morning</em></span><span>−1:28:50</span></div>
+  <div class="bar f"><div class="prev" style="left:50.5%"><div class="fr"></div><b>1:31:10</b></div><div class="seg"><div class="fill" style="width:100%"></div></div><div class="seg"><div class="fill" style="width:100%"></div></div><div class="seg" style="flex:3"><div class="fill" style="width:51%"></div></div><div class="seg" style="flex:2"></div><div class="knob" style="left:50.5%"></div></div>
+  <div class="row"><span class="rb"><svg class="i"><use href="#pause"/></svg></span><span class="rb"><svg class="i"><use href="#cc"/></svg></span><span class="rb w">1×</span><span class="rb w">1080p</span><span class="rb"><svg class="i"><use href="#like"/></svg></span><span class="rb"><svg class="i"><use href="#save"/></svg></span><span class="rb"><svg class="i"><use href="#info"/></svg></span></div>
+ </div>
+</section>
+
+<div class="lab">12 · Up next: ↓ from the buttons slides the controls up and shows the related row</div>
+<section class="screen" id="upnext">
+ <div class="vid"></div><div class="top"></div><div class="bot" style="height:24rem"></div><div class="safe"></div>
+ <div class="ttl"><h1>The quiet hour: three hours of rain on a tin roof</h1><div class="own"><i></i>Night Sounds · 1.2M views</div></div>
+ <div class="ctl" style="bottom:12.125rem">
+  <div class="times"><span>12:41</span><span>−2:47:19</span></div>
+  <div class="bar"><div class="seg"><div class="fill" style="width:100%"></div></div><div class="seg"><div class="fill" style="width:100%"></div></div><div class="seg" style="flex:3"><div class="fill" style="width:12%"></div></div><div class="seg" style="flex:2"></div></div>
+  <div class="row"><span class="rb"><svg class="i"><use href="#pause"/></svg></span><span class="rb"><svg class="i"><use href="#cc"/></svg></span><span class="rb w">1×</span><span class="rb w">1080p</span><span class="rb"><svg class="i"><use href="#like"/></svg></span><span class="rb"><svg class="i"><use href="#save"/></svg></span><span class="rb"><svg class="i"><use href="#info"/></svg></span></div>
+ </div>
+ <div class="up"><h3>Up next</h3><div class="r">
+  <div class="c f"><div class="th" style="--a:#3e4f6b"><b>2:01:00</b></div><div class="t">Thunderstorm on the lake, all night</div></div>
+  <div class="c"><div class="th" style="--a:#6b5a3e"><b>58:10</b></div><div class="t">Fireplace and soft wind</div></div>
+  <div class="c"><div class="th" style="--a:#3e6b5c"><b>3:00:00</b></div><div class="t">Forest rain for sleep</div></div>
+  <div class="c"><div class="th" style="--a:#5f3e6b"><b>1:12:40</b></div><div class="t">Coffee shop murmur</div></div>
+  <div class="c"><div class="th" style="--a:#6b3e45"><b>45:00</b></div><div class="t">Ocean night</div></div>
+  <div class="c"><div class="th" style="--a:#3e6b6a"></div><div class="t">…</div></div>
+ </div></div>
+</section>
+
+<div class="lab">13 · A menu (Speed, Quality, Captions): a right-side panel, focus on the current value, OK chooses, Back closes</div>
+<section class="screen" id="menu">
+ <div class="vid"></div><div class="bot"></div><div class="safe"></div>
+ <div class="ctl" style="right:22rem">
+  <div class="times"><span>12:41</span><span>−2:47:19</span></div>
+  <div class="bar"><div class="seg" style="flex:1"><div class="fill" style="width:12%"></div></div></div>
+  <div class="row"><span class="rb"><svg class="i"><use href="#pause"/></svg></span><span class="rb"><svg class="i"><use href="#cc"/></svg></span><span class="rb w on">1×</span><span class="rb w">1080p</span></div>
+ </div>
+ <div class="panel"><h2>Playback speed</h2>
+  <div class="o">2.5×</div><div class="o">2×</div><div class="o">1.75×</div><div class="o">1.5×</div><div class="o">1.25×</div><div class="o cur f">1× (normal)<svg class="i"><use href="#check"/></svg></div><div class="o">0.75×</div><div class="o">0.5×</div>
+ </div>
+</section>
+
+<div class="lab">14 · Watching: captions bottom-centre inside the safe area (above the bar while the overlay is open); the skip button bottom-right</div>
+<section class="screen" id="captions">
+ <div class="vid"></div><div class="safe"></div>
+ <div class="cap" style="bottom:2.25rem">and that's when the rain finally<br>reached the tin roof</div>
+ <div class="skip" style="bottom:6.5rem"><span>Sponsor</span><span class="bt f">Skip ⏭</span></div>
+</section>
+
+<div class="lab">15 · Failure / offline: the reason, centred and large, the primary action focused (the player never leaves by itself)</div>
+<section class="screen" id="fail">
+ <div class="vid" style="filter:brightness(.5)"></div><div class="safe"></div>
+ <div class="fail"><div class="card"><h2>No connection</h2><p>Lumen checks youtube.com every 3 seconds and continues by itself as soon as it's back.</p><div class="btns"><span class="bt p f">Try again</span><span class="bt">Open on YouTube</span></div></div></div>
+</section>
+
+<div class="lab">16 · Sign in: full screen, the code very large, the URL, a QR code of the URL</div>
+<section class="screen" id="signin">
+ <div class="safe"></div>
+ <div class="sign"><div class="mk"><svg><use href="#mark"/></svg><b>Lumen</b></div>
+  <div class="l"><h2>Sign in with your phone</h2>
+   <ol><li>1 · Scan the code, or go to<span class="u">youtube.com/activate</span></li><li>2 · Enter this code</li></ol>
+   <p class="code">WMB-QZX-TPR</p>
+   <p class="st">Then pick your Google account. This screen continues by itself.</p></div>
+  <div class="qr"><div class="tile"><svg viewBox="0 0 29 29" style="width:11rem;height:11rem"><path fill="#101315" d="M0 0h7v7H0zM1 1v5h5V1zM2 2h3v3H2zM22 0h7v7h-7zm1 1v5h5V1zm1 1h3v3h-3zM0 22h7v7H0zm1 1v5h5v-5zm1 1h3v3H2zM9 0h2v2H9zm4 1h3v1h-3zm4 2h2v3h-2zM9 4h3v2H9zm5 2h2v2h-2zM8 9h3v2H8zm5 0h1v4h-1zm3 1h4v1h-4zm5 2h3v2h-3zm4 1h2v3h-2zM9 13h2v3H9zm4 3h3v2h-3zm5-1h2v4h-2zm4 3h3v2h-3zM9 19h3v1H9zm-6-9h3v2H3zm0 4h2v3H3zm6 8h2v3H9zm4 1h4v2h-4zm6 1h2v5h-2zm4 2h4v1h-4zm-9 3h3v2h-3zm9 0h2v2h-2z"/></svg></div><p>Scan with your phone's camera</p></div>
+  <div class="btns"><span class="bt f">Back</span><span class="bt">Get a new code</span></div>
+ </div>
+</section>
+
+<div class="lab">17b · About &amp; updates (the rail's last item, signed out too): versions, the last check, one focused action</div>
+<section class="screen" id="about">
+ <div class="safe"></div>
+ <div class="sign"><div class="mk"><svg><use href="#mark"/></svg><b>Lumen</b></div>
+  <div class="l" style="width:30rem"><h2>About &amp; updates</h2>
+   <dl style="display:grid;grid-template-columns:auto 1fr;gap:.5rem 1.5rem;margin:1.25rem 0 0;font-size:.875rem"><dt style="color:var(--mu)">App</dt><dd style="margin:0">Lumen for TV 0.1.0</dd><dt style="color:var(--mu)">Interface</dt><dd style="margin:0">0.9.0 · build 1000</dd><dt style="color:var(--mu)">Last check</dt><dd style="margin:0">just now · update found</dd></dl>
+   <div style="margin-top:1.75rem;padding:1.25rem 1.5rem;border-radius:1rem;background:var(--pn);display:grid;gap:.625rem"><b style="font-size:1.25rem;color:var(--ac)">Update ready</b><p style="margin:0;font-size:.875rem;color:var(--mu)">A new interface (0.9.0, build 2000) is downloaded and verified. Update now restarts the screen with it; you stay signed in.</p></div></div>
+  <div class="btns"><span class="bt p f">Update now</span><span class="bt">Install app update</span><span class="bt">Back</span></div>
+ </div>
+</section>
+
+<div class="lab">17 · Account (signed in): who is signed in, Sign out</div>
+<section class="screen" id="account">
+ <div class="safe"></div>
+ <div class="sign"><div class="mk"><svg><use href="#mark"/></svg><b>Lumen</b></div>
+  <div class="l"><div class="av" style="width:4.5rem;height:4.5rem;display:grid;place-items:center;background:var(--on);color:var(--ac)"><svg class="i" style="width:2.25rem;height:2.25rem"><use href="#acct"/></svg></div>
+   <h2 style="margin-top:1.25rem">Signed in</h2>
+   <p class="st" style="font-size:.875rem;line-height:1.3125rem">This TV uses your YouTube account: history, subscriptions, Watch later and playlists are the same as on your other devices.</p></div>
+  <div class="btns"><span class="bt f">Back</span><span class="bt">Sign out</span></div>
+ </div>
+</section>
+
+<div class="lab">18 · More info: the description as a right-side panel (↑/↓ scroll it)</div>
+<section class="screen" id="info">
+ <div class="vid"></div><div class="safe"></div>
+ <div class="panel wide"><h2>The quiet hour: three hours of rain on a tin roof</h2><div class="meta" style="margin:-.5rem 0 1rem">Night Sounds · 1.2M views · 1 year ago</div>
+  <div class="ds f">Three hours of steady rain recorded on the tin roof of a cabin in the hills, no music, no talking.
+Chapters
+0:00 Light rain
+32:10 Heavier
+1:12:40 Thunder
+2:10:00 Morning</div></div>
+</section>
+
+<div class="lab">19 · Toasts: player feedback (top centre) and a failed action with its reason</div>
+<section class="screen" id="toast">
+ <div class="vid"></div><div class="safe"></div>
+ <div class="toast">Captions on · English</div>
+ <div class="toast e" style="top:5rem">Couldn't like this video: sign in required</div>
+</section>
+
+<div class="lab">20 · Loading: skeleton cards in the final geometry (no spinners)</div>
+<section class="screen" id="loading">
+ <div class="safe"></div>
+ <nav class="rail"><div class="mk"><svg><use href="#mark"/></svg></div><a style="top:5.25rem"><svg class="i"><use href="#search"/></svg></a><a class="cur" style="top:8.125rem"><svg class="i"><use href="#home"/></svg></a><a style="top:11rem"><svg class="i"><use href="#subs"/></svg></a><a style="top:13.875rem"><svg class="i"><use href="#hist"/></svg></a><a style="top:16.75rem"><svg class="i"><use href="#wl"/></svg></a><a style="top:19.625rem"><svg class="i"><use href="#pl"/></svg></a><a style="top:22.5rem"><svg class="i"><use href="#like"/></svg></a><a style="top:25.875rem"><svg class="i"><use href="#acct"/></svg></a><a style="top:28.75rem"><svg class="i" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 0 1-13.1 5M4.5 12a7.5 7.5 0 0 1 13.1-5M17.6 3.5V7h-3.5M6.4 20.5V17h3.5"/></svg></a></nav>
+ <div class="content"><h1>Subscriptions</h1><div class="grid">
+  <div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div>
+  <div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div><div class="c sk"><div class="th"></div><div class="t">.</div><div class="m">.</div><div class="m">.</div></div>
+ </div></div>
+</section>
+</body></html>

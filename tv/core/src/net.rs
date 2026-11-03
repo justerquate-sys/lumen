@@ -19,8 +19,10 @@ impl Answer {
     }
 }
 
-/// Largest body read (the client bundle is a few MB; an APK about 15).
+/// Largest body read (the client bundle is a few MB; a release APK about 18).
 const LIMIT: u64 = 96 * 1024 * 1024;
+/// Largest download with progress (APKs: debug builds of the app run to a few hundred MB).
+const BIG: u64 = 1024 * 1024 * 1024;
 
 impl Http {
     pub fn new(timeout: Duration) -> Http {
@@ -46,6 +48,26 @@ impl Http {
             req = req.header(*k, *v);
         }
         Self::read(req.call())
+    }
+
+    /// A GET whose body is read in pieces, `on(got, total)` after each (total 0 = unknown).
+    pub fn get_progress(&self, url: &str, on: &mut dyn FnMut(u64, u64)) -> Result<Answer, String> {
+        use std::io::Read;
+        let mut r = self.agent.get(url).call().map_err(|e| e.to_string())?;
+        let status = r.status().as_u16();
+        let total = r.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let mut body = Vec::with_capacity(total.min(BIG) as usize);
+        let mut rd = r.body_mut().with_config().limit(BIG).reader();
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = rd.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..n]);
+            on(body.len() as u64, total);
+        }
+        Ok(Answer { status, body })
     }
 
     pub fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<Answer, String> {

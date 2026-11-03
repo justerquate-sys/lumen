@@ -1,7 +1,7 @@
 //! The shell's bridge to Android (JNI). Kotlin calls in (`app.lumen.tv.Native`: init, the
 //! document-start script, the user agent, request rules, update accepted); Rust calls out to the
 //! `app.lumen.tv.Host` object Kotlin handed over at init (Keystore sealing, bundle swap, update
-//! dialog, package installer). Off Android every call-out is a no-op (`seal` → None: nothing is
+//! package installer). Off Android every call-out is a no-op (`seal` → None: nothing is
 //! kept).
 
 #[cfg(target_os = "android")]
@@ -64,10 +64,6 @@ mod imp {
 
     pub fn bundle_ready() {
         void_call("bundleReady", None);
-    }
-
-    pub fn offer_update(version: &str) {
-        void_call("offerUpdate", Some(version));
     }
 
     pub fn install_apk(path: &str) {
@@ -134,8 +130,7 @@ mod imp {
         None
     }
     pub fn bundle_ready() {}
-    pub fn offer_update(_: &str) {}
     pub fn install_apk(_: &str) {}
 }
 
-pub use imp::{bundle_ready, install_apk, offer_update, open, seal};
+pub use imp::{bundle_ready, install_apk, open, seal};

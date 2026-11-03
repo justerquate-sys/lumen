@@ -1104,85 +1104,311 @@ details.pl:not([open]) summary::after{transform:translateY(2px) rotate(-135deg)}
 #ytc-imp .imp-m.er{color:var(--er)}
 #ytc-imp .imp-b{display:flex;justify-content:flex-end;align-items:center;gap:16px}
 /* ===== TV app (tv/, html[data-ytc-tv]) =====
-   The Google TV / Android TV WebView lays out at 960×540 CSS px (1080p at 2×: the 10-foot dp grid). Overscan-safe
-   margins 5 % per side (48 × 27 px there, Android TV guidelines; a set laying out at 1920×1080 gets 96 × 54), one focus stop per card, a mint focus ring that settles in and a
-   slight lift of the focused card (the focus is final at once; the lift rides on top, --e-out, ≤ 200 ms, × --mv).
-   Pointer-only affordances (mic, hover buttons, logo dwell) are gone; menus open with OK. There is no pointer,
-   so the ring follows :focus (a focus the client sets itself is not always :focus-visible). */
-html[data-ytc-tv]{--tvx:max(48px,5vw);--tvy:max(27px,5vh);scroll-padding:calc(var(--tvy) + 64px) 0 var(--tvy)}
-html[data-ytc-tv] #ytc{--sw:72px;font-size:16px}
-html[data-ytc-tv] #ytc-top{height:56px;padding:var(--tvy) var(--tvx) 0;grid-template-columns:auto minmax(0,1fr) auto;gap:20px}
-html[data-ytc-tv] #ytc-mic,html[data-ytc-tv] #ytc-vk,html[data-ytc-tv] .c .ca,html[data-ytc-tv] .logo::before{display:none}
-html[data-ytc-tv] #ytc-q{font-size:17px}
-/* Sidebar: an icon rail inside the safe area that opens over the grid while the focus is in it (its surface is
-   revealed by clip-path from the rail; the links never move under the focus). */
-html[data-ytc-tv] #ytc-side{top:calc(56px + var(--tvy) + 12px);left:calc(var(--tvx) - 14px);bottom:var(--tvy);width:236px;padding:6px 8px;z-index:9;overflow:visible;clip-path:inset(0 calc(100% - 60px) 0 0 round var(--r-pop));transition:clip-path var(--d-spring) var(--spring)}
-/* The rail shows the icons only (link inset 14 + icon 24 + 14 = 52 px after the 8 px padding); the active pill
-   lines up with the link boxes (rows keep the desktop's 44 px pitch, which Rust's pill offsets assume). */
-html[data-ytc-tv] #ytc-side .sdi{top:6px;left:8px;right:8px}
-/* Collapsed, a link is as wide as its icon: the remote's spatial navigation measures boxes, and full-width links
-   would sit under the content beside the rail (the labels are clipped either way; the width change hides under
-   the clip's reveal). Rail links draw their ring inside (the panel's edge would cut an outer one). */
-html[data-ytc-tv] #ytc-side:not(:focus-within) a{width:52px;box-sizing:border-box}
-html[data-ytc-tv] #ytc #ytc-side a:focus{outline-offset:-3px!important;scale:1}
-html[data-ytc-tv] #ytc-side::after{content:"";position:absolute;inset:0;z-index:-2;border-radius:var(--r-pop);background:var(--pn);box-shadow:var(--sh);opacity:0;transition:opacity var(--d-pop-out) var(--e-out)}
-html[data-ytc-tv] #ytc-side:focus-within{clip-path:inset(0 0 0 0 round var(--r-pop))}
-html[data-ytc-tv] #ytc-side:focus-within::after{opacity:1;transition-duration:var(--d-pop)}
-html[data-ytc-tv] #ytc-side a{font-size:17px}
-html[data-ytc-tv] #ytc-main{padding:12px var(--tvx) var(--tvy) calc(var(--tvx) + 72px)}
-html[data-ytc-tv] .grid{--cols:4;gap:26px 16px}
-/* Focus: the whole card is the stop (its title link has the focus). */
-html[data-ytc-tv] .c{transition:transform var(--d-pop) var(--e-out)}
-html[data-ytc-tv] .c:focus-within{transform:translateY(calc(-3px * var(--mv))) scale(calc(1 + .04 * var(--mv)));z-index:2}
-html[data-ytc-tv] .c:focus-within .th{outline:3px solid var(--ac);outline-offset:3px}
-html[data-ytc-tv] .c:focus-within .t{color:var(--ac)}
-html[data-ytc-tv] #ytc :focus:not(.t):not(input):not(#ytc-player){outline:3px solid var(--ac);outline-offset:3px}
-html[data-ytc-tv] #ytc button:focus:not(.pb),html[data-ytc-tv] #ytc-side a:focus{scale:calc(1 + .04 * var(--mv));transition:scale var(--d-pop) var(--e-out)}
-html[data-ytc-tv] #ytc-q:focus,html[data-ytc-tv] .hero input:focus{box-shadow:0 0 0 3px var(--ac)}
-/* Watch page: the player fills the screen (video is full-bleed; controls stay inside the safe area); the page
-   continues below it (↓ from the control bar). */
+   The 10-foot interface (design reference: tv/design/look-sheet.html and its README). One layout at every
+   resolution: the root font-size is 1/60 of the viewport width, so 1rem = 16 CSS px on the 960×540 WebView most
+   Google TV sets report (32 device px at DPR 2), 32 px at 1920×1080 and 64 px at 3840: everything below is in rem
+   and looks the same on all of them. Content and focus rings stay in the overscan-safe area (5 % per side:
+   --sx × --sy); backgrounds and pictures may bleed. One focus style everywhere: the stop grows (scale), gets the
+   mint ring and a raised surface; focus moves are instant (the scale settles in, --e-out ≤ 200 ms, × --mv), and
+   scrolling that follows the focus never animates. No pointer: no hover affordances, no hover-only controls. */
+@property --sr{syntax:"<length>";inherits:false;initial-value:0px}
+html[data-ytc-tv]{font-size:calc(100vw / 60);--sx:3rem;--sy:1.6875rem;--ring:.1875rem;--tvrow:2.875rem;scroll-padding:5rem 0 var(--sy);overflow-x:clip}
+html[data-ytc-tv] #ytc{--sw:0px;font-size:.875rem;line-height:1.35;--tvf:Roboto,system-ui,-apple-system,"Segoe UI",Arial,sans-serif;font-family:var(--tvf)}
+html[data-ytc-tv] #ytc :focus-visible{animation:none}
+html[data-ytc-tv] #ytc :focus{outline:none}
+/* The one focus style (cards, chips, buttons, rows): ring + scale + raised surface. */
+html[data-ytc-tv] #ytc :is(.tvb,.fx-ch,.sg a,.sgx,.pill,.lnk2,.fx-sw,.pfbt,.psbt button,.ya-b,.ya-opt,.ya-cp):focus{outline:var(--ring) solid var(--ac);outline-offset:.1875rem;scale:calc(1 + .06 * var(--mv))}
+html[data-ytc-tv] #ytc :is(.tvb,.fx-ch,.pill,.lnk2,.pfbt,.psbt button){transition:scale var(--d-pop) var(--e-out),background-color var(--d-press) var(--e-out),color var(--d-press) var(--e-out)}
+html[data-ytc-tv] .lmk{display:block;flex:none}html[data-ytc-tv] .lmk rect{fill:var(--ac);stroke:none}html[data-ytc-tv] .lmk path{fill:none;stroke:var(--bg);stroke-width:6.5;stroke-linecap:round;stroke-linejoin:round}html[data-ytc-tv] .lmk circle{fill:var(--bg);stroke:none}
+/* Pointer-only or desktop-only parts. */
+html[data-ytc-tv] :is(#ytc .logo,#ytc-mic,#ytc-vk,.qx,#ytc-hfx,.c .ca,.fx-ed,.fx-tx,#ytc-keys,.pct,#ytc-comments,#ytc-pl,.upn){display:none!important}
+
+/* ---- the rail: the Lumen mark, Search, the pages, the account at the bottom. Collapsed it shows the icons; the
+   focus entering it opens it over the content (labels and the panel fade and slide in, nothing reflows). */
+html[data-ytc-tv] #ytc-side{position:fixed;inset:0 auto 0 0;width:7rem;padding:0;margin:0;overflow:visible;z-index:30;clip-path:none;background:none}
+html[data-ytc-tv] #ytc-side::after{content:"";position:absolute;inset:0 auto 0 0;width:18rem;z-index:-1;background:linear-gradient(90deg,var(--pn) 15.5rem,color-mix(in srgb,var(--pn) 0%,transparent));opacity:0;transform:translateX(calc(-4rem * var(--mv)));transition:opacity var(--d-pop-out) var(--e-out),transform var(--d-pop-out) var(--e-out);pointer-events:none}
+html[data-ytc-tv] #ytc-side:focus-within::after{opacity:1;transform:none;transition-duration:var(--d-pop)}
+html[data-ytc-tv] .rmk{position:absolute;left:3.75rem;top:var(--sy);display:flex;align-items:center;gap:.625rem;height:2rem}
+html[data-ytc-tv] #ytc .rmk .lmk{width:2rem;height:2rem;stroke:none;transform:none}
+html[data-ytc-tv] .rmk b{font-size:1.125rem;font-weight:600;letter-spacing:-.02em;color:var(--tx);opacity:0;translate:calc(-.5rem * var(--mv)) 0;transition:opacity var(--d-pop-out) var(--e-out),translate var(--d-pop-out) var(--e-out)}
+html[data-ytc-tv] #ytc-side:focus-within .rmk b{opacity:1;translate:0;transition-duration:var(--d-pop)}
+html[data-ytc-tv] .rls{position:absolute;left:3.375rem;top:5.25rem;width:12.5rem}
+html[data-ytc-tv] .rla{position:absolute;left:3.375rem;top:25.875rem;width:12.5rem}
+html[data-ytc-tv] #ytc-side .rl{position:relative;isolation:isolate;transform-origin:0 50%;display:flex;align-items:center;gap:1rem;box-sizing:border-box;width:12.5rem;height:2.5rem;margin:0 0 .375rem;padding:0 .625rem;border:0;border-radius:.8125rem;background:none;color:var(--mu);font:500 .9375rem/1 var(--tvf);white-space:nowrap;text-align:left;cursor:default;transition:scale var(--d-pop) var(--e-out),color var(--d-press) var(--e-out)}
+/* Collapsed, an item is as wide as its icon (the remote measures boxes; full-width items would lie under the cards). */
+html[data-ytc-tv] #ytc-side:not(:focus-within) .rl{width:2.5rem}
+html[data-ytc-tv] #ytc-side .rl::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:inherit;background:var(--cb);opacity:0;transition:opacity var(--d-press) var(--e-out)}
+html[data-ytc-tv] #ytc-side .rl svg{width:1.25rem;height:1.25rem;flex:none;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;transform:none}
+html[data-ytc-tv] #ytc-side .rl span{opacity:0;translate:calc(-.5rem * var(--mv)) 0;transition:opacity var(--d-pop-out) var(--e-out),translate var(--d-pop-out) var(--e-out)}
+html[data-ytc-tv] #ytc-side:focus-within .rl span{opacity:1;translate:0;transition-duration:var(--d-pop),var(--d-spring);transition-timing-function:var(--e-out),var(--spring)}
+html[data-ytc-tv] #ytc-side .rl:focus{color:var(--tx);outline:var(--ring) solid var(--ac);outline-offset:.125rem;scale:calc(1 + .04 * var(--mv))}
+html[data-ytc-tv] #ytc-side .rl:focus::before{opacity:1}
+html[data-ytc-tv] #ytc-side .rl:active{transform:none}
+/* An update is ready: a mint dot on About & updates. */
+html[data-ytc-tv] #ytc-side .rl.upd::after{content:"";position:absolute;left:1.625rem;top:.4375rem;width:.5rem;height:.5rem;border-radius:50%;background:var(--ac);box-shadow:0 0 0 .1875rem var(--bg)}
+/* The page's item: one persistent mint pill (a strip over all seven rows clipped to the active one by --st/--sb,
+   written by Rust): a navigation slides it, the rail opening widens it with the labels (--sr). */
+html[data-ytc-tv] #ytc-side .sdi{position:absolute;top:0;left:0;width:12.5rem;height:calc(7 * var(--tvrow) - .375rem);--sr:10rem;background:var(--on);opacity:1;clip-path:inset(var(--st) var(--sr) var(--sb) 0 round .8125rem);transition:--st var(--d-spring) var(--spring),--sb var(--d-spring) var(--spring),--sr var(--d-pop-out) var(--e-out),opacity var(--d-hover) var(--e-out)}
+html[data-ytc-tv] #ytc-side:focus-within .sdi{--sr:0px;transition-duration:var(--d-spring),var(--d-spring),var(--d-spring),var(--d-hover);transition-timing-function:var(--spring)}
+html[data-ytc-tv] #ytc:not(:is([data-nav=home],[data-nav=subs],[data-nav=history],[data-nav=wl],[data-nav=playlists],[data-nav=liked],[data-nav=search])) #ytc-side .sdi{opacity:0}
+html[data-ytc-tv] #ytc:is([data-nav=home] .rl[data-nav=home],[data-nav=subs] .rl[data-nav=subs],[data-nav=history] .rl[data-nav=history],[data-nav=wl] .rl[data-nav=wl],[data-nav=playlists] .rl[data-nav=playlists],[data-nav=liked] .rl[data-nav=liked],[data-nav=search] .rl[data-nav=search]){color:var(--ac)}
+html[data-ytc-tv] #ytc[data-still="1"] #ytc-side :is(.sdi,.rl,.rl span){transition:none}
+/* The search screen open: Search is the current item. */
+html[data-ytc-tv] #ytc[data-tvq="1"] #ytc-side .sdi{opacity:0}
+html[data-ytc-tv] #ytc[data-tvq="1"] #ytc-side .rl[data-nav=search]{background:var(--on);color:var(--ac)}
+html[data-ytc-tv] #ytc[data-tvq="1"] #ytc-side .rl:not([data-nav=search]){color:var(--mu)}
+html[data-ytc-tv] #ytc[data-nav=watch] #ytc-side{display:none}
+
+/* ---- pages: the content starts right of the collapsed rail and ends 3.75rem from the right (a focused card at the
+   row's end, grown and ringed, still ends inside the safe area). A fixed scrim fades what scrolls under the top. */
+html[data-ytc-tv] #ytc-main{padding:calc(var(--sy) + .5rem) 3.75rem 4rem 7.75rem}
+html[data-ytc-tv] #ytc:not([data-nav=watch]) #ytc-main::before{content:"";position:fixed;z-index:6;left:0;right:0;top:0;height:var(--scrim);background:linear-gradient(var(--bg) calc(var(--scrim) - .75rem),color-mix(in srgb,var(--bg) 0%,transparent));pointer-events:none}
+/* (The scrim ends just above where each page's first row sits, the focused card's ring included.) */
+html[data-ytc-tv] #ytc-main{--scrim:5rem}html[data-ytc-tv] #ytc[data-nav=search] #ytc-main{--scrim:5.5rem}
+html[data-ytc-tv] #ytc-main:has(.feed>.m.sub){--scrim:6.25rem}html[data-ytc-tv] #ytc-main:has(.feed>.ch){--scrim:6.875rem}
+html[data-ytc-tv] #ytc .fh{min-height:2.25rem;margin:0 0 1.3125rem;gap:1rem;position:relative;z-index:7}
+html[data-ytc-tv] #ytc h1{font-size:1.5rem;line-height:2.25rem;font-weight:600;letter-spacing:-.01em}
+html[data-ytc-tv] #ytc .m.sub{margin:-1.125rem 0 1.25rem;font-size:.875rem;line-height:1.25rem;color:var(--mu);position:relative;z-index:7}
+html[data-ytc-tv] .grid{--cols:4;grid-template-columns:repeat(4,minmax(0,1fr));gap:1.5rem}
+html[data-ytc-tv] .c{contain-intrinsic-size:auto 11.25rem;transition:transform var(--d-pop) var(--e-out)}
+/* The focused card: no paint containment (it would cut the ring), lifted above its neighbours. */
+html[data-ytc-tv] .c:focus-within{content-visibility:visible;transform:scale(calc(1 + .06 * var(--mv)));z-index:3}
+html[data-ytc-tv] .th{border-radius:.625rem;outline:var(--ring) solid transparent;outline-offset:.1875rem;transition:none}
+html[data-ytc-tv] .c:focus-within .th{outline-color:var(--ac)}
+html[data-ytc-tv] .th::after{display:none}
+html[data-ytc-tv] .th b{right:.375rem;bottom:.375rem;padding:.0625rem .3125rem;border-radius:.3125rem;font-size:.6875rem;line-height:1rem}
+html[data-ytc-tv] .th i{height:.1875rem}
+html[data-ytc-tv] .d{padding-top:.625rem}
+html[data-ytc-tv] #ytc .t{font-size:.875rem;line-height:1.09375rem;max-height:2.1875rem;font-weight:500;letter-spacing:0}
+html[data-ytc-tv] #ytc .m{font-size:.75rem;line-height:1rem;margin-top:.25rem;color:var(--mu)}
+html[data-ytc-tv] #ytc .c:focus-within .t{color:var(--ac)}
+html[data-ytc-tv] #ytc .th>img,html[data-ytc-tv] #ytc .th>.pv{scale:none;transition:none}
+html[data-ytc-tv] .sk .t i,html[data-ytc-tv] .sk .m i{height:.75rem;margin:.25rem 0;border-radius:.25rem}html[data-ytc-tv] .sk .t i+i{margin-top:.375rem}
+html[data-ytc-tv] .sk .t{height:2.1875rem}
+html[data-ytc-tv] #ytc .feed>.empty{margin:6rem 0 0;text-align:center;font-size:1rem;line-height:1.5rem;color:var(--mu)}
+/* Topic chips: one focusable row on top (it scrolls sideways under the focus; its padding holds the ring). */
+html[data-ytc-tv] .fx-top{gap:.75rem}
+html[data-ytc-tv] .fx-tc{gap:.75rem;padding:.625rem .75rem;margin:-.625rem -.75rem;scroll-padding:0 .75rem}
+html[data-ytc-tv] #ytc .fx-ch{height:2.25rem;padding:0 1.125rem;border-radius:1.125rem;font-size:.875rem;line-height:2.25rem;font-weight:500}
+html[data-ytc-tv] #ytc .fx-ch:focus:not([aria-pressed=true]){background:var(--hv)}
+html[data-ytc-tv] #ytc .fx-note{font-size:.75rem}
+/* Channel and playlist headers. */
+html[data-ytc-tv] #ytc .ch{gap:1.25rem;min-height:4rem;margin:0 0 1.5rem;position:relative;z-index:7}
+html[data-ytc-tv] .ch .av.lg{width:4rem;height:4rem}
+html[data-ytc-tv] #ytc .ch h1{font-size:1.75rem;line-height:2.25rem;margin:0}
+html[data-ytc-tv] #ytc .ch .m{font-size:.875rem;line-height:1.25rem}
+html[data-ytc-tv] #ytc .ch .about{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;white-space:normal;max-width:40rem}
+html[data-ytc-tv] #ytc .feed>h2{display:none}
+/* "New videos" and "Load more". */
+html[data-ytc-tv] #ytc-pill{display:none}
+html[data-ytc-tv] #ytc .pill{height:2.25rem;padding:0 1.25rem;border-radius:1.125rem;font-size:.875rem}
+
+/* ---- calm cards (signed-out Home, sign-in needed, a failed page) */
+html[data-ytc-tv] .tvpc{display:grid;place-items:center;min-height:calc(100vh - 2 * var(--sy) - 4rem)}
+html[data-ytc-tv] .tvcd{width:30rem;box-sizing:border-box;padding:2.25rem 2.5rem;border-radius:1.25rem;background:var(--pn);display:grid;gap:1rem;justify-items:start}
+html[data-ytc-tv] .tvcd .lmk{width:2.5rem;height:2.5rem}
+html[data-ytc-tv] #ytc .tvcd h2{margin:0;font-size:1.75rem;line-height:2.125rem;font-weight:600;letter-spacing:-.015em}
+html[data-ytc-tv] .tvcd p{margin:0;font-size:.875rem;line-height:1.3125rem;color:var(--mu)}
+html[data-ytc-tv] .tvbs{display:flex;gap:1rem;margin-top:.5rem}
+html[data-ytc-tv] #ytc .tvb{display:inline-flex;align-items:center;gap:.625rem;height:2.75rem;padding:0 1.5rem;border:0;border-radius:1.375rem;background:var(--ac);color:var(--bg);font:600 .9375rem/1 var(--tvf);white-space:nowrap;text-decoration:none}
+html[data-ytc-tv] #ytc .tvb svg{width:1.125rem;height:1.125rem;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round}
+html[data-ytc-tv] #ytc .tvb.tvx{background:var(--cb);color:var(--tx)}
+html[data-ytc-tv] #ytc .tvb.tvx:focus{background:var(--hv)}
+
+/* ---- search: the header is the search screen (the field, the hint, recent searches and suggestions) while open,
+   and the results page's top (the query in its field: ↑ reaches it). */
+html[data-ytc-tv] #ytc-top{display:none;position:absolute;z-index:7;top:0;left:0;right:0;height:auto;padding:calc(var(--sy) + .5rem) 3.75rem 0 7.75rem;background:none}
+html[data-ytc-tv] #ytc[data-nav=search] #ytc-top{display:block}
+html[data-ytc-tv] #ytc[data-tvq="1"] #ytc-top{display:block;position:fixed;bottom:0;z-index:25;background:var(--bg)}
+html[data-ytc-tv] #ytc[data-nav=search] #ytc-main{padding-top:calc(var(--sy) + 4.625rem)}
+html[data-ytc-tv] #ytc[data-nav=search] .fh{min-height:0;margin:0}
+html[data-ytc-tv] #ytc .tr{display:none}
+html[data-ytc-tv] #ytc-search{height:auto;display:flex;flex-direction:column;align-items:stretch;--qw:0px}
+html[data-ytc-tv] #ytc-search>*{order:2}html[data-ytc-tv] #ytc #ytc-q{order:0;flex:none}
+html[data-ytc-tv] #ytc-search .qf{display:none}
+html[data-ytc-tv] #ytc #ytc-q{display:block;width:100%;height:3rem;box-sizing:border-box;margin:0;padding:0 1.25rem 0 3.5rem;border:.0625rem solid var(--bd);border-radius:1.5rem;background:var(--rs);color:var(--tx);font:400 1.125rem/1 var(--tvf);outline:none;transition:scale var(--d-pop) var(--e-out)}
+html[data-ytc-tv] #ytc #ytc-q::placeholder{color:var(--fa)}
+html[data-ytc-tv] #ytc #ytc-q:focus{background:var(--cb);outline:var(--ring) solid var(--ac);outline-offset:.1875rem}
+html[data-ytc-tv] #ytc-search .qs{position:absolute;left:1.25rem;top:.875rem;width:1.25rem;height:1.25rem;padding:0;border:0;background:none;color:var(--mu);pointer-events:none}
+html[data-ytc-tv] #ytc-search .qs svg{width:1.25rem;height:1.25rem;display:block;fill:none;stroke:currentColor;stroke-width:2}
+html[data-ytc-tv] #ytc[data-tvq="1"] #ytc-search::after{content:"OK opens the keyboard · its microphone dictates";order:1;display:block;margin:.75rem 0 0 1.25rem;font-size:.75rem;color:var(--mu)}
+html[data-ytc-tv] #ytc #ytc-sug{display:none;position:static;width:30rem;margin:1.5rem 0 0;padding:0;visibility:visible;opacity:1;pointer-events:auto}
+html[data-ytc-tv] #ytc[data-tvq="1"] #ytc-sug.on:not(:empty){display:grid;gap:.25rem}
+html[data-ytc-tv] #ytc #ytc-sug::before{content:"Recent and suggested";position:static;clip-path:none;background:none;margin:0 0 .375rem 1rem;font-size:.75rem;font-weight:600;color:var(--mu);letter-spacing:.04em;text-transform:uppercase}
+html[data-ytc-tv] #ytc #ytc-sug::after{display:none}
+html[data-ytc-tv] #ytc .sg:nth-child(n+8){display:none}
+html[data-ytc-tv] #ytc .sg{border-radius:.75rem;background:none;opacity:1;translate:none;transition:none}
+html[data-ytc-tv] #ytc .sg a{height:2.5rem;gap:.875rem;padding:0 1rem;border-radius:.75rem;font-size:.9375rem;color:var(--tx);transition:scale var(--d-pop) var(--e-out)}
+html[data-ytc-tv] #ytc .sg a:focus{background:var(--cb);outline-offset:.125rem;scale:calc(1 + .02 * var(--mv))}
+html[data-ytc-tv] #ytc .sg svg{width:1.125rem;height:1.125rem;stroke:var(--mu)}
+html[data-ytc-tv] #ytc .sg a:focus svg{stroke:var(--ac)}
+html[data-ytc-tv] #ytc .sgx{opacity:1;width:2.5rem;height:2.5rem;border-radius:1.25rem;margin-left:.5rem;background:none;color:var(--mu)}
+html[data-ytc-tv] #ytc .sgx svg{width:1rem;height:1rem;margin:auto}
+html[data-ytc-tv] #ytc .sgx:focus{background:var(--cb);color:var(--tx)}
+
+/* ---- the player: full screen at once; the overlay (title and channel, time, seek bar, buttons) shows on any key
+   and hides 4 s after the last one while playing (.idle). ↓ from the buttons slides it up for the Up next row. */
+html[data-ytc-tv] #ytc[data-nav=watch] #ytc-main{padding:0}
 html[data-ytc-tv] #ytc[data-nav=watch] #ytc-top{display:none}
-html[data-ytc-tv] #ytc[data-nav=watch] #ytc-main{padding:0 0 var(--tvy)}
-html[data-ytc-tv] .watch,html[data-ytc-tv] .watch.theater{grid-template-columns:minmax(0,1fr);gap:20px}
-html[data-ytc-tv] .wp,html[data-ytc-tv] .watch.theater .wp{max-width:none;width:100vw;margin:0}
-html[data-ytc-tv] .watch .player{width:100vw;height:100vh;aspect-ratio:auto;border-radius:0}
-html[data-ytc-tv] .watch>:not(.wp),html[data-ytc-tv] #ytc-info{padding:0 var(--tvx)}
-/* The bar's buttons ring outwards (3 + 1 px, lifted 8 %) and the playhead knob overhangs the track's ends: 10 px more
-   inside keeps both in the safe area. */
-html[data-ytc-tv] .pctl{padding:0 calc(var(--tvx) + 10px) var(--tvy)}
-html[data-ytc-tv] #ytc-player:focus{outline:none}
-html[data-ytc-tv] .player.idle:has(.pctl :focus) .pctl{opacity:1;transition-duration:var(--d-pop)}
+html[data-ytc-tv] .watch,html[data-ytc-tv] .watch.theater{display:block}
+html[data-ytc-tv] .wp,html[data-ytc-tv] .watch.theater .wp{max-width:none;width:auto;margin:0}
+html[data-ytc-tv] #ytc .watch .player{position:fixed;inset:0;z-index:10;width:auto;height:auto;aspect-ratio:auto;border-radius:0;container-type:size}
+html[data-ytc-tv] .player video{object-fit:contain}
+html[data-ytc-tv] .player .pov{cursor:default}
+/* The top: title and channel over a scrim. */
+html[data-ytc-tv] #ytc-info{position:fixed;z-index:11;left:var(--sx);top:var(--sy);width:42rem;padding:0;pointer-events:none;transition:opacity var(--d-pop) var(--e-out)}
+html[data-ytc-tv] .watch .wp::before{content:"";position:fixed;z-index:11;left:0;right:0;top:0;height:10rem;background:linear-gradient(rgba(10,13,14,.82),rgba(10,13,14,0));pointer-events:none;transition:opacity var(--d-pop) var(--e-out)}
+html[data-ytc-tv] .wp:has(#ytc-player.idle)::before,html[data-ytc-tv] .wp:has(#ytc-player.menu)::before,html[data-ytc-tv] #ytc-player.idle~#ytc-info,html[data-ytc-tv] #ytc-player.menu~#ytc-info,html[data-ytc-tv] #ytc:has(#ytc-tvinfo.on) #ytc-info,html[data-ytc-tv] .wp:has(.pfail)::before,html[data-ytc-tv] #ytc-player:has(.pfail)~#ytc-info{opacity:0;transition:opacity var(--d-spring-soft) var(--spring)}
+html[data-ytc-tv] #ytc .wt{margin:0;font-size:1.5rem;line-height:1.875rem;font-weight:600;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+html[data-ytc-tv] #ytc-info .wo{display:flex;align-items:center;gap:.625rem;margin-top:.5rem;min-height:1.5rem}
+html[data-ytc-tv] #ytc-info .wo .av{width:1.5rem;height:1.5rem;border-radius:50%}
+html[data-ytc-tv] #ytc-info .wc{font-size:.9375rem;color:var(--mu)}
+html[data-ytc-tv] #ytc-info :is(.wn .m,.wsub,.wa,.desc,.ych){display:none}
+/* The bottom: time row, the thick seek bar, the round buttons. */
+html[data-ytc-tv] .pctl{z-index:12;padding:6rem 3.625rem 2.1875rem;background:linear-gradient(rgba(10,13,14,0),rgba(10,13,14,.9) 70%);transition:opacity var(--d-pop) var(--e-out),transform var(--d-panel) var(--e-out)}
+html[data-ytc-tv] .player.idle .pctl{transition:opacity var(--d-spring-soft) var(--spring),transform var(--d-panel) var(--e-out)}
 html[data-ytc-tv] .player:has(.pctl :focus),html[data-ytc-tv] .player:has(.pctl :focus) *{cursor:default!important}
-html[data-ytc-tv] .pctl .pb:focus,html[data-ytc-tv] .pctl button:focus{outline:3px solid var(--ac);outline-offset:1px;border-radius:var(--r-ctl);scale:calc(1 + .08 * var(--mv));transition:scale var(--d-pop) var(--e-out)}
-html[data-ytc-tv] .pvol{display:none}
-/* Player menus: the focused row rings inside the scrolling list (an outer ring and the lift would be cut by it). */
-html[data-ytc-tv] #ytc #ytc-menu.pmenu button:focus{outline-offset:-3px;scale:1}
-/* Menus keep the desktop geometry relative to the bar, which sits var(--tvx) - 2px further in and var(--tvy) - 4px
-   higher on TV (padding tvx + 10 / tvy instead of 12 / 4): Speed and Quality stay centred over their shortcuts. */
-html[data-ytc-tv] .pmenu{right:calc(var(--tvx) + 10px);bottom:calc(var(--tvy) + 60px);width:min(304px,calc(100% - 2 * var(--tvx) - 20px))}
-html[data-ytc-tv] .pmenu[data-m=speed]{width:144px;right:calc(176px - 72px + var(--tvx) - 2px)}
-html[data-ytc-tv] .pmenu[data-m=quality]{width:216px;right:calc(122px - 108px + var(--tvx) - 2px)}
-html[data-ytc-tv] .pmi{max-height:calc(100cqh - 2 * var(--tvy) - 60px)}
-/* The caption window and the skip button stay inside the safe area (the video itself is full-bleed). */
-html[data-ytc-tv] .pcw{left:max(var(--tvx),calc(var(--cx,.03) * 100%));top:max(var(--tvy),calc(var(--cy,.05) * 100%));max-width:calc(100% - max(var(--tvx),calc(var(--cx,.03) * 100%)) - var(--tvx))}
-html[data-ytc-tv] .psbt{left:calc(var(--tvx) + 10px);bottom:calc(var(--tvy) + 64px)}
-/* Account control and the device sign-in panel. */
-html[data-ytc-tv] .tva{display:flex;align-items:center;gap:8px;height:40px;padding:0 16px 0 12px;border:0;border-radius:20px;background:var(--cb);color:var(--tx);font:inherit;font-size:16px}
-html[data-ytc-tv] .tva svg{width:22px;height:22px;display:block;fill:none;stroke:currentColor;stroke-width:1.8}
-html[data-ytc-tv] .tva.on{background:transparent}
-html[data-ytc-tv] #ytc .tvb{height:44px;padding:0 22px;border:0;border-radius:22px;background:var(--ac);color:var(--bg);font:inherit;font-size:17px;font-weight:600}
-html[data-ytc-tv] #ytc .hero .tvh{margin-top:16px}
-html[data-ytc-tv] #ytc .tvb.tvx{background:var(--cb);color:var(--tx);font-weight:500}
-.tvs{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:color-mix(in srgb,var(--bg) 72%,transparent);opacity:0;visibility:hidden;transition:opacity var(--d-pop-out) var(--e-out),visibility 0s var(--d-pop-out)}
+html[data-ytc-tv] .ptr{display:flex;align-items:baseline;gap:.75rem;margin:0 0 .625rem;font-size:.875rem;line-height:1.25rem;font-variant-numeric:tabular-nums}
+html[data-ytc-tv] .ptr .ptime{margin:0;font-size:.875rem;color:var(--tx)}
+html[data-ytc-tv] .ptr .pchap{display:block;max-width:30rem;height:auto;margin:0;padding:0;font-size:.875rem;line-height:1.25rem;color:var(--mu);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+html[data-ytc-tv] .ptr .pchap[data-n="0"]{display:none}
+html[data-ytc-tv] .ptr .pchap::before{content:"·";margin-right:.75rem}html[data-ytc-tv] .ptr .pchap::after{content:none}
+html[data-ytc-tv] .ptr .prem{margin-left:auto;color:var(--tx)}
+html[data-ytc-tv] .player.live .prem{display:none}
+html[data-ytc-tv] .ptr .plive{margin-left:auto;height:1.5rem;padding:0 .625rem;font-size:.75rem;border-radius:.375rem}
+html[data-ytc-tv] .pseek{height:1.25rem;outline:none!important}
+html[data-ytc-tv] .psegs{height:.25rem;transform-origin:50% 50%;transition:transform var(--d-pop) var(--e-out)}
+html[data-ytc-tv] .pseek:focus .psegs{transform:scaleY(1.5)}
+html[data-ytc-tv] .pbar{border-radius:.125rem}html[data-ytc-tv] .pbar:not(:last-child){--g:.1875rem}
+html[data-ytc-tv] .pbuf{background:rgba(237,243,243,.4)}
+html[data-ytc-tv] .pknob::before{left:-.5rem;top:-.5rem;width:1rem;height:1rem;box-shadow:0 0 0 .25rem color-mix(in srgb,var(--ac) 28%,transparent)}
+html[data-ytc-tv] .pseek:focus .pknob::before{opacity:1;transform:none;transition:opacity var(--d-press) var(--e-out),transform var(--d-pop) var(--e-out)}
+/* Scrubbing (←/→ on the bar): the storyboard frame and the target time ride above the bar. */
+html[data-ytc-tv] .ptip{bottom:calc(100% + 2.75rem);max-width:min(12rem,100cqw);font:500 .875rem/1.25rem var(--tvf)}
+html[data-ytc-tv] .pti{max-width:min(12rem,100cqw);padding:.25rem .5rem .375rem;border-radius:.625rem}
+html[data-ytc-tv] .ptip::before{border-radius:.625rem}
+html[data-ytc-tv] .ptip .ptf{width:10rem;margin:.25rem 0 .375rem;border-radius:.375rem}
+html[data-ytc-tv] .ptip b{font-size:.75rem}
+html[data-ytc-tv] .prow{gap:1rem;height:3rem;margin-top:1.5rem}
+html[data-ytc-tv] #ytc .prow .pb,html[data-ytc-tv] #ytc-player .pslot .wl{display:grid;place-items:center;width:3rem;height:3rem;margin:0;padding:0;border:0;border-radius:1.5rem;background:rgba(33,43,46,.85);color:var(--tx);opacity:1;transition:scale var(--d-pop) var(--e-out),background-color var(--d-press) var(--e-out),color var(--d-press) var(--e-out)}
+html[data-ytc-tv] #ytc .prow .pb.pw{width:auto;min-width:3rem;padding:0 1.125rem;box-sizing:border-box}
+html[data-ytc-tv] #ytc .prow .pb svg,html[data-ytc-tv] #ytc-player .pslot .wl svg{width:1.375rem;height:1.375rem}
+html[data-ytc-tv] #ytc .prow .plbl{font:600 .875rem/1 var(--tvf)}
+html[data-ytc-tv] #ytc .prow .plbl.pq{padding:0;border:0;font-size:.875rem;letter-spacing:0}
+html[data-ytc-tv] #ytc .prow :is(.pb,.wl):focus{background:var(--ac);color:var(--bg);outline:var(--ring) solid var(--ac);outline-offset:.1875rem;scale:calc(1 + .08 * var(--mv))}
+html[data-ytc-tv] #ytc .prow .pb:active{transform:none}
+html[data-ytc-tv] .pslot{display:contents}
+html[data-ytc-tv] .watch:not(:has(#ytc-like)) .tvlk,html[data-ytc-tv] #ytc:not(:has(#ytc-acct [data-act=tv-account])) .tvlk{display:none}
+html[data-ytc-tv] .watch:has(#ytc-like[aria-pressed=true]) .tvlk:not(:focus){color:var(--ac)}
+html[data-ytc-tv] .watch:has(#ytc-like[aria-pressed=true]) .tvlk svg{fill:currentColor;fill-opacity:.2}
+html[data-ytc-tv] #ytc-player .pslot .wl.saved:not(:focus),html[data-ytc-tv] #ytc-player .pslot .wl.on:not(:focus){color:var(--ac)}
+html[data-ytc-tv] .player.big:not(.wait) .pbig{opacity:0}
+html[data-ytc-tv] .pbig{width:5rem;height:5rem;margin:-2.5rem}html[data-ytc-tv] .pbig svg{width:2.5rem;height:2.5rem}
+html[data-ytc-tv] .pfx{width:4rem;height:4rem;margin:-2rem}html[data-ytc-tv] .pfx svg{width:2rem;height:2rem}
+html[data-ytc-tv] .ptoast{top:var(--sy);left:auto;right:var(--sx);transform:none;animation:none!important;padding:.375rem 1.25rem;border-radius:1.125rem;font-size:.875rem;line-height:1.5rem;background:color-mix(in srgb,var(--pn) 94%,transparent)}
+html[data-ytc-tv] .pstuck{top:calc(var(--sy) + 6.25rem);right:var(--sx);padding:.375rem .375rem .375rem 1rem;border-radius:1.5rem;gap:.5rem;font-size:.75rem}
+html[data-ytc-tv] .pstuck .pfbt{height:2rem;padding:0 .875rem;font-size:.75rem}
+/* Up next: ↓ from the buttons (the focus inside .wr). The countdown after the video sits bottom-right. */
+html[data-ytc-tv] .wr{position:fixed;z-index:13;left:0;right:0;bottom:0;width:auto;max-width:none;margin:0;padding:0;pointer-events:none}
+html[data-ytc-tv] .wr #ytc-list.rel{display:flex;background:linear-gradient(rgba(10,13,14,0),rgba(10,13,14,.92) 2.5rem);gap:1.25rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;margin:0;padding:2.75rem 3.75rem calc(var(--sy) + .75rem);scroll-padding:0 3.75rem;opacity:0;transform:translateY(calc(3rem * var(--mv)));transition:opacity var(--d-pop-out) var(--e-out),transform var(--d-pop-out) var(--e-out)}
+html[data-ytc-tv] .wr #ytc-list.rel::before{content:"Up next";position:absolute;left:3.75rem;top:1rem;font-size:.75rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--mu)}
+html[data-ytc-tv] .watch:has(.wr #ytc-list :focus) .wr #ytc-list.rel{opacity:1;transform:none;pointer-events:auto;transition-duration:var(--d-panel)}
+html[data-ytc-tv] .watch:has(.wr #ytc-list :focus) .pctl{transform:translateY(-10rem)}
+html[data-ytc-tv] .watch:has(.wr #ytc-list :focus) .pcw{opacity:0}
+html[data-ytc-tv] .rel .c{display:block;flex:none;width:8.5rem;margin:0;contain-intrinsic-size:auto 7.5rem}
+html[data-ytc-tv] .rel .th{border-radius:.5rem}
+html[data-ytc-tv] #ytc .rel .t{font-size:.75rem;line-height:1rem;max-height:2rem;margin-top:.5rem}
+html[data-ytc-tv] #ytc .rel .m{display:none}
+html[data-ytc-tv] .rel .d{padding:0}
+html[data-ytc-tv] .rel .more{display:none}
+html[data-ytc-tv] .wr .more{display:none}
+html[data-ytc-tv] #ytc-up .upc{position:fixed;z-index:14;right:3.375rem;bottom:9.25rem;max-width:30rem;box-sizing:border-box;margin:0;padding:1rem 1.25rem;line-height:1.25rem;gap:.75rem;border-radius:1rem;font-size:.875rem;background:var(--pn);pointer-events:auto}
+html[data-ytc-tv] #ytc-up .upc b{flex-basis:100%;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+html[data-ytc-tv] #ytc-up .upc .pill{height:2.5rem;padding:0 1.25rem;font-size:.875rem}
+html[data-ytc-tv] #ytc-up .upc .lnk2{height:2.5rem;padding:0 1rem;border-radius:1.25rem;font-size:.875rem}
+/* Menus (Speed, Quality, Captions): a panel from the right edge, the current value focused; Back closes it. */
+html[data-ytc-tv] #ytc .pmenu{position:fixed;z-index:15;top:0;right:0;bottom:0;left:auto;width:19.5rem;filter:none;font-size:.9375rem;transform:translateX(calc(3rem * var(--mv)));transform-origin:100% 50%}
+html[data-ytc-tv] #ytc .player.menu .pmenu{transform:none}
+html[data-ytc-tv] #ytc .pmenu::before{inset:0!important;border:0;border-radius:0;background:var(--pn);box-shadow:-2rem 0 3rem rgba(0,0,0,.45)}
+html[data-ytc-tv] #ytc .pmi{max-height:none;height:100%;box-sizing:border-box;padding:var(--sy) var(--sx) var(--sy) 1.5rem;gap:.25rem;overflow:auto;border-radius:0;clip-path:none!important}
+html[data-ytc-tv] #ytc .pmi::before{display:block;margin:0 0 .75rem;font-size:1.125rem;line-height:1.5rem;font-weight:600;color:var(--tx);opacity:1}
+/* (The codec choice stays a desktop setting: the TV plays what the set decodes best.) */
+html[data-ytc-tv] #ytc .pmenu .mco{display:none}
+html[data-ytc-tv] #ytc .pmenu[data-m=speed] .pmi::before{content:"Playback speed"}
+html[data-ytc-tv] #ytc .pmenu[data-m=quality] .pmi::before{content:"Quality"}
+html[data-ytc-tv] #ytc .pmenu[data-m=cc] .pmi::before{content:"Captions and audio"}
+html[data-ytc-tv] #ytc .pmenu[data-m=sb] .pmi::before{content:"Segment skipping"}
+html[data-ytc-tv] #ytc .pmenu button{min-height:2.5rem;padding:0 1rem;border-radius:.75rem;font-size:.9375rem;transform:none;text-align:left}
+html[data-ytc-tv] #ytc .pmenu :is(.mpre,.mql,.mls) button{display:flex;align-items:center;justify-content:space-between}
+html[data-ytc-tv] #ytc .pmenu :is(.mpre,.mql,.mls) button.on::after{content:"";width:1rem;height:.5rem;margin:-.25rem .125rem 0 0;border:solid currentColor;border-width:0 0 .1875rem .1875rem;rotate:-45deg;background:none;border-radius:0}
+html[data-ytc-tv] #ytc .pmenu button.on{background:none;color:var(--ac);font-weight:600}
+html[data-ytc-tv] #ytc .pmenu button:focus{background:var(--cb);outline:var(--ring) solid var(--ac);outline-offset:calc(-1 * var(--ring))}
+html[data-ytc-tv] #ytc .pmenu .pmk{display:none}
+html[data-ytc-tv] #ytc .pmenu :is(.mpre,.mql,.mls,.mco,.mvl){max-height:none;overflow:visible;gap:.25rem}
+html[data-ytc-tv] #ytc .pmenu .mrt{gap:.5rem;margin-bottom:.5rem}
+html[data-ytc-tv] #ytc .pmenu .mrt button{min-width:3rem;padding:0;justify-content:center;text-align:center;text-overflow:clip;overflow:visible}
+html[data-ytc-tv] #ytc .pmenu .mrt b{font-size:1rem}
+html[data-ytc-tv] #ytc .pmenu [data-hov=dw]::before{display:none}
+/* Captions: bottom centre, large, inside the safe area; above the controls while the overlay shows. */
+html[data-ytc-tv] .pcw{left:50%;top:auto;bottom:2.25rem;max-width:46rem;justify-content:center;transform:translateX(-50%);transition:transform var(--d-panel) var(--e-out),opacity var(--d-pop) var(--e-out)}
+html[data-ytc-tv] .player:not(.idle) .pcw{transform:translateX(-50%) translateY(-7.75rem)}
+html[data-ytc-tv] .player.drag .pcw{opacity:0}
+html[data-ytc-tv] #ytc:has(#ytc-tvinfo.on) .pcw{opacity:0}
+html[data-ytc-tv] .pcc{font-size:calc(1.625rem * var(--cs,1));line-height:1.3;text-align:center;cursor:default}
+/* The skip notice (SponsorBlock): large, bottom right, its button a focus stop (↑ from the buttons). */
+html[data-ytc-tv] .psbt{left:auto;right:3.375rem;bottom:2.25rem;height:2.75rem;gap:.75rem;padding:0 .5rem 0 1.25rem;border-radius:1.375rem;font-size:.9375rem;background:color-mix(in srgb,var(--pn) 94%,transparent);transition:opacity var(--d-panel) var(--e-out),transform var(--d-panel) var(--e-out),visibility 0s var(--d-panel)}
+html[data-ytc-tv] .player:not(.idle) .psbt{transform:translateY(-7.75rem)}
+html[data-ytc-tv] .psbt::before{width:.5rem;height:.5rem}
+html[data-ytc-tv] #ytc .psbt button{height:2rem;padding:0 1rem;border-radius:1rem;background:var(--ac);color:var(--bg);font-size:.875rem;font-weight:600}
+/* Failure and offline: the panel in the middle, large, its first action focused. */
+html[data-ytc-tv] .pfail{max-width:32rem;height:auto;padding:2.25rem 2.5rem;border-radius:1.25rem;gap:0;background:var(--pn)}
+html[data-ytc-tv] .wp:has(.pfail)::before,html[data-ytc-tv] #ytc-player:has(.pfail)~#ytc-info{transition:none}
+html[data-ytc-tv] .pfm{font:600 1.375rem/1.75rem var(--tvf)}
+html[data-ytc-tv] .pfr{margin-top:.625rem;font:.6875rem/1rem ui-monospace,Menlo,monospace;max-height:4rem;overflow:hidden}
+html[data-ytc-tv] .pfb{gap:1rem;margin-top:1.5rem}
+html[data-ytc-tv] #ytc .pfbt{height:2.75rem;padding:0 1.5rem;border-radius:1.375rem;font-size:.9375rem}
+/* More info: the description as a panel from the right (↑/↓ scroll it). */
+html[data-ytc-tv] .tvi{position:fixed;z-index:16;top:0;right:0;bottom:0;width:26rem;box-sizing:border-box;padding:var(--sy) var(--sx) var(--sy) 1.5rem;overflow:auto;scrollbar-width:none;background:var(--pn);box-shadow:-2rem 0 3rem rgba(0,0,0,.45);opacity:0;visibility:hidden;transform:translateX(calc(3rem * var(--mv)));transition:opacity var(--d-pop-out) var(--e-out),transform var(--d-pop-out) var(--e-out),visibility 0s var(--d-pop-out)}
+html[data-ytc-tv] .tvi.on{opacity:1;visibility:visible;transform:none;transition:opacity var(--d-panel) var(--e-out),transform var(--d-panel) var(--e-out),visibility 0s}
+html[data-ytc-tv] #ytc .tvi h2{margin:0 0 .5rem;font-size:1.125rem;line-height:1.5rem;font-weight:600}
+html[data-ytc-tv] .tvi>.m{margin:0 0 1rem;font-size:.75rem;color:var(--mu);white-space:normal}
+html[data-ytc-tv] .tvd{font-size:.875rem;line-height:1.3125rem;white-space:pre-wrap;overflow-wrap:anywhere;border-radius:.5rem}
+html[data-ytc-tv] .tvd:focus{outline:none}
+
+/* ---- sign in and account: a full screen. */
+.tvs{position:fixed;inset:0;z-index:50;background:var(--bg);opacity:0;visibility:hidden;transition:opacity var(--d-pop-out) var(--e-out),visibility 0s var(--d-pop-out)}
 .tvs.on{opacity:1;visibility:visible;transition:opacity var(--d-panel) var(--e-out),visibility 0s}
-/* The panel stays inside the safe area at any size; its one column never grows past the panel (an unbreakable
-   status line or URL wraps instead of widening every row), and a tall state scrolls inside it. */
-.tvs .tvp{width:min(600px,calc(100vw - 2 * var(--tvx)));max-height:calc(100vh - 2 * var(--tvy));overflow-y:auto;box-sizing:border-box;padding:32px 40px;border-radius:var(--r-pop);background:var(--pn);box-shadow:var(--sh);display:grid;grid-template-columns:minmax(0,1fr);gap:14px;justify-items:start;overflow-wrap:anywhere;scale:calc(1 - .03 * var(--mv));transition:scale var(--d-panel) var(--e-out)}
-.tvs.on .tvp{scale:1}
-#ytc .tvs h2{margin:0;font-size:26px;line-height:32px;font-weight:600}
-.tvs .tvo{color:var(--mu);white-space:nowrap}
-.tvs ol{margin:0;padding-left:22px;font-size:18px;line-height:1.6}
-.tvs .tvu{color:var(--ac)}
-.tvs .tvc{margin:4px 0;font:600 52px/1.1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.08em;color:var(--ac)}
-.tvs .m,.tvs .tvst{max-width:100%;margin:0;color:var(--mu);font-size:15px;line-height:21px;white-space:normal}
-.tvs .tvx{justify-self:end}
+.tvs .tvp{position:absolute;inset:0;transform:translateY(calc(1rem * var(--mv)));transition:transform var(--d-panel) var(--e-out)}
+.tvs.on .tvp{transform:none}
+html[data-ytc-tv] .tvs .rmk b{opacity:1;translate:0}
+.tvs .tvl{position:absolute;left:7.75rem;top:6.5rem;width:27rem}
+#ytc .tvs h2{margin:0;font-size:1.75rem;line-height:2.25rem;font-weight:600;letter-spacing:-.015em}
+.tvs ol{margin:1.25rem 0 0;padding:0;list-style:none;counter-reset:s;display:grid;gap:.375rem;font-size:.9375rem;line-height:1.375rem;color:var(--mu)}
+.tvs ol li{counter-increment:s}.tvs ol li::before{content:counter(s) " · "}
+.tvs .tvu{display:block;margin:.125rem 0 .625rem;font-size:1.25rem;line-height:1.75rem;font-weight:600;color:var(--tx);overflow-wrap:anywhere}
+.tvs .tvc{margin:.375rem 0 0;font:600 3.25rem/1.1 ui-monospace,"SF Mono",Menlo,"Roboto Mono",monospace;letter-spacing:.08em;color:var(--ac);white-space:nowrap}
+.tvs .tvst{margin:1rem 0 0;font-size:.75rem;line-height:1.125rem;color:var(--mu);overflow-wrap:anywhere}
+.tvs .tva{display:grid;place-items:center;width:4.5rem;height:4.5rem;margin-bottom:1.25rem;border-radius:50%;background:var(--on);color:var(--ac)}
+.tvs .tva svg{width:2.25rem;height:2.25rem;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
+.tvs .tvqr{position:absolute;right:7rem;top:7.25rem;width:13rem;margin:0}
+.tvs .tvq{display:block;width:13rem;height:13rem;box-sizing:border-box;padding:.75rem;border-radius:1rem;background:#edf3f3}
+.tvs .tvq path{fill:#101315}
+.tvs figcaption{margin:.75rem 0 0;text-align:center;font-size:.75rem;color:var(--mu)}
+.tvs .tvbs{position:absolute;left:7.75rem;bottom:3.5rem;margin:0}
+/* ---- About & updates: the versions, the last check, one action (focused). */
+.tvs .tvab{width:30rem}
+.tvs .tvv{display:grid;grid-template-columns:auto 1fr;gap:.5rem 1.5rem;margin:1.25rem 0 0;font-size:.875rem;line-height:1.25rem}
+.tvs .tvv dt{color:var(--mu)}.tvs .tvv dd{margin:0;color:var(--tx);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.tvs .tvus{margin-top:1.75rem;padding:1.25rem 1.5rem;border-radius:1rem;background:var(--pn);display:grid;gap:.625rem}
+.tvs .tvus b{font-size:1.25rem;line-height:1.625rem;font-weight:600}
+.tvs .tvus.ok b,.tvs .tvus.new b{color:var(--ac)}.tvs .tvus.err b{color:var(--er)}
+.tvs .tvus p{margin:0;font-size:.875rem;line-height:1.3125rem;color:var(--mu);overflow-wrap:anywhere}
+.tvs .tvus .tvun{color:var(--er)}
+.tvs .tvpg{display:block;height:.375rem;border-radius:.1875rem;background:rgba(237,243,243,.18);overflow:hidden}
+.tvs .tvpg i{display:block;height:100%;background:var(--ac);transform-origin:0 50%;transform:scaleX(var(--pg,0));transition:transform 300ms linear}
+/* The notice: top right on the pages (never over a video); the remote reaches its button. */
+.tvup{position:fixed;z-index:24;top:calc(var(--sy) + .5rem);right:3.75rem;display:flex;align-items:center;gap:.875rem;height:2.75rem;box-sizing:border-box;padding:0 .375rem 0 1.25rem;border-radius:1.375rem;background:var(--pn);box-shadow:0 .5rem 1.5rem rgba(0,0,0,.4);font-size:.875rem;font-weight:500;opacity:0;visibility:hidden;transform:translateY(calc(-.5rem * var(--mv)));transition:opacity var(--d-pop-out) var(--e-out),transform var(--d-pop-out) var(--e-out),visibility 0s var(--d-pop-out)}
+.tvup::before{content:"";width:.5rem;height:.5rem;border-radius:50%;background:var(--ac)}
+.tvup.on{opacity:1;visibility:visible;transform:none;transition:opacity var(--d-panel) var(--e-out),transform var(--d-panel) var(--e-out),visibility 0s}
+#ytc .tvup .tvb{height:2rem;padding:0 1rem;font-size:.875rem}
+#ytc[data-nav=watch] .tvup,#ytc[data-tvq="1"] .tvup{display:none}
