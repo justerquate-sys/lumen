@@ -3,7 +3,9 @@
 // native.css, rules.json — the exact files built into the APK), the APK (as lumen-tv-<version>.apk and,
 // for the first-install link, lumen-tv.apk), and lumen-tv-manifest.json with
 // its ed25519 signature (lumen-tv-manifest.json.sig). The TV app installs a bundle only when the signature
-// matches the public key compiled into it (tv/keys/release.pub) and every SHA-256 matches.
+// matches the public key compiled into it (tv/keys/release.pub) and every SHA-256 matches. The bundle's
+// development variant content-dev.js (speed telemetry; ./build.sh --tv --dev) is signed along when it was
+// built: the app runs it only while its owner turned telemetry on (About & updates → Developer).
 //
 //   node tv/scripts/release.cjs                  build (release APK) + sign + publish to GitHub
 //   node tv/scripts/release.cjs --dry-run        build + sign into tv/out/release/, publish nothing
@@ -25,6 +27,8 @@ const tv = path.resolve(__dirname, '..'), root = path.dirname(tv);
 const args = process.argv.slice(2), has = f => args.includes(f), opt = f => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : undefined; };
 const outDir = path.join(tv, 'out', 'release');
 const FILES = ['content.js', 'client.css', 'native.css', 'rules.json'];
+// Optional: signed when present (older apps ignore it).
+const DEV_FILE = 'content-dev.js';
 const LATEST_APK = 'lumen-tv.apk';
 
 function serve(port) {
@@ -59,6 +63,11 @@ async function main() {
   const sha = b => crypto.createHash('sha256').update(b).digest('hex');
   const files = {};
   for (const f of FILES) { const b = fs.readFileSync(path.join(bundle, f)); files[f] = { sha256: sha(b), size: b.length }; fs.writeFileSync(path.join(outDir, f), b); }
+  // The development variant must be built from the same sources as content.js (tv/scripts/build.sh builds both).
+  const devPath = path.join(bundle, DEV_FILE);
+  if (fs.existsSync(devPath) && fs.statSync(devPath).mtimeMs >= fs.statSync(path.join(bundle, 'content.js')).mtimeMs - 15 * 60e3) {
+    const b = fs.readFileSync(devPath); files[DEV_FILE] = { sha256: sha(b), size: b.length }; fs.writeFileSync(path.join(outDir, DEV_FILE), b);
+  } else console.warn(`no fresh ${DEV_FILE}: the release carries no telemetry variant`);
   const manifest = { schema: 1, seq: +bseq, client, min_shell: +(process.env.MIN_SHELL || 1), files };
   if (fs.existsSync(apkPath)) {
     const apk = fs.readFileSync(apkPath);

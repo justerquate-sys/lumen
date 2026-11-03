@@ -97,13 +97,18 @@ tv/scripts/build.sh              # debug APK (arm64) → tv/out/lumen-tv-<v>-deb
 tv/scripts/build.sh --release    # release APK (arm64 + armv7, signed) → tv/out/lumen-tv-<v>.apk
 tv/scripts/build.sh --no-client  # reuse the last client bundle (shell-only changes)
 tv/scripts/run.sh                # debug build + install + launch on the attached TV/emulator
-(cd tv/core && cargo test --locked)   # the shell's logic: updates, sign-in, rules, storage
+(cd tv/core && cargo test --locked)   # the shell's logic: updates, sign-in, rules, storage, telemetry
+node tv/scripts/bench.cjs [--cpu 6] [cold reload keys hold open seek menu back]
+                                 # speed bench on the attached emulator/TV (debug builds), see "Speed"
 ```
 
 The first step is `./build.sh --tv`: the shared client built as the **public** build into
 `tv/shell/src-tauri/bundle/` (`content.js`, the extension's `client.css`, `native.css` and `rules.json`, a
 bundle sequence `seq` and the client version `client`; `browser/build.cjs --target=tv`). That folder is the
-APK's built-in client and what a release publishes; `extension/` is not touched. `SEQ=<n>` sets the
+APK's built-in client and what a release publishes; `extension/` is not touched. `./build.sh --tv --dev` adds
+`content-dev.js` there, the same client with its development-build speed telemetry: `tv/scripts/build.sh` builds
+both (the APK carries both, a release signs both), and the app runs it only while its owner turned telemetry on
+(see *Speed telemetry*). `SEQ=<n>` sets the
 sequence (default: the current Unix time; the app installs a bundle only when its `seq` is higher than the
 one it runs).
 
@@ -164,13 +169,68 @@ Testing an update locally: `node tv/scripts/release.cjs --dry-run --no-build` th
 (`"oauth": "http://10.0.2.2:<port>"` points the sign-in at a mock the same way). Release builds
 ignore `dev.json`.
 
+## Speed telemetry (the owner's TV, off by default)
+
+The TV can send the same speed telemetry as the development extension (docs/debug-center.md) to the debug center on
+your Mac, so the real device can be measured. It is **off** in every install until you turn it on, and then:
+
+- the app runs the bundle's telemetry variant (`content-dev.js`, signed with the release like the rest), the page shim
+  hands its reports (`ytcPerf` batches, `ytcIncident` reports) to the shell, and the shell POSTs them to
+  `http://<your Mac>:47321/incident`, oldest first, retrying once a minute; each report carries
+  `"platform":"tv"` and its build (`0.10.0 (…) (TV 0.2.0, release, telemetry)`), so `/perf` and `/timeline` show the TV
+  apart from the desktop (*Platform* filter, `&platform=tv`);
+- the address can only be on your own network (private IPv4, `*.local`, Tailscale's 100.64/10): never the internet;
+- reports are kept in memory only (last 30 batches, 100 incidents) and contain what the desktop's contain: timings,
+  route kinds and video ids, never titles, searches (an incident's page path loses its query), tokens, cookies or
+  the account.
+
+**Turn it on**
+
+1. On the Mac: `cd tools/debug-center && cargo build --release --locked`, then
+   `./target/release/lumen-debug-center --lan` (the default stays 127.0.0.1 only; `--lan` also listens on the network,
+   answers the TV's discovery probe and prints the address to type; devices on the network can only deliver reports,
+   the dashboards stay readable on the Mac only). macOS may ask once whether it may accept incoming connections: allow.
+2. On the TV: *About & updates* (the rail's last item) → on the **Back** button press **→ five times**: the
+   *Developer · speed telemetry* card appears on the right.
+3. *Find on network* fills in the Mac's address (or OK on the field, type it, e.g. `192.168.1.20`, and the keyboard's
+   action key), then **Turn on**. The screen loads again with telemetry and comes back to the card, which now says
+   *On* with the number of reports sent and waiting (and the last delivery error, if any).
+4. Watch it arrive: http://127.0.0.1:47321/perf?platform=tv and http://127.0.0.1:47321/timeline?platform=tv on the Mac.
+
+*Turn off* on the same card stops it at once (the queue is dropped, the public client runs again). Debug builds can
+also turn it on from `files/dev.json`: `{"telemetry": "http://10.0.2.2:47321"}` (the emulator's host).
+
+## Speed
+
+Measured on the emulator (1920×1080, DPR 2, Android 16, WebView 143, signed out, real YouTube) with
+`tv/scripts/bench.cjs`, 3 Nov 2026; before → after this round, interleaved A/B runs (the Mac was busy, so absolute
+numbers drift; the comparison does not):
+
+| Path | Before p50 / p90 | After p50 / p90 |
+|---|---|---|
+| Cold start → Home painted | 1462 / 2192 ms | 1317 / 1570 ms |
+| … YouTube's document (response) | 368 / 410 ms | 34 / 58 ms (the shell's own) |
+| Reload → Home painted | 312 / 380 ms | 223 / 434 ms |
+| D-pad press → focus painted, 6× CPU (a TV) | 144 / 493 ms (handler 93) | 53 / 74 ms (handler 23) |
+| Held arrow (20 repeats/s), 6× CPU, per repeat | 45 / 277 ms, long frames 5.6–7.6 s per 7 s | 28 / 103 ms, 1.1–2.5 s |
+| D-pad press, 1× CPU | 20 / 36 ms (handler 9) | 16 / 22 ms (handler 3) |
+
+What changed: the shell serves the document for pages the client renders (`rules::client_page`; the client stops
+YouTube's page at its first byte, so YouTube's HTML only cost a round trip; not before the WebView holds YouTube's
+visitor cookies, so the first start ever still gets YouTube's page); the document-start script is composed off the UI
+thread while the WebView starts; the focus engine measures a card by its own box (an off-screen
+`content-visibility:auto` card needs no layout for that; its title link did, one forced layout per card and key); a
+held arrow is not link intent (only where it rests: no watch prefetch for every card it passes); and two desktop
+keyboard rules with `:has(:focus-visible)` apply only where there is a pointer (`@media (any-pointer:fine)`): on every
+focus move they made the browser restyle the whole grid twice (~340 elements, 70 ms per press at a TV's CPU).
+
 ## Architecture
 
 ```
 tv/
   shell/src-tauri/        the Tauri app (Rust)
     src/lib.rs            window on https://www.youtube.com, the page's one command `ytc`
-    src/shell.rs          state: account, storage, bundle in use, update thread
+    src/shell.rs          state: account, storage, bundle in use, update thread, telemetry delivery
     src/host.rs           JNI: Kotlin → Rust (init, script, user agent, request rules) and
                           Rust → Kotlin (Keystore seal/open, bundle swap, update dialog, installer)
     src/script.rs         the document-start script: shim + client bundle; the desktop user agent
@@ -181,12 +241,15 @@ tv/
   core/                   the shell's logic without Tauri/Android, tested on the host:
     release.rs            signed manifest, verified cache, GitHub release lookup, APK download
     auth.rs               OAuth device flow of YouTube's TV client, refresh, revoke
-    rules.rs              extension/rules.json (declarativeNetRequest subset) for the WebView
+    rules.rs              extension/rules.json (declarativeNetRequest subset) for the WebView; the client's own
+                          pages (served the shell's document)
     store.rs              chrome.storage.local as a JSON file
+    tel.rs                speed telemetry to the owner's debug center (off by default; LAN only, memory only)
   shim/shim.js            the extension runtime for the page: YTC_PLATFORM/YTC_SHELL, chrome.storage
-                          and chrome.runtime, the stylesheet, keyboard-on-OK for text fields
+                          and chrome.runtime (reports to the shell while telemetry is on), the stylesheet,
+                          keyboard-on-OK for text fields
   keys/release.pub        the release public key compiled into the app
-  scripts/                env.sh, build.sh, run.sh, release.cjs, keys.sh/cdp.cjs (debug helpers)
+  scripts/                env.sh, build.sh, run.sh, release.cjs, bench.cjs (speed bench), keys.sh/cdp.cjs (debug helpers)
 ```
 
 In the shared client (`src/`): `tv.rs` (pure TV logic: spatial navigation `pick`,
@@ -204,7 +267,8 @@ layout at every resolution, rem = 1/60 of the width). Design reference: `tv/desi
 | content script at document_start (+ `client.css`/`native.css`) | `WebViewCompat.addDocumentStartJavaScript` for `https://www.youtube.com`, shim + bundle |
 | `chrome.storage.local` | shell command → `files/storage.json` |
 | declarativeNetRequest (`rules.json`) | `Interceptor.shouldInterceptRequest` → `rules.rs` (block; googlevideo fetched natively with `Access-Control-Allow-Origin: *`) |
-| background.js: incidents, dev reload, voice socket relay | off on TV (`chrome.runtime` is inert; no mic) |
+| background.js: incidents, dev reload, voice socket relay | off on TV (no mic); incidents and speed telemetry only while the owner turned telemetry on (`tel.rs`) |
+| YouTube's page as the document the content script stops | the shell's own document for the client's pages (`rules::client_page`) |
 | browser cookies (Google sign-in) | YouTube TV device sign-in; `TVHTML5` + `Authorization: Bearer` for account calls |
 
 **Account calls on TV.** Home, Subscriptions, History, Library, the account's playlists (`VL…`),
@@ -214,6 +278,11 @@ and the streams (VISIONOS) stay anonymous WEB calls as on desktop. History pings
 (`/api/stats/playback`, `watchtime`) carry the bearer and report `c=TVHTML5&cplatform=TV`.
 
 ## Risks and limits
+
+- The shell's own document (app start, reload) means YouTube's page response no longer refreshes cookies on those
+  loads; its API answers still do, and the first start ever (no visitor cookies yet) gets YouTube's page as before.
+  If YouTube ever needs its page for something (a consent step), `?yt-native=1` pages and every path outside the
+  client's (`rules::client_page`) still load it.
 
 - Whether YouTube honours every account call made with the TV token (feeds, like/subscribe, the
   watch history pings) can only be confirmed with a real sign-in; the flow up to the token is

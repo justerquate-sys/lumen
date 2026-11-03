@@ -230,6 +230,7 @@ fn summary(ev: &J) -> String {
 #[derive(Default)]
 struct PageInfo {
     version: String,
+    platform: String,
     first: f64,
     last: f64,
     events: u32,
@@ -238,7 +239,7 @@ struct PageInfo {
     loafs: u32,
 }
 
-/// `GET /timeline?since=<…>` (documents) or `GET /timeline?page=<id>` (one document's events).
+/// `GET /timeline?since=<…>&platform=<tv|desktop>` (documents) or `GET /timeline?page=<id>` (one document's events).
 pub fn page(file: &Path, q: &[(String, String)]) -> String {
     let get = |k: &str| q.iter().find(|x| x.0 == k).map(|x| x.1.as_str()).unwrap_or("");
     let now = perf::now_ms();
@@ -247,7 +248,8 @@ pub fn page(file: &Path, q: &[(String, String)]) -> String {
     let from = if want.is_empty() { perf::since(&since_s, now) } else { 0.0 };
     let mut pages: HashMap<String, PageInfo> = HashMap::new();
     let mut events: Vec<(f64, f64, J)> = Vec::new();
-    perf::scan_batches(file, from, |r, version| {
+    let platform = get("platform").to_string();
+    perf::scan_batches(file, from, &platform, |r, version| {
         let p = r.s("page").unwrap_or("").to_string();
         if !want.is_empty() && p != want {
             return;
@@ -261,6 +263,7 @@ pub fn page(file: &Path, q: &[(String, String)]) -> String {
                 let pi = pages.entry(p.clone()).or_default();
                 if pi.version.is_empty() {
                     pi.version = version.to_string();
+                    pi.platform = perf::platform_of(r).to_string();
                 }
                 let st = start_of(ev);
                 if pi.first == 0.0 || st < pi.first {
@@ -286,14 +289,18 @@ a{color:#9cc8ff}table{border-collapse:collapse;margin:6px 0}td,th{padding:2px 8p
 th{color:#999;font-weight:500}td.l{text-align:left;white-space:normal;word-break:break-all}tr:hover td{background:#1b1b1b}tr:target td{background:#26332b}\
 .ui td{color:#b7ebca}.nav td{color:#9cc8ff}.lag td{color:#e8a87c}.dim{color:#777}.bar{display:inline-block;height:7px;background:#4a7;border-radius:2px;vertical-align:middle}</style>");
     if want.is_empty() {
-        let _ = write!(h, "<h1>Timeline: documents</h1><p class=dim>One row per document (a tab's page load), newest first. <a href=/perf>dashboard</a> · window {}</p>", esc(&since_s));
-        h.push_str("<table><tr><th>document</th><th>version</th><th>started</th><th>length s</th><th>events</th><th>interactions</th><th>navigations</th><th>long frames</th></tr>");
+        let _ = write!(
+            h,
+            "<h1>Timeline: documents</h1><p class=dim>One row per document (a tab's or the TV app's page load), newest first. <a href=/perf>dashboard</a> · window {} · <a href=\"/timeline?since={0}\">TV and desktop</a> · <a href=\"/timeline?since={0}&platform=desktop\">desktop</a> · <a href=\"/timeline?since={0}&platform=tv\">TV</a></p>",
+            esc(&since_s)
+        );
+        h.push_str("<table><tr><th>document</th><th>platform</th><th>version</th><th>started</th><th>length s</th><th>events</th><th>interactions</th><th>navigations</th><th>long frames</th></tr>");
         let mut list: Vec<(&String, &PageInfo)> = pages.iter().collect();
         list.sort_by(|a, b| b.1.first.total_cmp(&a.1.first));
         for (p, i) in list.into_iter().take(PAGES) {
             let _ = write!(
                 h,
-                "<tr><td style=text-align:left><a href=\"/timeline?page={0}\">{0}</a></td><td>{1}</td><td>{2}</td><td>{3:.0}</td><td>{4}</td><td>{5}</td><td>{6}</td><td>{7}</td></tr>",
+                "<tr><td style=text-align:left><a href=\"/timeline?page={0}\">{0}</a></td><td>{8}</td><td>{1}</td><td>{2}</td><td>{3:.0}</td><td>{4}</td><td>{5}</td><td>{6}</td><td>{7}</td></tr>",
                 esc(p),
                 esc(&i.version),
                 clock(i.first),
@@ -301,7 +308,8 @@ th{color:#999;font-weight:500}td.l{text-align:left;white-space:normal;word-break
                 i.events,
                 i.acts,
                 i.navs,
-                i.loafs
+                i.loafs,
+                esc(&i.platform)
             );
         }
         h.push_str("</table>");

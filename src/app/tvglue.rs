@@ -31,6 +31,9 @@ const TRAPS: &str = "#ytc-tvabout.on,#ytc-tvsign.on,#ytc-keys.on,#ytc-imp.on,#yt
 const OPEN: &str = "#ytc-tvsign.on,#ytc-keys.on,#ytc-imp.on,#ytc-player.menu #ytc-menu,.open[id^=ytc-fx-],#ytc [aria-expanded=true]:not(#ytc-q),#ytc-chap.open";
 /// What `spatial_rects` marks: 1 = a card of the page's grid (rows keep one vertical place), 2 = the rail.
 const MARKS: &str = "#ytc-list a.t|#ytc-side *";
+/// A card's stop is measured by the card's own box: an off-screen card (`content-visibility:auto`) needs no layout
+/// for it, and every card's title link sits at the same place in its card, so rows line up as before.
+const CARD: &str = ".c";
 const PLAYER: &str = "ytc-player";
 const SEEK: &str = "ytc-seek";
 /// The overlay's button row and the Up next row (the related cards under it).
@@ -79,7 +82,17 @@ enum Call {
     Start,
     Poll { generation: u32 },
     SignOut,
+    /// Speed telemetry (About & updates → Developer): `tel_info`, `tel_set`, `tel_find`.
+    TelInfo,
+    TelSet,
+    TelFind,
 }
+
+/// About & updates → Developer: the address field's form, and the flag that reopens the screen after the page
+/// loaded again for a telemetry change (this tab's session; a UI flag only).
+pub(super) const DEV_FORM: &str = "ytc-tvdc";
+const DEV_FIELD: &str = "ytc-tvdc-q";
+const ABOUT_AGAIN: &str = "ytc:tvabout";
 
 #[derive(Default)]
 pub(super) struct Tv {
@@ -115,6 +128,14 @@ pub(super) struct Tv {
     about: bool,
     about_note: String,
     noticed: u64,
+    /// Telemetry: the shell's last answer (None with `tel_known`: an app without telemetry), the Developer section
+    /// shown, → presses in a row with nothing to the right (they reveal it), the last action's outcome.
+    tel: Option<tv::TelInfo>,
+    tel_known: bool,
+    dev: bool,
+    dev_taps: u32,
+    dev_note: String,
+    dev_err: bool,
 }
 
 impl Tv {
@@ -158,6 +179,12 @@ impl App {
         self.tv_call("shell_info", "null", Call::Info { boot: true });
         let id = self.timer(Timer::TvUpdates { fast: false });
         bridge::timer(id, UPDATES_FIRST_MS);
+        if bridge::session_get(ABOUT_AGAIN) == "1" {
+            // The page loaded again for a telemetry change made on About & updates: back on that screen.
+            bridge::session_set(ABOUT_AGAIN, "");
+            self.tv.dev = true;
+            self.tv_about_open();
+        }
         // A focus from the first frame (the rail while the page loads).
         self.tv_focus_check();
     }
@@ -322,7 +349,55 @@ impl App {
                 bridge::session_clear();
                 bridge::replace_doc("/");
             }
+            Call::TelInfo => {
+                self.tv.tel = if ok { tv::parse_tel_info(json) } else { None };
+                self.tv.tel_known = true;
+                if self.tv.tel.as_ref().is_some_and(|t| t.on) {
+                    self.tv.dev = true;
+                }
+                self.tv_about_paint();
+                if std::mem::take(&mut self.tv.dev_taps) >= tv::DEV_TAPS {
+                    // Just revealed: its first action takes the focus.
+                    bridge::focus_sel(ABOUT, ".tvdv .tvb");
+                }
+            }
+            Call::TelSet => match if ok { tv::parse_tel_info(json) } else { None } {
+                Some(t) if t.reload => {
+                    // The shell runs another script now (telemetry on or off): this page loads again with it and
+                    // comes back to this screen.
+                    bridge::session_set(ABOUT_AGAIN, "1");
+                    bridge::replace_doc(&self.url.clone());
+                }
+                Some(t) => {
+                    self.tv.tel = Some(t);
+                    let note = if self.tv.dev_note.starts_with("Found") { self.tv.dev_note.clone() } else { "Saved.".into() };
+                    self.tv_dev_note(&note, false);
+                }
+                None => self.tv_dev_note(&short(json), true),
+            },
+            Call::TelFind => match crate::json::parse_str(json).filter(|_| ok).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from)) {
+                Some(url) => {
+                    // Kept at once (the next Turn on uses it); the field shows it when the answer comes.
+                    self.tv_call("tel_set", &tv::tel_set_json(None, Some(&url)), Call::TelSet);
+                    self.tv.dev_note = format!("Found the debug center at {}.", tv::tel_addr(&url));
+                }
+                None => self.tv_dev_note(&short(json), true),
+            },
         }
+    }
+
+    fn tv_dev_note(&mut self, note: &str, err: bool) {
+        self.tv.dev_note = note.to_string();
+        self.tv.dev_err = err;
+        self.tv_about_paint();
+    }
+
+    /// The Developer section's address field was submitted (Enter / the TV keyboard's action key).
+    pub(super) fn tv_dev_submit(&mut self, value: &str) -> bool {
+        self.tv.dev_note = "Saving…".into();
+        self.tv.dev_err = false;
+        self.tv_call("tel_set", &tv::tel_set_json(None, Some(value)), Call::TelSet);
+        true
     }
 
     fn tv_poll_later(&mut self) {
@@ -402,6 +477,22 @@ impl App {
                 self.tv_call("shell_install", "null", Call::Install);
             }
             "tv-info" => self.tv_info_open(),
+            "tv-tel-on" => {
+                // (An address typed but not submitted yet goes along.)
+                let typed = bridge::input_value(DEV_FIELD);
+                let known = self.tv.tel.as_ref().map(|t| tv::tel_addr(&t.url).to_string()).unwrap_or_default();
+                let url = (!typed.trim().is_empty() && typed.trim() != known).then_some(typed);
+                self.tv_dev_note("Turning on…", false);
+                self.tv_call("tel_set", &tv::tel_set_json(Some(true), url.as_deref()), Call::TelSet);
+            }
+            "tv-tel-off" => {
+                self.tv_dev_note("Turning off…", false);
+                self.tv_call("tel_set", &tv::tel_set_json(Some(false), None), Call::TelSet);
+            }
+            "tv-tel-find" => {
+                self.tv_dev_note("Looking for the debug center on your network…", false);
+                self.tv_call("tel_find", "null", Call::TelFind);
+            }
             _ => return false,
         }
         true
@@ -490,12 +581,15 @@ impl App {
         self.tv_about_paint();
         bridge::attr(ABOUT, "class", "tvs on");
         bridge::focus_sel(ABOUT, ".tvb");
-        // Fresh from the shell (what its own check found meanwhile).
+        // Fresh from the shell (what its own check found meanwhile), and its telemetry state.
         self.tv_call("shell_info", "null", Call::Info { boot: false });
+        self.tv_call("tel_info", "null", Call::TelInfo);
     }
 
     fn tv_about_close(&mut self) {
         self.tv.about = false;
+        self.tv.dev_taps = 0;
+        self.tv.dev_note.clear();
         bridge::attr(ABOUT, "class", "tvs");
         if !bridge::focus_load("about") {
             bridge::focus_sel("ytc-side", "[data-nav=about]");
@@ -507,14 +601,23 @@ impl App {
         if !self.tv.about {
             return;
         }
-        let html = crate::render::tv_about(self.tv.shell.as_ref(), self.tv.running, &self.tv.running_client, bridge::epoch(), &self.tv.about_note);
+        // (Never under the owner's fingers: the address field keeps what is being typed until it is submitted.)
+        if bridge::any("#ytc-tvdc-q:focus") {
+            return;
+        }
+        let dev = if self.tv.dev && self.tv.tel_known { crate::render::tv_dev(self.tv.tel.as_ref(), &self.tv.dev_note, self.tv.dev_err) } else { String::new() };
+        let html = crate::render::tv_about(self.tv.shell.as_ref(), self.tv.running, &self.tv.running_client, bridge::epoch(), &self.tv.about_note, &dev);
         if html == bridge::get_html(ABOUT) {
             return;
         }
         let had = bridge::any("#ytc-tvabout :focus");
+        // The focus stays on the control with the same action (the Developer section's buttons swap: on ↔ off).
+        let act = ["tv-tel-on", "tv-tel-off", "tv-tel-find"].into_iter().find(|a| bridge::any(&format!("#ytc-tvabout [data-act={a}]:focus")));
         bridge::focus_save("about-btn");
         bridge::html(ABOUT, &html);
-        if had && !bridge::focus_load("about-btn") {
+        if let Some(a) = act {
+            bridge::focus_sel(ABOUT, &format!(".tvdv [data-act={a}],.tvdv [data-act^=tv-tel-]"));
+        } else if had && !bridge::focus_load("about-btn") {
             bridge::focus_sel(ABOUT, ".tvb");
         }
     }
@@ -881,7 +984,7 @@ impl App {
 
     /// Moves focus inside `scope` only; false when nothing lies that way.
     fn tv_move_in(&mut self, scope: &str, d: Dir) -> bool {
-        let flat = bridge::spatial_rects(scope, SEL, "", "");
+        let flat = bridge::spatial_rects(scope, SEL, "", "", CARD);
         let Some((rects, _, cur)) = split(&flat) else { return false };
         let Some(c) = cur else { return false };
         match tv::pick(rects[c], &rects, d, Some(c)) {
@@ -898,7 +1001,7 @@ impl App {
     /// never waits); entering the rail focuses this page's item and leaving it returns to where the
     /// focus was in the content.
     fn tv_move(&mut self, d: Dir) -> bool {
-        let flat = bridge::spatial_rects(TRAPS, SEL, SKIP, MARKS);
+        let flat = bridge::spatial_rects(TRAPS, SEL, SKIP, MARKS, CARD);
         let Some((rects, marks, cur)) = split(&flat) else {
             self.tv_focus_default();
             return true;
@@ -918,8 +1021,17 @@ impl App {
             if d == Dir::Up && marks[c] != 2 {
                 bridge::scroll_to(0.0);
             }
+            // About & updates: → five times where nothing lies to the right shows the Developer section.
+            if self.tv.about && d == Dir::Right && !self.tv.dev {
+                self.tv.dev_taps += 1;
+                if self.tv.dev_taps >= tv::DEV_TAPS {
+                    self.tv.dev = true;
+                    self.tv_call("tel_info", "null", Call::TelInfo);
+                }
+            }
             return true;
         };
+        self.tv.dev_taps = 0;
         let in_rail = marks[c] == 2;
         if !in_rail && marks[i] == 2 && !self.tv_search_on() {
             bridge::focus_save("content");
@@ -978,7 +1090,7 @@ impl App {
             }
         }
         // The first card whose top is in view, its row put where the first row sits.
-        let flat = bridge::spatial_rects("", SEL, SKIP, MARKS);
+        let flat = bridge::spatial_rects("", SEL, SKIP, MARKS, CARD);
         if let Some((rects, marks, _)) = split(&flat) {
             if let Some(i) = (0..rects.len()).find(|&i| marks[i] == 1 && rects[i].y >= 0.0).or_else(|| marks.iter().position(|&m| m == 1)) {
                 bridge::spatial_focus(i as u32, tv::row_scroll(&rects, &marks, usize::MAX, i));

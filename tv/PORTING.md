@@ -48,7 +48,8 @@ Every TV path is inert on desktop: `tv::on()` is false unless the TV shell set `
 
 **`src/bridge.rs`** (+ the same names in `browser/bridge.js`, inside the `YTC` object next to
 `local_flag`): `platform()`, `shell(seq, cmd, json)` (calls `YTC_SHELL.call`, answers
-`on_shell`), `back_hook()` (defines `globalThis.YTC_BACK`), `spatial_rects(scope, sel, skip)`,
+`on_shell`), `back_hook()` (defines `globalThis.YTC_BACK`), `spatial_rects(scope, sel, skip, mark, boxes)`
+(a stop inside a `boxes` ancestor — the TV passes `.c`, the card — is measured by that ancestor),
 `spatial_focus(i)`, `session_clear()`.
 
 **`src/app.rs`**

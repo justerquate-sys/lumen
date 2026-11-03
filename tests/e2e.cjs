@@ -6270,6 +6270,169 @@ chrome.runtime.onMessage.addListener(m => {
     } finally { await tvClose(tv); }
   });
 
+  await step('TV About & updates → Developer (960×540): hidden by default; → five times on the last button shows it, Off; Turn on → the page loads again into telemetry and returns to the screen, On with the address; an address submitted is saved; an app without telemetry says so', async () => {
+    const tv = await tvOpen();
+    const tel = (on, extra = {}) => JSON.stringify({ on, url: 'http://192.168.1.20:47321', dev: true, queued: 0, sent: on ? 3 : 0, error: null, ...extra });
+    const answer = (cmd, json) => tv.evaluate(([c, j]) => { for (const k of ['ytc:shell', 'e2e:tvshell']) { const t = JSON.parse(localStorage.getItem(k) || '{}'); if (j == null) delete t[c]; else t[c] = j; localStorage.setItem(k, JSON.stringify(t)); } }, [cmd, json]);
+    const text = () => tv.evaluate(() => document.getElementById('ytc-tvabout').textContent);
+    try {
+      await tv.setViewportSize({ width: 960, height: 540 });
+      await tv.evaluate(() => localStorage.removeItem('e2e:tvshell')).catch(() => {});
+      await tvGo(tv, 'code', 'https://www.youtube.com/');
+      await tv.waitForSelector('.tvpc .tvb');
+      await answer('tel_info', tel(false));
+      await tv.focus('#ytc-side .rl[data-nav=about]');
+      await tv.keyboard.press('Enter');
+      await tv.waitForSelector('#ytc-tvabout.on');
+      await tv.waitForTimeout(300);
+      assert.equal(await tv.locator('#ytc-tvabout .tvdv').count(), 0, 'hidden by default (telemetry off)');
+      assert.ok(!/telemetry/i.test(await text()), 'no word of it on the screen');
+      await tv.focus('#ytc-tvabout [data-act=tv-about-close]');
+      for (let i = 0; i < 4; i++) await tv.keyboard.press('ArrowRight');
+      await tv.waitForTimeout(200);
+      assert.equal(await tv.locator('#ytc-tvabout .tvdv').count(), 0, 'not after four');
+      await tv.keyboard.press('ArrowRight');
+      await tv.waitForSelector('#ytc-tvabout .tvdv');
+      await tv.waitForTimeout(200);
+      assert.match(await text(), /Developer · speed telemetry.*Off\./s);
+      assert.equal((await focusedInfo(tv)).cls, 'tvb', 'Turn on takes the focus: ' + JSON.stringify(await focusedInfo(tv)));
+      assert.equal(await tv.inputValue('#ytc-tvdc-q'), '192.168.1.20:47321');
+      assert.deepEqual(await tvAudit(tv, 'about developer 960'), []);
+      await tvShot(tv, 'about-developer');
+      // Turn on: the shell answers that the page must load again (its script changed); it comes back here, On.
+      await answer('tel_set', tel(true, { reload: true }));
+      await answer('tel_info', tel(true));
+      await tv.evaluate(() => { window.__e2eOld = 1; });
+      await tv.keyboard.press('Enter');
+      await tv.waitForFunction(() => !window.__e2eOld && document.querySelector('#ytc-tvabout.on .tvdv'), null, { timeout: 8000 });
+      await tv.waitForTimeout(300);
+      assert.match(await text(), /On: this TV's speed measurements go to the debug center at 192\.168\.1\.20:47321 \(3 sent, 0 waiting\)/);
+      assert.equal(await tv.locator('#ytc-tvabout [data-act=tv-tel-off]').count(), 1);
+      // A new address, submitted from the field (the TV keyboard's action key): saved, no reload.
+      await answer('tel_set', tel(true, { url: 'http://192.168.1.30:47321' }));
+      await tv.evaluate(() => { window.__e2eOld = 1; });
+      await tv.fill('#ytc-tvdc-q', '192.168.1.30');
+      await tv.press('#ytc-tvdc-q', 'Enter');
+      await tv.waitForFunction(() => /Saved\./.test(document.getElementById('ytc-tvabout').textContent), null, { timeout: 5000 });
+      assert.ok(await tv.evaluate(() => window.__e2eOld === 1), 'no reload for an address');
+      assert.equal(await tv.inputValue('#ytc-tvdc-q'), '192.168.1.30:47321');
+      // A refusal (an address outside the network) is shown as the reason.
+      await answer('tel_set', null);
+      await answer('error', 'only an address on your own network (e.g. 192.168.1.20)');
+      await tv.fill('#ytc-tvdc-q', '8.8.8.8');
+      await tv.press('#ytc-tvdc-q', 'Enter');
+      await tv.waitForFunction(() => /only an address on your own network/.test(document.querySelector('#ytc-tvabout .tvdv .tvun')?.textContent || ''), null, { timeout: 5000 });
+      // Back closes the screen; the next time it opens, the section stays (telemetry is on).
+      assert.deepEqual(await back(tv), { handled: true, exit: false });
+      await tv.focus('#ytc-side .rl[data-nav=about]');
+      await tv.keyboard.press('Enter');
+      await tv.waitForSelector('#ytc-tvabout.on .tvdv');
+      // An app from before telemetry (no tel_info): revealed, it says so; nothing else breaks.
+      await answer('tel_info', null);
+      await answer('error', 'unknown command tel_info');
+      await tvGo(tv, 'code', 'https://www.youtube.com/');
+      await tv.waitForSelector('.tvpc .tvb');
+      await tv.focus('#ytc-side .rl[data-nav=about]');
+      await tv.keyboard.press('Enter');
+      await tv.waitForSelector('#ytc-tvabout.on');
+      await tv.focus('#ytc-tvabout [data-act=tv-about-close]');
+      for (let i = 0; i < 5; i++) await tv.keyboard.press('ArrowRight');
+      await tv.waitForFunction(() => /cannot send telemetry/.test(document.querySelector('#ytc-tvabout .tvdv')?.textContent || ''), null, { timeout: 5000 });
+      await tv.evaluate(() => localStorage.removeItem('e2e:tvshell'));
+      assert.deepEqual(tv.errors, []);
+    } finally { await tvClose(tv); }
+  });
+
+  await step('TV shim (tv/shim/shim.js): the client\'s reports (ytcPerf, ytcIncident) reach the shell (tel_send) only while telemetry is on; off they go nowhere', async () => {
+    const vm = require('node:vm');
+    const shim = fs.readFileSync(path.join(__dirname, '..', 'tv', 'shim', 'shim.js'), 'utf8');
+    const run = tel => {
+      const calls = [];
+      const g = {
+        location: { hostname: 'www.youtube.com', pathname: '/', search: '' },
+        document: { adoptedStyleSheets: [] }, navigator: {}, console,
+        CSSStyleSheet: class { replaceSync() {} }, addEventListener() {},
+        __TAURI_INTERNALS__: { invoke: (cmd, a) => { calls.push([cmd, a.cmd, a.json]); return Promise.resolve('{}'); } },
+      };
+      g.window = g.top = g.globalThis = g;
+      vm.createContext(g);
+      vm.runInContext(`(() => { const CFG = ${JSON.stringify({ version: '0.2.0', version_name: 'x', tel })}; const CSS = { client: '', native: '' }; const ytcClient = () => {
+        chrome.runtime.sendMessage({ ytcPerf: '{"kind":"perf","schema":2,"events":[]}' });
+        chrome.runtime.sendMessage({ ytcIncident: '{"kind":"js-error"}' });
+        chrome.runtime.sendMessage('ytc-dev-check');
+      };\n${shim}\n})();`, g);
+      return calls.filter(c => c[1] === 'tel_send');
+    };
+    assert.deepEqual(run(false), [], 'off: nothing is handed to the shell');
+    const on = run(true);
+    assert.deepEqual(on.map(c => [c[0], JSON.parse(c[2])]), [['ytc', { perf: '{"kind":"perf","schema":2,"events":[]}' }], ['ytc', { incident: '{"kind":"js-error"}' }]]);
+  });
+
+  await step('TV focus engine: a held arrow passes cards without prefetching each one (only where it rests); the walk lands on the same cards as single presses', async () => {
+    const tv = await tvOpen();
+    try {
+      await tv.setViewportSize({ width: 960, height: 540 });
+      await tvGo(tv, 'code', 'https://www.youtube.com/results?search_query=tv+held+key');
+      await tv.waitForSelector('#ytc-list .c a.t');
+      await tv.waitForFunction(() => document.activeElement && document.activeElement.matches('#ytc-list a.t'), null, { timeout: 5000 });
+      await tv.waitForTimeout(1500); // the speculative prefetch of the cards in view has run
+      const cards = await tv.$$eval('#ytc-list .c a.t', a => a.map(e => new URL(e.href).searchParams.get('v')));
+      assert.ok(cards.length >= 16, 'enough cards: ' + cards.length);
+      const at = () => tv.evaluate(() => new URL(document.activeElement.href).searchParams.get('v'));
+      const prefetched = since => new Set(log.api.slice(since).filter(r => r.ep === 'next' || r.ep === 'player').map(r => r.body.videoId).filter(Boolean));
+      const a0 = log.api.length;
+      // Held: one press, then the key repeats (keyboard.down on a held key repeats), released on the fourth row down.
+      await tv.keyboard.down('ArrowDown');
+      for (let i = 0; i < 2; i++) { await tv.waitForTimeout(60); await tv.keyboard.down('ArrowDown'); }
+      const rest = await at();
+      await tv.waitForTimeout(300);
+      const before = prefetched(a0);
+      await tv.keyboard.up('ArrowDown');
+      await tv.waitForTimeout(600);
+      // (Four cards per row: the press went to the second row, the repeats passed the third and rest on the fourth.)
+      const passed = [cards[8]];
+      assert.equal(rest, cards[12], 'three rows down, the same card as three presses would reach');
+      for (const v of passed) assert.ok(!before.has(v), 'a card passed by the held key is not prefetched: ' + v + ' ' + JSON.stringify([...before]));
+      assert.ok(prefetched(a0).has(rest), 'where it rests is prefetched once the key is released');
+      assert.deepEqual(tv.errors, []);
+    } finally { await tvClose(tv); }
+  });
+
+  await step('debug center (tools/debug-center): 127.0.0.1 only unless started with --lan; with --lan another device can deliver reports and find it, never read them', async () => {
+    const dir = path.join(__dirname, '..', 'tools', 'debug-center');
+    const bin = path.join(dir, 'target', 'release', 'lumen-debug-center');
+    if (!fs.existsSync(bin)) require('node:child_process').execFileSync('cargo', ['build', '--release', '--locked'], { cwd: dir, stdio: 'ignore' });
+    const lan = Object.values(os.networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal);
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ytc-dc-')), 'i.ndjson');
+    const start = async (args, port) => {
+      const p = require('node:child_process').spawn(bin, [...args, file], { env: { ...process.env, YTC_DEBUG_CENTER_ADDR: `127.0.0.1:${port}` }, stdio: 'ignore' });
+      for (let i = 0; i < 50; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return p; } catch {} await new Promise(r => setTimeout(r, 50)); }
+      p.kill(); throw new Error('debug center did not start');
+    };
+    const reach = async url => { try { const r = await fetch(url, { signal: AbortSignal.timeout(1500) }); return r.status; } catch { return 0; } };
+    const port = 47390 + Math.floor(Math.random() * 8);
+    let p = await start([], port);
+    try {
+      if (lan) assert.equal(await reach(`http://${lan.address}:${port}/health`), 0, 'default: not reachable from the network');
+      assert.equal(await reach(`http://127.0.0.1:${port}/perf`), 200);
+    } finally { p.kill(); }
+    await new Promise(r => setTimeout(r, 200));
+    p = await start(['--lan'], port);
+    try {
+      if (!lan) { console.log('     (no network interface: the --lan half is covered by its unit tests)'); return; }
+      const post = await fetch(`http://${lan.address}:${port}/incident`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ build: 'x', platform: 'tv', kind: 'perf', schema: 2, page: 'e2e', events: [{ m: 'ui.act', v: 20, at: Date.now() }] }) });
+      assert.equal(post.status, 200, 'a device on the network delivers');
+      for (const r of ['/', '/perf', '/perf.json', '/timeline']) assert.equal(await reach(`http://${lan.address}:${port}${r}`), 403, 'the network never reads ' + r);
+      const rows = await (await fetch(`http://127.0.0.1:${port}/perf.json?platform=tv`)).json();
+      assert.ok(rows.some(x => x.page === 'e2e' && x.platform === 'tv'), 'read here, the TV report is a TV row');
+      // Discovery: the TV's UDP probe is answered with the port.
+      const sock = require('node:dgram').createSocket('udp4');
+      const got = await new Promise(ok => { sock.on('message', m => ok(String(m))); sock.send('LUMEN-DC?', port, lan.address); setTimeout(() => ok(''), 1500); });
+      sock.close();
+      assert.equal(got, `LUMEN-DC ${port}`);
+    } finally { p.kill(); }
+  });
+
   await step('TV player (960×540 and 1920×1080): full screen at once, overlay on any key and gone 4 s after, title/time/thick bar/round buttons in the safe area, ←/→ scrub with the storyboard frame and one seek, menus as a right panel on the current value, captions bottom-centre above the bar, the skip notice, More info, Up next, Back rules, failure and offline panels', async () => {
     const tv = await tvOpen();
     try {

@@ -236,7 +236,10 @@ body{overscroll-behavior:none;overflow-x:clip}
 /* Card hover: ring on at once, eases off; drawn inside the thumbnail (the card's content-visibility
    paint containment clipped an outside ring at the top). Press: the thumbnail gives a little. */
 .c:hover .th{outline-color:var(--hv);transition-duration:var(--d-press),0s}.c:focus-within .th{outline-color:var(--ac)}#ytc .c a.t:focus-visible{outline:0;color:var(--ac)}
-.grid:has(:focus-visible) .th{transition-duration:var(--d-press),0s}
+/* (Keyboard focus in the grid: the rings answer at once. Only where there is a pointer, i.e. not on a TV remote: a
+   `:has(:focus-visible)` flips false→true on every focus move, and the browser restyles the whole grid twice per key,
+   ~340 elements, 70 ms per D-pad press at a TV's CPU; measured 3 Nov 2026.) */
+@media (any-pointer:fine){.grid:has(:focus-visible) .th{transition-duration:var(--d-press),0s}}
 .c:has(>.th:active,>.d>.t:active)>.th{transform:scale(calc(1 - var(--pd-card) * var(--mv)))}
 .d{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:4px;align-content:start;padding-top:10px;min-width:0}
 .d>*{grid-column:1}.d>.ca{grid-column:2;grid-row:1/3;align-self:start}
@@ -944,7 +947,8 @@ body{overscroll-behavior:none;overflow-x:clip}
    without motion */
 .fx-f:hover>.fx-p,.fx-ed:hover>.fx-p,.fx-f.open>.fx-p,.fx-ed.open>.fx-p{visibility:visible;opacity:1;transform:none;clip-path:inset(-40px round 52px);transition:opacity var(--d-pop) var(--e-out),transform var(--d-spring) var(--spring),clip-path var(--d-spring) var(--spring),visibility 0s;transition-delay:40ms}
 .fx-f.open>.fx-p,.fx-ed.open>.fx-p{transition-delay:0s}
-.fx-f:has(:focus-visible)>.fx-p,.fx-ed:has(:focus-visible)>.fx-p{visibility:visible;opacity:1;transform:none;clip-path:inset(-40px round 52px);transition:none}
+/* (Not on a TV remote, where these panels are hidden: see .grid:has(:focus-visible) above.) */
+@media (any-pointer:fine){.fx-f:has(:focus-visible)>.fx-p,.fx-ed:has(:focus-visible)>.fx-p{visibility:visible;opacity:1;transform:none;clip-path:inset(-40px round 52px);transition:none}}
 .fx-p::before{content:"";position:absolute;left:0;right:0;top:-8px;height:8px}
 .fx-row{display:flex;flex-wrap:wrap;gap:6px}
 .fx-row .fx-ch{padding:5px 10px;font-size:13px;line-height:18px;border-radius:8px}
@@ -1413,6 +1417,13 @@ html[data-ytc-tv] .tvs .rmk b{opacity:1;translate:0}
 .tvs .tvus .tvun{color:var(--er)}
 .tvs .tvpg{display:block;height:.375rem;border-radius:.1875rem;background:rgba(237,243,243,.18);overflow:hidden}
 .tvs .tvpg i{display:block;height:100%;background:var(--ac);transform-origin:0 50%;transform:scaleX(var(--pg,0));transition:transform 300ms linear}
+/* Developer (hidden until revealed: → five times on the last button; or while telemetry is on): a card on the right. */
+.tvs .tvdv{position:absolute;right:3.5rem;top:6.5rem;width:15rem;margin:0}
+.tvs .tvdv b{font-size:1rem;line-height:1.375rem}
+.tvs .tvdc input{display:block;width:100%;height:2.5rem;box-sizing:border-box;margin:0;padding:0 1rem;border:.0625rem solid var(--bd);border-radius:1.25rem;background:var(--rs);color:var(--tx);font:400 .875rem/1 var(--tvf);outline:none}
+.tvs .tvdc input:focus{border-color:var(--ac);outline:var(--ring) solid var(--ac);outline-offset:.1875rem}
+.tvs .tvdb{display:flex;flex-wrap:wrap;gap:.75rem}
+#ytc .tvs .tvdb .tvb{height:2.25rem;padding:0 1rem;font-size:.8125rem}
 /* The notice: top right on the pages (never over a video); the remote reaches its button. */
 .tvup{position:fixed;z-index:24;top:calc(var(--sy) + .5rem);right:3.75rem;display:flex;align-items:center;gap:.875rem;height:2.75rem;box-sizing:border-box;padding:0 .375rem 0 1.25rem;border-radius:1.375rem;background:var(--pn);box-shadow:0 .5rem 1.5rem rgba(0,0,0,.4);font-size:.875rem;font-weight:500;opacity:0;visibility:hidden;transform:translateY(calc(-.5rem * var(--mv)));transition:opacity var(--d-pop-out) var(--e-out),transform var(--d-pop-out) var(--e-out),visibility 0s var(--d-pop-out)}
 .tvup::before{content:"";width:.5rem;height:.5rem;border-radius:50%;background:var(--ac)}

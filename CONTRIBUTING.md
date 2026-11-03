@@ -49,6 +49,10 @@ steps). `tests/live-*.cjs` talk to real YouTube or Deepgram: run them by hand, r
   worker and never reaches the page, Wasm, logs, incidents or the debug overlay.
 - Reports (development builds only) carry no cookies, tokens, signatures, search terms, visitor data or keys.
 - The public build records, stores and sends no telemetry and contains no collector code.
+- **Lumen for TV**: the public TV bundle (`content.js`) is the public build. The app's shell can deliver speed telemetry
+  only after its owner turned it on (About & updates → Developer): then it runs the bundle's signed development
+  variant (`content-dev.js`) and sends its reports to the debug center at an address on the owner's own network
+  (private ranges only), from memory only; off, the shell drops whatever reaches it and sends nothing.
 - Test fixtures are recorded signed out; replace any IP with a documentation address (`203.0.113.7`) and
   visitor data with the fixed fake used in `tests/fixtures/`.
 

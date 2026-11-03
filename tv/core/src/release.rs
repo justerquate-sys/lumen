@@ -23,6 +23,10 @@ pub const MANIFEST: &str = "lumen-tv-manifest.json";
 pub const SIG: &str = "lumen-tv-manifest.json.sig";
 /// The bundle's files (all required).
 pub const FILES: [&str; 4] = ["content.js", "client.css", "native.css", "rules.json"];
+/// The bundle's development variant of `content.js` (speed telemetry, `./build.sh --tv --dev`): optional, signed
+/// like the others when the release carries it; the app runs it only while its owner turned telemetry on
+/// (`crate::tel`). Apps from before it ignore it.
+pub const DEV_FILE: &str = "content-dev.js";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FileEntry {
@@ -110,6 +114,12 @@ pub fn load_cached(dir: &Path, key: &[u8; 32]) -> Option<Bundle> {
         let b = std::fs::read(dir.join(f)).ok()?;
         check_file(&m, f, &b).ok()?;
         files.insert(f.to_string(), String::from_utf8(b).ok()?);
+    }
+    // (A development variant that is missing or does not verify is left out; the bundle stays usable.)
+    if m.files.contains_key(DEV_FILE) {
+        if let Some(t) = std::fs::read(dir.join(DEV_FILE)).ok().filter(|b| check_file(&m, DEV_FILE, b).is_ok()).and_then(|b| String::from_utf8(b).ok()) {
+            files.insert(DEV_FILE.to_string(), t);
+        }
     }
     Some(Bundle {
         seq: m.seq,
@@ -213,7 +223,8 @@ pub fn check(http: &Http, api: &str, key: &[u8; 32], cache: &Path, current_seq: 
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
     let mut files = BTreeMap::new();
-    for f in FILES {
+    let dev = m.files.contains_key(DEV_FILE).then_some(DEV_FILE);
+    for f in FILES.into_iter().chain(dev) {
         let b = get(f)?;
         check_file(&m, f, &b)?;
         std::fs::write(stage.join(f), &b).map_err(|e| e.to_string())?;

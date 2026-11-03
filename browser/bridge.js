@@ -84,7 +84,16 @@ const YTC = (() => {
     // Keyboard focus on a link is intent too (prefetch before Enter).
     // A microtask later: focus moved by Rust itself (the TV remote's spatial_focus) fires focusin inside
     // that Rust call, where a nested call would be dropped.
-    d.addEventListener('focusin', e => { const a = e.target.closest && e.target.closest('a[href]'); if (a) { const h = a.getAttribute('href'); queueMicrotask(() => call('on_intent', h)); } });
+    // A held key (a remote's arrow held down) passes links by: only where it rests is intent, on the key's release.
+    let held = false;
+    d.addEventListener('keydown', e => { held = e.repeat; }, { capture: true, passive: true });
+    d.addEventListener('keyup', () => {
+      if (!held) return;
+      held = false;
+      const a = d.activeElement && d.activeElement.closest && d.activeElement.closest('a[href]');
+      if (a) call('on_intent', a.getAttribute('href'));
+    }, { capture: true, passive: true });
+    d.addEventListener('focusin', e => { const a = !held && e.target.closest && e.target.closest('a[href]'); if (a) { const h = a.getAttribute('href'); queueMicrotask(() => call('on_intent', h)); } });
     d.addEventListener('visibilitychange', () => { call(d.visibilityState === 'hidden' ? 'on_hide' : 'on_show'); });
     d.addEventListener('keydown', e => {
       if (e.altKey) return;
@@ -541,18 +550,21 @@ const YTC = (() => {
     // inside the innermost open `scope` element around the focus (else the last open one, else the document),
     // as [x, y, w, h, m]*n (m = 1 + the index of the first `|`-separated selector of `mark` it matches, 0 none)
     // followed by the focused element's index (-1: none). The list is kept for spatial_focus.
-    spatial_rects(scope, sel, skip, mark) {
+    // An element inside a `boxes` ancestor is measured (and checked for visibility) by that ancestor: an off-screen
+    // content-visibility:auto card gives its own box without laying out its contents (one forced layout per card).
+    spatial_rects(scope, sel, skip, mark, boxes) {
       const marks = mark ? mark.split('|') : [];
-      const a = d.activeElement, vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (!el.checkVisibility || el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })); };
+      const a = d.activeElement, rect = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (!el.checkVisibility || el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) ? r : null; };
       let root = d;
       if (scope) {
-        const open = [...d.querySelectorAll(scope)].filter(vis);
+        const open = [...d.querySelectorAll(scope)].filter(rect);
         root = open.filter(s => s.contains(a)).pop() || open.pop() || d;
       }
       const els = [], out = [];
       for (const el of root.querySelectorAll(sel)) {
-        if ((skip && el.matches(skip)) || el.closest('[inert],[aria-hidden="true"],[hidden]') || !vis(el)) continue;
-        const r = el.getBoundingClientRect();
+        if ((skip && el.matches(skip)) || el.closest('[inert],[aria-hidden="true"],[hidden]')) continue;
+        const r = rect((boxes && el.closest(boxes)) || el);
+        if (!r) continue;
         els.push(el); out.push(r.left, r.top, r.width, r.height, marks.findIndex(m => el.matches(m)) + 1);
       }
       YTC._sp = els;

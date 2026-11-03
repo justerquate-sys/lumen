@@ -10,22 +10,31 @@
 //! | `shell_info`   | shell version, bundle in use, update state                              |
 //! | `shell_check`  | checks for updates now, then answers like `shell_info`                  |
 //! | `shell_install`| downloads, verifies and installs the offered APK (in the background; `shell_info` reports `downloading` with `got`/`total`, then `installing`) |
+//! | `tel_info`     | speed telemetry: `{"on", "url", "dev", "queued", "sent", "error"}` (`dev`: the bundle has its telemetry variant) |
+//! | `tel_set`      | `{"on"?, "url"?}` → like `tel_info`, plus `"reload": true` when the page must load again (the script changed) |
+//! | `tel_find`     | looks for a debug center on the network (`--lan`): `{"url"}`                                      |
+//! | `tel_send`     | `{"perf": <batch>}` / `{"incident": <report>}` from the shim; kept for the debug center while on, else dropped |
 //!
 //! Updates: at launch and every 6 hours the latest GitHub release is checked (`lumen_tv_core::release`);
 //! a newer verified bundle is cached and handed to the WebView (`host::bundle_ready`), a newer APK is
 //! offered to the page (`shell_info`'s `offer`): the client shows an "Update ready" notice and its About &
 //! updates screen installs it (`shell_install`).
+//!
+//! Telemetry (`lumen_tv_core::tel`): off unless the owner turns it on (About & updates → Developer; debug builds:
+//! `"telemetry": "<url>"` in `files/dev.json`). While on, the page runs the bundle's telemetry variant and its
+//! reports go to the debug center at the owner's address, from a thread of their own.
 
 use crate::host;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Condvar, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use lumen_tv_core::auth::{Account, Endpoints};
 use lumen_tv_core::net::Http;
 use lumen_tv_core::release::{self, ApkOffer, Bundle};
 use lumen_tv_core::rules::{Decision, Rules};
 use lumen_tv_core::store::Store;
+use lumen_tv_core::tel;
 
 /// The release key (`tv/keys/release.pub`): only bundles and APKs it signed are used.
 const RELEASE_KEY: &str = include_str!("../../../keys/release.pub");
@@ -43,6 +52,10 @@ fn builtin() -> Bundle {
     files.insert("client.css".into(), include_str!("../bundle/client.css").into());
     files.insert("native.css".into(), include_str!("../bundle/native.css").into());
     files.insert("rules.json".into(), include_str!("../bundle/rules.json").into());
+    let dev = include_str!(env!("LUMEN_TV_DEV_BUNDLE"));
+    if !dev.is_empty() {
+        files.insert(release::DEV_FILE.into(), dev.into());
+    }
     Bundle {
         seq: include_str!("../bundle/seq").trim().parse().unwrap_or(0),
         client: include_str!("../bundle/client").trim().into(),
@@ -61,6 +74,21 @@ pub struct Shell {
     bundle: RwLock<(Bundle, Rules)>,
     offer: Mutex<Option<ApkOffer>>,
     status: Mutex<Value>,
+    tel: Mutex<Tel>,
+    tel_wake: Condvar,
+    tel_http: Http,
+}
+
+/// Telemetry: the owner's choice, the reports waiting, what happened to the last delivery.
+#[derive(Default)]
+struct Tel {
+    settings: tel::Settings,
+    /// Set by `files/dev.json` (debug builds): not written to `telemetry.json`.
+    forced: bool,
+    queue: tel::Queue,
+    sent: u64,
+    error: Option<String>,
+    retry_at: f64,
 }
 
 static SHELL: OnceLock<Shell> = OnceLock::new();
@@ -136,6 +164,11 @@ pub fn init(dir: PathBuf) {
     let rules = Rules::parse(bundle.file("rules.json")).unwrap_or_else(|_| Rules::parse("[]").unwrap());
     let store = Store::open(dir.join("storage.json"));
     let status = json!({"state": "idle"});
+    let mut t = Tel { settings: tel::Settings::load(&dir.join("telemetry.json")), ..Default::default() };
+    if let Some(url) = dev.get("telemetry").and_then(Value::as_str).and_then(|u| tel::collector_url(u).ok()) {
+        t.settings = tel::Settings { on: true, url };
+        t.forced = true;
+    }
     let _ = SHELL.set(Shell {
         dir,
         key,
@@ -146,6 +179,14 @@ pub fn init(dir: PathBuf) {
         bundle: RwLock::new((bundle, rules)),
         offer: Mutex::new(None),
         status: Mutex::new(status),
+        tel: Mutex::new(t),
+        tel_wake: Condvar::new(),
+        tel_http: Http::new(Duration::from_secs(5)),
+    });
+    std::thread::spawn(|| {
+        if let Some(s) = get() {
+            s.tel_loop();
+        }
     });
     // Home reload, early start: a new process holds no access token, and the client's first account
     // request (Home) waits for `auth_token`, which would refresh it only then. The refresh starts
@@ -160,8 +201,50 @@ pub fn init(dir: PathBuf) {
 
 impl Shell {
     pub fn script(&self) -> String {
+        let on = self.tel.lock().unwrap().settings.on;
         let b = self.bundle.read().unwrap();
-        crate::script::compose(&b.0, version().0)
+        crate::script::compose(&b.0, version().0, on)
+    }
+
+    fn tel_info(&self, reload: bool) -> String {
+        let dev = !self.bundle.read().unwrap().0.file(release::DEV_FILE).is_empty();
+        let t = self.tel.lock().unwrap();
+        let mut v = json!({"on": t.settings.on, "url": t.settings.url, "dev": dev, "queued": t.queue.len(), "sent": t.sent, "error": t.error});
+        if reload {
+            v["reload"] = json!(true);
+        }
+        v.to_string()
+    }
+
+    /// Delivers waiting reports while telemetry is on (one at a time, oldest first; a failure waits a minute).
+    fn tel_loop(&self) {
+        loop {
+            let (url, item) = {
+                let mut t = self.tel.lock().unwrap();
+                loop {
+                    let due = t.settings.on && !t.queue.is_empty();
+                    if due && now() >= t.retry_at {
+                        break;
+                    }
+                    let wait = if due { (t.retry_at - now()).clamp(50.0, 60_000.0) } else { 60_000.0 };
+                    t = self.tel_wake.wait_timeout(t, Duration::from_millis(wait as u64)).unwrap().0;
+                }
+                (t.settings.url.clone(), t.queue.front().unwrap_or_default().to_string())
+            };
+            let r = tel::post(&self.tel_http, &url, &item);
+            let mut t = self.tel.lock().unwrap();
+            match r {
+                Ok(()) => {
+                    t.queue.delivered(&item);
+                    t.sent += 1;
+                    t.error = None;
+                }
+                Err(e) => {
+                    t.error = Some(e);
+                    t.retry_at = now() + 60_000.0;
+                }
+            }
+        }
     }
 
     pub fn decide(&self, url: &str, main_frame: bool, top: &str) -> Decision {
@@ -205,6 +288,61 @@ impl Shell {
                 });
                 self.call("shell_info", "null")
             }
+            // A report from the page (the shim forwards the client's `ytcPerf` / `ytcIncident` messages).
+            "tel_send" => {
+                let (perf, report) = match (arg.get("perf").and_then(Value::as_str), arg.get("incident").and_then(Value::as_str)) {
+                    (Some(p), _) => (true, p),
+                    (None, Some(i)) => (false, i),
+                    _ => return Ok("{}".into()),
+                };
+                if !self.tel.lock().unwrap().settings.on {
+                    return Ok("{}".into());
+                }
+                let build = crate::script::build_name(&self.bundle.read().unwrap().0, version().0, true);
+                let report = if perf { report.to_string() } else { tel::scrub(report) };
+                if let Some(j) = tel::stamp(&report, &build) {
+                    self.tel.lock().unwrap().queue.push(perf, j);
+                    self.tel_wake.notify_one();
+                }
+                Ok("{}".into())
+            }
+            "tel_info" => Ok(self.tel_info(false)),
+            // The owner's choice (About & updates → Developer). Turning it on or off changes the page's script: the
+            // answer says to load the page again.
+            "tel_set" => {
+                let mut t = self.tel.lock().unwrap();
+                let mut s = t.settings.clone();
+                if let Some(u) = arg.get("url").and_then(Value::as_str) {
+                    if u.trim().is_empty() {
+                        s = tel::Settings::default();
+                    } else {
+                        s.url = tel::collector_url(u)?;
+                    }
+                }
+                if let Some(on) = arg.get("on").and_then(Value::as_bool) {
+                    if on && s.url.is_empty() {
+                        return Err("enter the debug center's address first".into());
+                    }
+                    s.on = on;
+                }
+                let changed = s.on != t.settings.on;
+                if !t.forced {
+                    s.save(&self.dir.join("telemetry.json")).map_err(|e| e.to_string())?;
+                }
+                if !s.on {
+                    t.queue.clear();
+                }
+                t.settings = s;
+                t.error = None;
+                t.retry_at = 0.0;
+                drop(t);
+                self.tel_wake.notify_one();
+                if changed {
+                    host::script_changed();
+                }
+                Ok(self.tel_info(changed))
+            }
+            "tel_find" => tel::discover(Duration::from_millis(1500)).map(|url| json!({"url": url}).to_string()),
             _ => Err(format!("unknown command {cmd}")),
         }
     }

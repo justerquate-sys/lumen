@@ -22,6 +22,9 @@ class MainActivity : TauriActivity() {
   override val handleBackNavigation: Boolean = false
   private var web: WebView? = null
   private var script: ScriptHandler? = null
+  /** The first document-start script, composed off the UI thread while Tauri and the WebView start (1.8 MB:
+   *  composing it and making the Java string took 17–79 ms on the emulator, more on a TV, before the first load). */
+  private var firstScript: java.util.concurrent.FutureTask<String>? = null
   private var reloadOnStart = false
   private var stoppedAt = 0L
   private lateinit var host: Host
@@ -30,6 +33,7 @@ class MainActivity : TauriActivity() {
     // Before Tauri starts the Rust side: where its files live and how it reaches Android.
     host = Host(this)
     Native.init(filesDir.absolutePath, host)
+    firstScript = java.util.concurrent.FutureTask { Native.script() }.also { Thread(it, "lumen-script").start() }
     super.onCreate(savedInstanceState)
     // Back goes to the client first. Android 13+ delivers it as a back invocation, not a key, and the
     // WebView registers its own (history back): an overlay-priority callback comes before it.
@@ -56,7 +60,13 @@ class MainActivity : TauriActivity() {
   private fun installScript(w: WebView) {
     if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
     script?.remove()
-    script = WebViewCompat.addDocumentStartJavaScript(w, Native.script(), setOf("https://www.youtube.com"))
+    val js = firstScript?.let { f -> firstScript = null; try { f.get() } catch (e: Exception) { null } } ?: Native.script()
+    script = WebViewCompat.addDocumentStartJavaScript(w, js, setOf("https://www.youtube.com"))
+  }
+
+  /** The script changed for the next load (telemetry on/off: the page reloads itself; Rust → [Host.scriptChanged]). */
+  fun reinstallScript() {
+    web?.let { installScript(it) }
   }
 
   /** A newer verified bundle is in place (Rust → [Host.bundleReady]). */

@@ -129,8 +129,11 @@ extern "C" {
     /// Spatial navigation: `[x, y, w, h, m]*n, focused index (-1 none)` of the visible `sel` elements
     /// (minus `skip`) inside the innermost open `scope` around the focus (else the last open one,
     /// else the document); `m` = 1 + the index of the first `|`-separated selector of `mark` it matches (0: none). The list is kept for `spatial_focus`.
+    /// An element inside a `boxes` ancestor is measured (and checked for visibility) by that ancestor's box: a
+    /// `content-visibility:auto` card off screen gives its own box without laying out its contents (measuring the
+    /// link inside it would force that, one layout per card and key).
     #[wasm_bindgen(js_namespace = YTC)]
-    pub fn spatial_rects(scope: &str, sel: &str, skip: &str, mark: &str) -> Vec<f64>;
+    pub fn spatial_rects(scope: &str, sel: &str, skip: &str, mark: &str, boxes: &str) -> Vec<f64>;
     /// Focuses item `i` of the last `spatial_rects` list: `y` ≥ 0 scrolls the window there first
     /// (then only inner scrollers bring it into view), `y` < 0 scrolls it into view the nearest way.
     #[wasm_bindgen(js_namespace = YTC)]

@@ -7,12 +7,14 @@
 //! - [`rules`]: `extension/rules.json` (the extension's declarativeNetRequest rules) for the WebView.
 //! - [`store`]: `chrome.storage.local` for the client, a JSON file in the app's private storage.
 //! - [`net`]: the HTTP agent (rustls, bundled roots, timeouts, statuses as values).
+//! - [`tel`]: speed telemetry to the owner's debug center on their network (off unless turned on).
 
 pub mod auth;
 pub mod net;
 pub mod release;
 pub mod rules;
 pub mod store;
+pub mod tel;
 
 /// Writes `bytes` to `path` atomically (temp file + rename in the same directory).
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {

@@ -329,3 +329,74 @@ fn storage_shim() {
     assert_eq!(lumen_tv_core::store::Store::open(p.clone()).get(&Value::Null), json!({"b": {"x": [1, 2]}}));
     let _ = std::fs::remove_file(&p);
 }
+
+/// A release that carries the telemetry variant (`content-dev.js`): verified, cached and loaded with the bundle;
+/// a cached variant that no longer verifies is left out while the bundle stays usable.
+#[test]
+fn the_telemetry_variant_rides_along() {
+    let files: Vec<(&str, Vec<u8>)> = vec![
+        ("content.js", b"public()".to_vec()),
+        ("client.css", b"a{}".to_vec()),
+        ("native.css", b"b{}".to_vec()),
+        ("rules.json", b"[]".to_vec()),
+        (release::DEV_FILE, b"dev()".to_vec()),
+    ];
+    let refs: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    let man = manifest(300, &refs, 1, None);
+    let base = Arc::new(Mutex::new(String::new()));
+    let b2 = base.clone();
+    let f2 = files.clone();
+    let m = mock::start(Arc::new(move |_m, path, _b| {
+        let base = b2.lock().unwrap().clone();
+        match path {
+            "/repos/o/r/releases" => {
+                let names = ["lumen-tv-manifest.json", "lumen-tv-manifest.json.sig", "content.js", "client.css", "native.css", "rules.json", release::DEV_FILE];
+                let assets: Vec<Value> = names.iter().map(|n| json!({"name": n, "browser_download_url": format!("{base}/dl/{n}")})).collect();
+                (200, "application/json".into(), json!([{"tag_name": "tv-300", "assets": assets}]).to_string().into_bytes())
+            }
+            "/dl/lumen-tv-manifest.json" => (200, "application/json".into(), man.clone()),
+            "/dl/lumen-tv-manifest.json.sig" => (200, "text/plain".into(), sign(&man).into_bytes()),
+            p => {
+                let n = p.trim_start_matches("/dl/");
+                let b = f2.iter().find(|(f, _)| *f == n).map(|x| x.1.clone()).unwrap_or_default();
+                (if b.is_empty() { 404 } else { 200 }, "text/plain".into(), b)
+            }
+        }
+    }));
+    *base.lock().unwrap() = m.base.clone();
+    let pk = key().verifying_key().to_bytes();
+    let dir = std::env::temp_dir().join(format!("lumen-tv-dev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cache = dir.join("bundle");
+    let out = release::check(&http(), &format!("{}/repos/o/r/releases", m.base), &pk, &cache, 100, 1).unwrap();
+    assert_eq!(out.bundle.unwrap().file(release::DEV_FILE), "dev()");
+    assert_eq!(release::load_cached(&cache, &pk).unwrap().file(release::DEV_FILE), "dev()");
+    std::fs::write(cache.join(release::DEV_FILE), b"evil()").unwrap();
+    let b = release::load_cached(&cache, &pk).expect("the bundle stays");
+    assert_eq!((b.file("content.js"), b.file(release::DEV_FILE)), ("public()", ""));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Telemetry reports go to the debug center as `POST <url>/incident`, stamped with the build and the platform;
+/// a collector that refuses keeps the report queued.
+#[test]
+fn telemetry_reaches_the_debug_center() {
+    use lumen_tv_core::tel;
+    let refuse = Arc::new(Mutex::new(false));
+    let r2 = refuse.clone();
+    let m = mock::start(Arc::new(move |_m, _p, _b| if *r2.lock().unwrap() { (503, "text/plain".into(), b"no".to_vec()) } else { (200, "text/plain".into(), b"stored".to_vec()) }));
+    let mut q = tel::Queue::default();
+    q.push(true, tel::stamp(r#"{"kind":"perf","schema":2,"events":[]}"#, "0.10.0 (x) (TV 0.2.0, builtin)").unwrap());
+    let url = m.base.clone();
+    let item = q.front().unwrap().to_string();
+    tel::post(&http(), &url, &item).unwrap();
+    q.delivered(&item);
+    assert!(q.is_empty());
+    let log = m.log.lock().unwrap().clone();
+    assert_eq!((log[0].0.as_str(), log[0].1.as_str()), ("POST", "/incident"));
+    let v: Value = serde_json::from_str(&log[0].2).unwrap();
+    assert_eq!((v["platform"].as_str(), v["build"].as_str(), v["kind"].as_str()), (Some("tv"), Some("0.10.0 (x) (TV 0.2.0, builtin)"), Some("perf")));
+    *refuse.lock().unwrap() = true;
+    assert!(tel::post(&http(), &url, &item).unwrap_err().contains("503"));
+}

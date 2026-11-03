@@ -6,8 +6,10 @@
 // - where it runs: the extension's content_scripts matches/excludes (top frame only);
 // - YTC_PLATFORM = 'tv' (the client's TV mode) and YTC_SHELL.call(cmd, json) → Promise<string>
 //   (the shell's `ytc` command over Tauri's IPC: account, storage);
-// - chrome.storage.local → the shell's persistent store; chrome.runtime → inert (the background
-//   worker's incident reports, dev reload and voice socket relay are off on TV);
+// - chrome.storage.local → the shell's persistent store; chrome.runtime → inert (dev reload and the voice
+//   socket relay are off on TV), except that while the owner turned speed telemetry on (CFG.tel) the client's
+//   reports (ytcPerf batches, ytcIncident reports) go to the shell, which delivers them to their debug center;
+//   with it off they go nowhere, as in the extension's public build;
 // - the content script's stylesheet (client.css, or native.css on ?yt-native=1 pages) as a
 //   constructed sheet (YouTube's CSP never applies to it).
 if (window.top === window && location.hostname === 'www.youtube.com' && !globalThis.YTC_PLATFORM
@@ -28,9 +30,16 @@ if (window.top === window && location.hostname === 'www.youtube.com' && !globalT
   };
   const manifest = Object.freeze({ manifest_version: 3, name: 'Lumen', version: CFG.version, version_name: CFG.version_name, host_permissions: [] });
   const inert = { addListener() {}, removeListener() {} };
+  const send = CFG.tel ? m => {
+    if (m && typeof m === 'object') {
+      if (typeof m.ytcPerf === 'string') call('tel_send', { perf: m.ytcPerf }).catch(() => {});
+      else if (typeof m.ytcIncident === 'string') call('tel_send', { incident: m.ytcIncident }).catch(() => {});
+    }
+    return Promise.resolve();
+  } : () => Promise.resolve();
   const runtime = {
     id: 'lumen-tv',
-    sendMessage: () => Promise.resolve(),
+    sendMessage: send,
     connect: () => { throw new Error('not in the TV app'); },
     getManifest: () => manifest,
     getURL: p => p,

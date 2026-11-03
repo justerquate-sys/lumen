@@ -1,7 +1,9 @@
 // Writes the loadable extension (extension/) from the Rust build and the browser sources.
 //   node browser/build.cjs          public build (what is committed and shipped)
 //   node browser/build.cjs --dev    development build (debug-center delivery, auto-reload)
-//   node browser/build.cjs --target=tv   the TV app's bundle (tv/shell/src-tauri/bundle), public only
+//   node browser/build.cjs --target=tv   the TV app's bundle (tv/shell/src-tauri/bundle), public
+//   node browser/build.cjs --target=tv --dev   its development variant: only content-dev.js (telemetry), which
+//                                        the app runs while its owner turned telemetry on (tv/README.md)
 // Run through ./build.sh, which compiles the Rust crate and runs wasm-bindgen first.
 //
 // content.js bundles bridge.js + the wasm-bindgen glue + the embedded Wasm. The Wasm bytes travel
@@ -27,7 +29,6 @@ const TARGETS = {
 };
 const target = TARGETS[(args.find(a => a.startsWith('--target=')) || '--target=chromium').slice(9)];
 assert.ok(target, 'unknown --target');
-assert.ok(!(DEV && target.bundle), 'the TV bundle is always a public build (no --dev)');
 const DEV_HOST = 'http://127.0.0.1:47321/*';
 
 // Keeps (dev) or drops (public) the @dev blocks.
@@ -103,6 +104,14 @@ if (DEV) {
 }
 
 const dir = target.out;
+if (target.bundle && DEV) {
+  // The TV bundle's development variant: content-dev.js only (the public files, seq and client stay as they are;
+  // a release signs both, the app runs this one only while telemetry is on).
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'content-dev.js'), out);
+  console.log(`tv bundle, development variant: ${path.join(dir, 'content-dev.js')} (${out.length} bytes)`);
+  process.exit(0);
+}
 if (target.bundle) {
   // The TV bundle: content.js as built here; the stylesheets and rules are the extension's own files.
   fs.mkdirSync(dir, { recursive: true });

@@ -5,18 +5,21 @@
 #   ./build.sh --dev   development build: local debug-center delivery, speed telemetry, auto-reload
 #   ./build.sh --tv    the Google TV app's client bundle (tv/shell/src-tauri/bundle; public build,
 #                      extension/ is left as it is). tv/scripts/build.sh runs it; see tv/README.md.
+#   ./build.sh --tv --dev   the TV bundle's development variant (content-dev.js next to it: speed
+#                      telemetry, which the app runs only while its owner turned telemetry on).
 # Needs Rust 1.99.1 with the wasm32-unknown-unknown target (rust-toolchain.toml installs both through
 # rustup), wasm-bindgen-cli 0.2.130 and Node 22+. On Windows run it from Git Bash or WSL.
 set -eu
 cd "$(dirname "$0")"
 DEV=
 TARGET=
-case "${1:-}" in
-  --dev) DEV=1 ;;
-  --tv) TARGET=--target=tv ;;
-  '') ;;
-  *) echo 'usage: ./build.sh [--dev | --tv]' >&2; exit 2 ;;
-esac
+for a in "$@"; do
+  case "$a" in
+    --dev) DEV=1 ;;
+    --tv) TARGET=--target=tv ;;
+    *) echo 'usage: ./build.sh [--dev] [--tv]' >&2; exit 2 ;;
+  esac
+done
 find_tool() { command -v "$1" 2>/dev/null || echo "$HOME/.cargo/bin/$1"; }
 CARGO="${CARGO:-$(find_tool cargo)}"
 BINDGEN="${WASM_BINDGEN:-$(find_tool wasm-bindgen)}"

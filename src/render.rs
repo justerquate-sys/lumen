@@ -704,7 +704,8 @@ pub fn tv_panel(code: Option<(&str, &str)>, signed_in: bool, status: &str) -> St
 
 /// TV: the About & updates screen. `info` = the shell's last answer (None: not answered yet), `running` =
 /// the interface build this page runs, `note` = a line about the last action (e.g. an install that failed).
-pub fn tv_about(info: Option<&crate::tv::ShellInfo>, running: u64, running_client: &str, now: f64, note: &str) -> String {
+/// `dev`: the Developer section (`tv_dev`), or "" while it is hidden.
+pub fn tv_about(info: Option<&crate::tv::ShellInfo>, running: u64, running_client: &str, now: f64, note: &str, dev: &str) -> String {
     use crate::tv::UpdateView as V;
     let mut out = format!("<div class=\"tvp\"><span class=\"rmk\">{MARK}<b>Lumen</b></span><div class=\"tvl tvab\"><h2>About &amp; updates</h2><dl class=\"tvv\">");
     let row = |out: &mut String, k: &str, v: &str| {
@@ -774,7 +775,43 @@ pub fn tv_about(info: Option<&crate::tv::ShellInfo>, running: u64, running_clien
         esc_into(&mut out, label);
         out.push_str("</button>");
     }
-    out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-about-close\">Back</button></div></div>");
+    out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-about-close\">Back</button></div>");
+    out.push_str(dev);
+    out.push_str("</div>");
+    out
+}
+
+/// About & updates → Developer (hidden until revealed, or while telemetry is on): speed telemetry to the owner's debug
+/// center. `t`: the shell's answer (None: this app has no telemetry); `note`: the last action's outcome (`err`: a failure).
+pub fn tv_dev(t: Option<&crate::tv::TelInfo>, note: &str, err: bool) -> String {
+    let mut out = String::from("<section class=\"tvus tvdv\" aria-label=\"Developer\"><b>Developer · speed telemetry</b><p>");
+    let Some(t) = t else {
+        out.push_str("This app version cannot send telemetry: install the newest Lumen for TV first.</p></section>");
+        return out;
+    };
+    let addr = crate::tv::tel_addr(&t.url);
+    if t.on {
+        out.push_str("On: this TV's speed measurements go to the debug center at ");
+        esc_into(&mut out, addr);
+        out.push_str(&format!(" ({} sent, {} waiting).", t.sent, t.queued));
+        if !t.dev {
+            out.push_str(" This interface has no telemetry build: only errors are sent.");
+        }
+    } else {
+        out.push_str("Off. Turned on, this TV sends its speed measurements (timings and video ids, never titles or searches) to the debug center on your computer, started with --lan.");
+    }
+    out.push_str("</p><form id=\"ytc-tvdc\" class=\"tvdc\"><input id=\"ytc-tvdc-q\" name=\"dc\" type=\"text\" inputmode=\"url\" autocomplete=\"off\" spellcheck=\"false\" aria-label=\"Debug center address\" placeholder=\"Its address, e.g. 192.168.1.20\" value=\"");
+    esc_into(&mut out, addr);
+    out.push_str("\"></form><div class=\"tvdb\">");
+    out.push_str(if t.on { "<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-tel-off\">Turn off</button>" } else { "<button type=\"button\" class=\"tvb\" data-act=\"tv-tel-on\">Turn on</button>" });
+    out.push_str("<button type=\"button\" class=\"tvb tvx\" data-act=\"tv-tel-find\">Find on network</button></div>");
+    let (line, err) = if !note.is_empty() { (note.to_string(), err) } else if !t.error.is_empty() { (format!("Last delivery failed: {}", t.error), true) } else { (String::new(), false) };
+    if !line.is_empty() {
+        out.push_str(if err { "<p class=\"tvun\">" } else { "<p>" });
+        esc_into(&mut out, &line);
+        out.push_str("</p>");
+    }
+    out.push_str("</section>");
     out
 }
 

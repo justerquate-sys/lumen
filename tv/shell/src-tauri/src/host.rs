@@ -1,7 +1,7 @@
 //! The shell's bridge to Android (JNI). Kotlin calls in (`app.lumen.tv.Native`: init, the
 //! document-start script, the user agent, request rules, update accepted); Rust calls out to the
-//! `app.lumen.tv.Host` object Kotlin handed over at init (Keystore sealing, bundle swap, update
-//! package installer). Off Android every call-out is a no-op (`seal` → None: nothing is
+//! `app.lumen.tv.Host` object Kotlin handed over at init (Keystore sealing, bundle swap, script
+//! change, update package installer). Off Android every call-out is a no-op (`seal` → None: nothing is
 //! kept).
 
 #[cfg(target_os = "android")]
@@ -66,6 +66,11 @@ mod imp {
         void_call("bundleReady", None);
     }
 
+    /// The page's script changed (telemetry on/off): installed for the next load before this returns.
+    pub fn script_changed() {
+        void_call("scriptChanged", None);
+    }
+
     pub fn install_apk(path: &str) {
         void_call("installApk", Some(path));
     }
@@ -109,8 +114,15 @@ mod imp {
         match crate::shell::get().map(|s| s.decide(&url, main_frame != 0, &top)) {
             Some(lumen_tv_core::rules::Decision::Block) => 1,
             Some(lumen_tv_core::rules::Decision::Cors) => 2,
+            // A page the client renders: the shell's own document (lumen_tv_core::rules::CLIENT_DOCUMENT).
+            Some(_) if main_frame != 0 && lumen_tv_core::rules::client_page(&url) => 3,
             _ => 0,
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_lumen_tv_Native_document(mut env: JNIEnv, _c: JClass) -> jstring {
+        jstr(&mut env, lumen_tv_core::rules::CLIENT_DOCUMENT)
     }
 
     #[unsafe(no_mangle)]
@@ -130,7 +142,8 @@ mod imp {
         None
     }
     pub fn bundle_ready() {}
+    pub fn script_changed() {}
     pub fn install_apk(_: &str) {}
 }
 
-pub use imp::{bundle_ready, install_apk, open, seal};
+pub use imp::{bundle_ready, install_apk, open, script_changed, seal};

@@ -70,6 +70,11 @@ impl Http {
         Ok(Answer { status, body })
     }
 
+    /// A POST of `body` as `content_type` (telemetry reports).
+    pub fn post_body(&self, url: &str, content_type: &str, body: &[u8]) -> Result<Answer, String> {
+        Self::read(self.agent.post(url).header("Content-Type", content_type).send(body))
+    }
+
     pub fn post_json(&self, url: &str, body: &serde_json::Value) -> Result<Answer, String> {
         Self::read(
             self.agent

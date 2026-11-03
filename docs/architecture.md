@@ -358,6 +358,14 @@ folds back into it when it expires.
   inside it: inside a `content-visibility:auto` card a measurement lays that card out on its own, one forced
   layout per card (125 layouts + 350 style recalcs, 40–130 ms blocking idle tasks at 4× CPU on a scrolled
   Home; 3 Nov 2026), which were most of Home's long frames after the first paint.
+- **TV focus moves** (3 Nov 2026, measured on the emulator at 6× CPU: a D-pad press 144 → 53 ms to the painted
+  focus, p90 493 → 74 ms): the remote's spatial navigation measures a card by the card's own box
+  (`spatial_rects(…, ".c")`; an off-screen `content-visibility:auto` card needs no layout for that, the title link
+  inside it did); a held arrow is not link intent, only where it rests on the key's release (before, every card it
+  passed started a watch prefetch, `next` + VISIONOS, 20 a second); and the desktop's two `:has(:focus-visible)`
+  keyboard rules apply only where there is a pointer (`@media (any-pointer:fine)`): every focus move flipped them
+  false → true, a whole-grid restyle twice per press (~340 elements, ~70 ms at a TV's CPU). The TV app's own document
+  and the rest of its start path: tv/README.md "Speed".
 - **Restored pages** (back to a feed) lay all cards out for the scroll jump (`.rs`, 1 s): cards are
   `content-visibility:auto` with a 240 px placeholder, so a freshly written page would otherwise land on other
   cards and then be moved by scroll anchoring.
@@ -405,8 +413,11 @@ never shown first and then flipped (the only exception is a YouTube that has not
   for a signed-in TV they are the account's TVHTML5 Home request with the access token (`tv::finish`); the account
   key is "signed in" (the token changes every hour; signing in or out clears the tab's session data and reloads).
   The WebView's `sessionStorage` lives as long as its session: it survives page reloads in the app (a client
-  update switching in, a reload) but not a new app process, so the ready response stays tab-scoped as on desktop
-  and a cold app start takes the network path. That path's first step is the OAuth refresh behind `auth_token`
+  update switching in, a reload, the screen loading again for a telemetry change) and the app going to the background (the activity is
+  never recreated: it handles its configuration changes, and Back on Home only moves the task back), but not a new
+  app process. So the shell's memory would keep it no longer than the page's `sessionStorage` already does (checked
+  3 Nov 2026); the ready response stays tab-scoped as on desktop and a cold app start takes the network path (keeping
+  it across app starts would mean persisting a recommendation payload on disk: an owner decision, not done). That path's first step is the OAuth refresh behind `auth_token`
   (a new process holds no access token): the shell now starts it at launch (`shell::init`), in parallel with the
   WebView, the document and the client's Wasm, instead of when the page first asks. While a cold start holds the
   first page for the token, nothing goes out without it (no snapshot refresh, no redo for another session index).

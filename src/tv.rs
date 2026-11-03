@@ -449,6 +449,49 @@ pub fn parse_poll(json: &str) -> Poll {
     }
 }
 
+/// The shell's speed telemetry (`tel_info`, `tel_set`): off unless the owner turned it on (About & updates →
+/// Developer); while on, the shell runs the interface's telemetry build (`dev`; without one only errors go) and
+/// delivers the reports to the debug center at `url` on the owner's network.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TelInfo {
+    pub on: bool,
+    pub url: String,
+    pub dev: bool,
+    pub sent: u64,
+    pub queued: u64,
+    pub error: String,
+    /// The page must load again (the shell changed its script).
+    pub reload: bool,
+}
+
+pub fn parse_tel_info(json: &str) -> Option<TelInfo> {
+    let v = crate::json::parse_str(json)?;
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.chars().take(200).collect::<String>()).unwrap_or_default();
+    let num = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) as u64;
+    let flag = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
+    Some(TelInfo { on: v.get("on")?.as_bool()?, url: text("url"), dev: flag("dev"), sent: num("sent"), queued: num("queued"), error: text("error"), reload: flag("reload") })
+}
+
+/// The debug center's address as the owner reads and types it (no scheme).
+pub fn tel_addr(url: &str) -> &str {
+    url.strip_prefix("http://").unwrap_or(url)
+}
+
+/// The `tel_set` argument.
+pub fn tel_set_json(on: Option<bool>, url: Option<&str>) -> String {
+    let mut m = serde_json::Map::new();
+    if let Some(on) = on {
+        m.insert("on".into(), on.into());
+    }
+    if let Some(u) = url {
+        m.insert("url".into(), u.trim().into());
+    }
+    serde_json::Value::Object(m).to_string()
+}
+
+/// → presses with nothing to the right, in a row, that show the Developer section of About & updates.
+pub const DEV_TAPS: u32 = 5;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,5 +662,18 @@ mod tests {
         assert_eq!(remote_player_key(Remote::Pause, false), Some("k"));
         assert_eq!(remote("a"), None);
         assert_eq!(dir("ArrowLeft"), Some(Dir::Left));
+    }
+
+    #[test]
+    fn telemetry_info() {
+        let t = super::parse_tel_info(r#"{"on":true,"url":"http://192.168.1.20:47321","dev":true,"queued":2,"sent":14,"error":null}"#).unwrap();
+        assert!(t.on && t.dev && !t.reload && t.error.is_empty());
+        assert_eq!((super::tel_addr(&t.url), t.sent, t.queued), ("192.168.1.20:47321", 14, 2));
+        let t = super::parse_tel_info(r#"{"on":false,"url":"","dev":false,"queued":0,"sent":0,"error":"debug center: HTTP 503","reload":true}"#).unwrap();
+        assert!(!t.on && t.reload && t.error.contains("503"));
+        assert!(super::parse_tel_info("\"unknown command tel_info\"").is_none() && super::parse_tel_info("{}").is_none());
+        assert_eq!(super::tel_set_json(Some(true), None), r#"{"on":true}"#);
+        assert_eq!(super::tel_set_json(None, Some(" 192.168.1.20 ")), r#"{"url":"192.168.1.20"}"#);
+        assert_eq!(super::tel_set_json(Some(true), Some("a\"b")), r#"{"on":true,"url":"a\"b"}"#);
     }
 }

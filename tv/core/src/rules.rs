@@ -126,6 +126,24 @@ pub fn url_filter(filter: &str, url: &str) -> bool {
     (0..=u.len()).any(|i| match_here(f.as_bytes(), &u.as_bytes()[i..], end))
 }
 
+/// A page the client renders itself (tv/shim/shim.js runs there): `https://www.youtube.com/…` outside the shim's
+/// excluded paths, not a `?yt-native=1` page (YouTube's own, the client's fallback).
+pub fn client_page(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://www.youtube.com") else { return false };
+    if !(rest.is_empty() || rest.starts_with(['/', '?', '#'])) {
+        return false;
+    }
+    let path = rest.split(['?', '#']).next().unwrap_or("");
+    let query = rest.split('#').next().unwrap_or("").split_once('?').map_or("", |x| x.1);
+    const OWN: [&str; 12] = ["/embed/", "/live_chat", "/account", "/premium", "/paid_memberships", "/signin", "/logout", "/redirect", "/s/", "/youtubei/", "/api/", "/sw.js"];
+    !OWN.iter().any(|p| path.starts_with(p)) && !query.split('&').any(|kv| kv == "yt-native=1")
+}
+
+/// The document the shell serves for a [`client_page`] navigation instead of asking YouTube for its page: the client
+/// stops YouTube's document at its first byte (`window.stop()`) and writes its own, so YouTube's HTML (a round trip
+/// of 100–350 ms before the client can start, on every app start and reload) is never used.
+pub const CLIENT_DOCUMENT: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>YouTube</title></head><body></body></html>";
+
 impl Rules {
     pub fn parse(json: &str) -> Result<Rules, String> {
         let raw: Vec<RawRule> = serde_json::from_str(json).map_err(|e| e.to_string())?;
@@ -203,6 +221,19 @@ impl Rules {
         match cors {
             Some(c) if allow.is_none_or(|a| c > a) => Decision::Cors,
             _ => Decision::Pass,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_clients_own_pages() {
+        for u in ["https://www.youtube.com/", "https://www.youtube.com", "https://www.youtube.com/watch?v=abc&t=3", "https://www.youtube.com/results?search_query=a", "https://www.youtube.com/@x/videos", "https://www.youtube.com/feed/subscriptions", "https://www.youtube.com/?yt-native=10"] {
+            assert!(super::client_page(u), "{u}");
+        }
+        for u in ["https://www.youtube.com/watch?v=abc&yt-native=1", "https://www.youtube.com/embed/abc", "https://www.youtube.com/signin?x", "https://www.youtube.com/youtubei/v1/browse", "https://www.youtube.com.evil.com/", "http://www.youtube.com/", "https://m.youtube.com/", "https://www.youtube.com/s/player/x.js", "https://www.youtube.com/sw.js"] {
+            assert!(!super::client_page(u), "{u}");
         }
     }
 }

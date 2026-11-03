@@ -81,6 +81,16 @@ fn is_batch(line: &str) -> bool {
     line.contains("\"schema\":2") && line.contains("\"kind\":\"perf\"")
 }
 
+/// Where a report came from: `tv` (the TV app's shell stamps it) or `desktop` (the extension).
+pub fn platform_of(r: &J) -> &str {
+    r.s("platform").unwrap_or("desktop")
+}
+
+/// The `platform` filter of a view: `tv`, `desktop` or "" (both).
+pub fn platform_matches(r: &J, want: &str) -> bool {
+    want.is_empty() || platform_of(r) == want
+}
+
 fn version_of(r: &J) -> String {
     r.s("build").map(str::to_string).unwrap_or_else(|| format!("{} (no build id)", r.s("client").unwrap_or("?")))
 }
@@ -111,6 +121,8 @@ fn row(ev: &J, received: f64, version: &str, r: &J) -> String {
     let mut s = String::from("{");
     let _ = write!(s, "\"received\":{received:.0},\"version\":");
     json::quote(&mut s, version);
+    s.push_str(",\"platform\":");
+    json::quote(&mut s, platform_of(r));
     if let Some(p) = r.s("page") {
         s.push_str(",\"page\":");
         json::quote(&mut s, p);
@@ -137,8 +149,8 @@ enum Line<'a> {
     Incident { r: &'a J, rec: f64, v: &'a str },
 }
 
-/// Streams the file: every line in the window, parsed. Returns (lines, bytes).
-fn scan(file: &Path, from: f64, version: &str, mut f: impl FnMut(Line)) -> (usize, u64) {
+/// Streams the file: every line in the window of the `platform` ("" = both), parsed. Returns (lines, bytes).
+fn scan(file: &Path, from: f64, version: &str, platform: &str, mut f: impl FnMut(Line)) -> (usize, u64) {
     let Ok(fh) = File::open(file) else { return (0, 0) };
     let mut rd = BufReader::with_capacity(1 << 20, fh);
     let mut line = String::new();
@@ -157,6 +169,9 @@ fn scan(file: &Path, from: f64, version: &str, mut f: impl FnMut(Line)) -> (usiz
         let Some(j) = json::parse(l) else { continue };
         let rec = j.n("received").unwrap_or(0.0);
         let Some(r) = j.get("report") else { continue };
+        if !platform_matches(r, platform) {
+            continue;
+        }
         let v = version_of(r);
         if is_batch(l) && r.n("schema") == Some(2.0) {
             if !version.is_empty() && v != version {
@@ -171,17 +186,17 @@ fn scan(file: &Path, from: f64, version: &str, mut f: impl FnMut(Line)) -> (usiz
     (lines, bytes)
 }
 
-/// Every telemetry batch received since `from`, with its version.
-pub fn scan_batches(file: &Path, from: f64, mut f: impl FnMut(&J, &str)) {
-    scan(file, from, "", |line| {
+/// Every telemetry batch of `platform` ("" = both) received since `from`, with its version.
+pub fn scan_batches(file: &Path, from: f64, platform: &str, mut f: impl FnMut(&J, &str)) {
+    scan(file, from, "", platform, |line| {
         if let Line::Batch { r, v, .. } = line {
             f(r, v);
         }
     });
 }
 
-/// `GET /perf.json?metric=<name|prefix*>&since=<ms|6h>&version=<v>&limit=<n>`: a JSON array of
-/// event rows (oldest first): `{received, version, page, m, v, at, …breakdown}`.
+/// `GET /perf.json?metric=<name|prefix*>&since=<ms|6h>&version=<v>&platform=<tv|desktop>&limit=<n>`: a JSON
+/// array of event rows (oldest first): `{received, version, platform, page, m, v, at, …breakdown}`.
 pub fn rows_json(file: &Path, q: &[(String, String)]) -> String {
     let get = |k: &str| q.iter().find(|x| x.0 == k).map(|x| x.1.as_str()).unwrap_or("");
     let now = now_ms();
@@ -190,7 +205,7 @@ pub fn rows_json(file: &Path, q: &[(String, String)]) -> String {
     let limit: usize = get("limit").parse().unwrap_or(10_000).min(500_000);
     let version = get("version").to_string();
     let mut rows: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    scan(file, from, &version, |line| {
+    scan(file, from, &version, get("platform"), |line| {
         let Line::Batch { r, rec, v } = line else { return };
         for ev in r.get("events").map(J::arr).unwrap_or(&[]) {
             let m = ev.s("m").unwrap_or("");
@@ -281,12 +296,13 @@ pub fn dashboard(file: &Path, q: &[(String, String)]) -> String {
     let from = since(&since_s, now);
     let version = get("version").to_string();
     let metric = get("metric").to_string();
+    let platform = get("platform").to_string();
     let mut aggs: HashMap<String, Agg> = HashMap::new();
     let mut vers: HashMap<String, Ver> = HashMap::new();
     let mut seen_versions: HashMap<String, f64> = HashMap::new();
     let (mut batches, mut events) = (0u64, 0u64);
     let mut acts = crate::timeline::Acts::default();
-    let (lines, bytes) = scan(file, from, &version, |line| {
+    let (lines, bytes) = scan(file, from, &version, &platform, |line| {
         let (rec, v) = match &line {
             Line::Batch { rec, v, .. } | Line::Other { rec, v } | Line::Incident { rec, v, .. } => (*rec, *v),
         };
@@ -368,6 +384,10 @@ details{margin:4px 0}summary{cursor:pointer;color:#b7ebca}pre{white-space:pre-wr
     for (v, label) in [("1h", "last hour"), ("6h", "6 hours"), ("24h", "24 hours"), ("7d", "7 days"), ("30d", "30 days"), ("all", "everything")] {
         let _ = write!(h, "<option value={v}{}>{label}</option>", if since_s == v { " selected" } else { "" });
     }
+    h.push_str("</select></label><label>Platform <select name=platform>");
+    for (v, label) in [("", "TV and desktop"), ("desktop", "desktop"), ("tv", "TV")] {
+        let _ = write!(h, "<option value=\"{v}\"{}>{label}</option>", if platform == v { " selected" } else { "" });
+    }
     h.push_str("</select></label><label>Version <select name=version><option value=\"\">all</option>");
     let mut sv: Vec<(&String, &f64)> = seen_versions.iter().collect();
     sv.sort_by(|a, b| b.1.total_cmp(a.1));
@@ -377,12 +397,13 @@ details{margin:4px 0}summary{cursor:pointer;color:#b7ebca}pre{white-space:pre-wr
     let _ = write!(h, "</select></label><label>Metric <input name=metric size=14 placeholder=\"nav.* or video.start\" value=\"{}\"></label><button>Show</button> <a href=/>incidents</a> <a href=#interactions>interactions</a> <a href=#hedges>hedges</a> <a href=/timeline>timeline</a></form>", esc(&metric));
     let _ = write!(
         h,
-        "<p class=dim>{events} events in {batches} batches · {lines} lines ({:.1} MB) read in {} ms · raw rows: <a href=\"/perf.json?since={}&metric={}&version={}\">/perf.json</a></p>",
+        "<p class=dim>{events} events in {batches} batches · {lines} lines ({:.1} MB) read in {} ms · raw rows: <a href=\"/perf.json?since={}&metric={}&version={}&platform={}\">/perf.json</a></p>",
         bytes as f64 / 1e6,
         t_start.elapsed().as_millis(),
         esc(&since_s),
         esc(&metric),
-        esc(&version)
+        esc(&version),
+        esc(&platform)
     );
 
     // Per metric.
@@ -537,6 +558,18 @@ mod tests {
         assert_eq!(json::parse(&rows_json(&f, &query("/perf.json?metric=nav.*&limit=5"))).map(|j| j.arr().len()), Some(5));
         let page = dashboard(&f, &query("/perf"));
         assert!(page.contains("nav.watch") && page.contains("video.start"));
+        // Desktop and TV apart: the TV app's reports carry "platform":"tv".
+        assert_eq!(j.arr()[0].s("platform"), Some("desktop"));
+        let mut s = std::fs::read_to_string(&f).unwrap();
+        s.push_str(&format!("{{\"received\":{now:.0},\"report\":{{\"build\":\"0.10.0 (b) (TV 0.2.0, builtin, telemetry)\",\"platform\":\"tv\",\"kind\":\"perf\",\"schema\":2,\"page\":\"tv1\",\"events\":[{{\"m\":\"ui.act\",\"v\":33,\"at\":{now:.0},\"act\":\"key.ArrowRight\"}}]}}}}\n"));
+        std::fs::write(&f, s).unwrap();
+        let tv = json::parse(&rows_json(&f, &query("/perf.json?platform=tv"))).unwrap();
+        assert_eq!((tv.arr().len(), tv.arr()[0].s("platform"), tv.arr()[0].s("page")), (1, Some("tv"), Some("tv1")));
+        assert_eq!(json::parse(&rows_json(&f, &query("/perf.json?platform=desktop&metric=ui.act"))).map(|j| j.arr().len()), Some(0));
+        assert_eq!(json::parse(&rows_json(&f, &query("/perf.json?metric=ui.act"))).map(|j| j.arr().len()), Some(1));
+        let tvp = dashboard(&f, &query("/perf?platform=tv"));
+        assert!(tvp.contains(">ui.act</a>") && !tvp.contains(">video.start</a>") && tvp.contains("<option value=\"tv\" selected>"));
+        assert!(!dashboard(&f, &query("/perf?platform=desktop")).contains("TV 0.2.0"));
         assert!(page.contains("player-failed 1"), "incident counted");
         assert!(page.contains("<td>590</td>"), "max of video.start");
         std::fs::remove_dir_all(&dir).ok();

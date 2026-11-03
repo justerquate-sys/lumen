@@ -5,13 +5,15 @@
 #   tv/scripts/build.sh --release  release APK, arm64 + armv7 (Chromecast with Google TV and many
 #                                  TVs run 32-bit Android), signed with the release keystore
 # Options: --no-client (reuse the last bundle), SEQ=<n> (bundle sequence; default: now).
+# The client step builds the public bundle and its development variant (content-dev.js, speed telemetry:
+# run only while the owner turned telemetry on); the public build runs last, so target/pkg stays public.
 # Output: tv/out/lumen-tv-<version>[-debug].apk
 set -eu
 here="$(cd "$(dirname "$0")" && pwd)"; tv="$(dirname "$here")"; root="$(dirname "$tv")"
 . "$here/env.sh"
 mode=debug; client=1
 for a in "$@"; do case "$a" in --release) mode=release;; --no-client) client=0;; *) echo "unknown option $a" >&2; exit 2;; esac; done
-if [ "$client" = 1 ]; then "$root/build.sh" --tv; fi
+if [ "$client" = 1 ]; then "$root/build.sh" --tv --dev; "$root/build.sh" --tv; fi
 for f in content.js client.css native.css rules.json seq client; do
   [ -f "$tv/shell/src-tauri/bundle/$f" ] || { echo "no client bundle: run without --no-client" >&2; exit 1; }
 done

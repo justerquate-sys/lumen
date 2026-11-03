@@ -1612,6 +1612,9 @@ impl App {
     }
 
     pub fn on_submit(&mut self, form: &str, value: &str) -> bool {
+        if form == tvglue::DEV_FORM {
+            return self.tv_dev_submit(value);
+        }
         if form.starts_with("fx-") {
             return self.fx_submit(form, value);
         }

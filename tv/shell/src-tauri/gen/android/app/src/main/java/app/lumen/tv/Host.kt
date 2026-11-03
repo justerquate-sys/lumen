@@ -32,8 +32,11 @@ object Native {
   @JvmStatic external fun script(): String
   /** The desktop user agent the client needs (www.youtube.com, not m.youtube.com). */
   @JvmStatic external fun userAgent(webViewDefault: String): String
-  /** The client's rules for a request: 0 pass, 1 block, 2 fetch here and allow CORS. */
+  /** The client's rules for a request: 0 pass, 1 block, 2 fetch here and allow CORS, 3 a page the client renders
+   *  (served [document] instead of YouTube's page). */
   @JvmStatic external fun decide(url: String, mainFrame: Boolean, top: String): Int
+  /** The document for a page the client renders: it stops YouTube's at the first byte and writes its own. */
+  @JvmStatic external fun document(): String
   /** The owner said yes to a shell update: download, verify, then [Host.installApk]. */
   @JvmStatic external fun acceptUpdate()
 }
@@ -77,6 +80,15 @@ class Host(activity: MainActivity) {
     a.runOnUiThread { a.swapBundle() }
   }
 
+  /** The page's script changed (telemetry on/off; Rust → here): in place before this returns, so the page's
+   *  reload right after the answer already gets it. */
+  fun scriptChanged() {
+    val a = ref.get() ?: return
+    val done = java.util.concurrent.CountDownLatch(1)
+    a.runOnUiThread { try { a.reinstallScript() } finally { done.countDown() } }
+    done.await(2, java.util.concurrent.TimeUnit.SECONDS)
+  }
+
   /** A downloaded APK waiting for the owner to allow installs from this app. */
   @Volatile private var pendingApk: String? = null
 
@@ -116,6 +128,15 @@ class Host(activity: MainActivity) {
  */
 class Interceptor(private val inner: WebViewClient) : WebViewClient() {
   @Volatile private var top = "https://www.youtube.com/"
+  private val doc by lazy { Native.document().toByteArray() }
+  @Volatile private var hasVisitor = false
+  private fun visitor(): Boolean {
+    if (!hasVisitor) {
+      val c = android.webkit.CookieManager.getInstance().getCookie("https://www.youtube.com") ?: ""
+      hasVisitor = listOf("VISITOR_INFO1_LIVE=", "VISITOR_PRIVACY_METADATA=", "__Secure-YEC=").any { c.contains(it) }
+    }
+    return hasVisitor
+  }
 
   init {
     // Keep-alive pool per host (Android's default is 5): video and audio, their mirror hedges, a
@@ -130,6 +151,10 @@ class Interceptor(private val inner: WebViewClient) : WebViewClient() {
       when (Native.decide(url, request.isForMainFrame, top)) {
         1 -> return WebResourceResponse("text/plain", "utf-8", 403, "Blocked", mapOf(), ByteArrayInputStream(ByteArray(0)))
         2 -> if (request.method == "GET") proxy(request)?.let { return it }
+        // App start, reload: the client never reads YouTube's page (it stops it at the first byte), so the shell's
+        // own document saves that round trip. Not before this WebView has YouTube's visitor cookies (the very first
+        // start gets YouTube's page: its cookies, a consent step if YouTube asks for one).
+        3 -> if (request.method == "GET" && visitor()) return WebResourceResponse("text/html", "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(doc))
       }
     }
     return inner.shouldInterceptRequest(view, request)
