@@ -59,18 +59,23 @@ The focused checks pass for sidebar intent/cancellation, the header, newest-firs
 60 videos and multiple continuations, optimistic removal/rollback/back/reload, sort failure/retry,
 and the last-card empty state. Rust tests cover supplied sort values and stale-response removal state.
 Two additional review reproductions cover failure after navigation and re-saving through the player;
-both fail on the initial 0.13.4 build. The full public-build regression suite is run before merging.
+both fail on the initial 0.13.4 build. The final `npm test` passes 279 Rust tests (5 ignored) and
+186/186 browser checks (3 development-only skips) on the public build. The expanded focused run passes
+13/13, including import with its original exact count. `npm run check:public` and whitespace checks pass.
 
 ## Independent review
 
-Two sol-loop rounds used GPT-6.1 Sol with max reasoning effort. Round 2 approved the behavior.
+Three sol-loop rounds used GPT-6.1 Sol with max reasoning effort. Round 2 approved the behavior;
+round 3 retained approval after isolating the re-save test's history storage.
 
 - S1 (should): fixed rollback after navigation by invalidating cached Watch later copies on failure.
 - S2 (nit): fixed re-saving through the player by confirming its Watch later edits through shared state.
-- Both reproductions failed before the fixes; the expanded focused run passes 12/12, including the
-  existing sidebar, Watch later, Like, Subscribe and Save checks. No findings were declined or remain open.
+- Both reproductions failed before the fixes; the expanded focused run passes 13/13, including the
+  existing sidebar, Watch later, Like, Subscribe, Save and import checks. No findings were declined
+  or remain open. The re-save test restores the exact prior search-history key in `finally`, including
+  absence, leaving import's exact count and application behavior unchanged.
 - The base diff was 37 files, 1,610 insertions/394 deletions before review and 38 files,
-  1,675 insertions/398 deletions at approval, including generated public code and the two reproductions.
+  1,691 insertions/398 deletions at final review, including generated public code and the reproductions.
   This final review/proof note is documentation only. Review usage was not exposed by the tool.
 
 Design process adapted from [Unslop](https://heydamir.design/unslop) by
