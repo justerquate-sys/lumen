@@ -48,14 +48,16 @@ pub fn spring_css(response: f64, damping: f64, points: usize) -> (String, u32) {
 }
 
 /// UI default spring (`--spring`, `--d-spring`): critically damped, quick.
-pub fn ui() -> (String, u32) {
-    spring_css(0.26, 1.0, 24)
+/// Fixed samples keep curve generation and allocation off the input path;
+/// the token test checks them against `spring_css`.
+pub fn ui() -> (&'static str, u32) {
+    ("linear(0,0.05,0.158,0.286,0.413,0.527,0.626,0.707,0.774,0.826,0.868,0.9,0.925,0.943,0.958,0.969,0.977,0.983,0.987,0.991,0.993,0.995,0.996,0.997,1)", 351)
 }
 
 /// The softer spring for big moves (`--d-spring-soft`). Critically damped
 /// springs share one shape at every speed, so its curve is `--spring`'s (to rounding).
-pub fn soft() -> (String, u32) {
-    spring_css(0.34, 1.0, 24)
+pub fn soft() -> (&'static str, u32) {
+    ("linear(0,0.049,0.158,0.286,0.412,0.526,0.624,0.706,0.773,0.825,0.867,0.899,0.924,0.943,0.957,0.968,0.976,0.983,0.987,0.991,0.993,0.995,0.996,0.997,1)", 458)
 }
 
 /// A celebratory pop (`--spring-pop`): underdamped, about 10 % overshoot, for a state the user
@@ -101,6 +103,10 @@ mod tests {
 
     #[test]
     fn client_css_carries_the_generated_tokens() {
+        for (actual, response) in [(ui(), 0.26), (soft(), 0.34)] {
+            let expected = spring_css(response, 1.0, 24);
+            assert_eq!((actual.0, actual.1), (expected.0.as_str(), expected.1));
+        }
         let tokens = css_tokens();
         println!("{tokens}");
         let css = include_str!("../extension/client.css");

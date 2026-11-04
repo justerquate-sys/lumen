@@ -35,6 +35,19 @@ pub struct Snap {
     pub at: f64,
 }
 
+/// Outgoing snapshots borrow the feed while it is serialized; restoring still uses owned `Snap`.
+pub(crate) struct SnapRef<'a> {
+    pub url: &'a str,
+    pub head: &'a Head,
+    pub items: &'a [Item],
+    pub buffered: &'a [Item],
+    pub shown: usize,
+    pub cont: Option<&'a str>,
+    pub cont_ep: &'static str,
+    pub scroll: f64,
+    pub at: f64,
+}
+
 pub fn key(url: &str) -> String {
     format!("{PREFIX}{url}")
 }
@@ -229,11 +242,28 @@ pub fn ep(s: &str) -> Option<&'static str> {
 
 impl Serialize for Snap {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SnapRef {
+            url: &self.url, head: &self.head, items: &self.items, buffered: &[], shown: self.shown,
+            cont: self.cont.as_deref(), cont_ep: self.cont_ep, scroll: self.scroll, at: self.at,
+        }.serialize(serializer)
+    }
+}
+
+struct SnapshotItems<'a>(&'a [Item], &'a [Item]);
+
+impl Serialize for SnapshotItems<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().chain(self.1).take(MAX_ITEMS).map(ItemRecord))
+    }
+}
+
+impl Serialize for SnapRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut m = serializer.serialize_map(Some(9))?;
         m.serialize_entry("c", &self.cont)?;
         m.serialize_entry("e", self.cont_ep)?;
-        m.serialize_entry("h", &HeadRecord(&self.head))?;
-        m.serialize_entry("i", &ItemRecords(&self.items[..self.items.len().min(MAX_ITEMS)]))?;
+        m.serialize_entry("h", &HeadRecord(self.head))?;
+        m.serialize_entry("i", &SnapshotItems(self.items, self.buffered))?;
         m.serialize_entry("n", &self.shown.min(MAX_ITEMS))?;
         m.serialize_entry("t", &self.at)?;
         m.serialize_entry("u", &self.url)?;
@@ -244,6 +274,10 @@ impl Serialize for Snap {
 }
 
 pub fn to_json(sn: &Snap) -> String {
+    serde_json::to_string(sn).expect("snapshot serializes to JSON")
+}
+
+pub(crate) fn to_json_ref(sn: &SnapRef<'_>) -> String {
     serde_json::to_string(sn).expect("snapshot serializes to JSON")
 }
 
@@ -282,6 +316,51 @@ pub fn index_json(urls: &[String]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn borrowed_feed_preparation_matches_owned_snapshot_bytes() {
+        let items: Vec<_> = (0..MAX_ITEMS + 30).map(|i| Item::Video(Video {
+            id: format!("{i:011}"), title: format!("Video {i} — \"東京\"\n"), ..Default::default()
+        })).collect();
+        let head = Head::Channel { title: "Channel".into(), avatar: None, meta: vec!["123 videos".into()], about: "About this channel".into() };
+        for shown in [0, 1, 24, MAX_ITEMS - 1, MAX_ITEMS, MAX_ITEMS + 1] {
+            for buffered in [0, 1, 24, 100] {
+                let shown_items = &items[..shown];
+                let buffered_items = &items[shown..(shown + buffered).min(items.len())];
+                // The old App::snapshot preparation: shown items, then buffered items, capped once.
+                let owned_items: Vec<_> = shown_items.iter().chain(buffered_items).take(MAX_ITEMS).cloned().collect();
+                let owned = Snap { url: "/feed/subscriptions".into(), head: head.clone(), shown: shown.min(owned_items.len()), items: owned_items, cont: Some("tok".into()), cont_ep: "browse", scroll: 123.4, at: 1000.0 };
+                let borrowed = SnapRef { url: &owned.url, head: &head, items: shown_items, buffered: buffered_items, shown: shown.min(MAX_ITEMS), cont: owned.cont.as_deref(), cont_ep: "browse", scroll: 123.4, at: 1000.0 };
+                assert_eq!(to_json_ref(&borrowed), to_json(&owned), "shown={shown}, buffered={buffered}");
+                assert_eq!(from_json(&to_json_ref(&borrowed), &owned.url), Some(Snap { scroll: 123.0, ..owned }));
+            }
+        }
+    }
+
+    /// `cargo test --release --locked snapshot_preparation_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual navigation snapshot preparation benchmark"]
+    fn snapshot_preparation_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        fn measure(name: &str, encode: impl Fn() -> String) {
+            const RUNS: usize = 1000;
+            let start = Instant::now();
+            for _ in 0..RUNS { black_box(encode()); }
+            println!("{name}: {:.3} ms per snapshot", start.elapsed().as_secs_f64() * 1000.0 / RUNS as f64);
+        }
+        let feed = crate::parse::search(&crate::util::test_fixture("search.json"));
+        let items: Vec<_> = feed.items.iter().cycle().take(MAX_ITEMS).cloned().collect();
+        let (shown, buffered) = items.split_at(24);
+        let head = Head::Feed { title: "Search".into() };
+        let view = SnapRef { url: "/results?search_query=rust", head: &head, items: shown, buffered, shown: shown.len(), cont: feed.cont.as_deref(), cont_ep: "search", scroll: 123.0, at: 1000.0 };
+        let prepare_owned = || {
+            let items: Vec<_> = shown.iter().chain(buffered).take(MAX_ITEMS).cloned().collect();
+            Snap { url: view.url.into(), head: head.clone(), shown: shown.len().min(items.len()), items, cont: feed.cont.clone(), cont_ep: view.cont_ep, scroll: view.scroll, at: view.at }
+        };
+        assert_eq!(to_json(&prepare_owned()), to_json_ref(&view));
+        measure("clone + serialize", || to_json(black_box(&prepare_owned())));
+        measure("borrow + serialize", || to_json_ref(black_box(&view)));
+    }
 
     #[test]
     fn compact_schema_bytes_and_escaping_stay_compatible() {

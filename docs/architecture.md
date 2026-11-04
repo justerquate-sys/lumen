@@ -567,6 +567,19 @@ cipher, `n` or PO token, found by research on 1 Nov 2026), requested at navigati
 with `next` and prefetched on hover. A second, normal `WEB` `player` call with your session supplies
 captions and the watch-history URLs.
 
+The VISIONOS call, including prefetches, recovery routes, hedges and URL refreshes, asks only for
+`responseContext,playabilityStatus,streamingData,captions,videoDetails` (4 Nov 2026). These are whole
+subtrees: every format, codec, HDR field, audio track, caption option and HLS field stays intact. The
+WEB metadata/history call stays whole. A successful live pair retained all 32 format entries while
+reducing the gzip response from 13,728 to 7,868 bytes (−43 %), decoded from 77,749 to 58,044 (−25 %);
+the pair's 252/270 ms response times do not establish a latency gain. If YouTube rejects the mask
+with HTTP 400, App and Own resend the retained body, headers and fetch options at once under the same
+id, without the mask, and disable this mask for the document. That leaves `next`'s independent mask
+enabled. The e2e stub applies the mask and checks exact anonymous, fresh-visitor and account resends,
+prefetch adoption and subsequent requests; `api::tests::vision_mask_live` checks a successful local
+capture without storing its signed URLs in the repository. Prefetch capability warming also reuses
+the parsed response instead of parsing it a second time.
+
 **Start path** (3 Nov 2026, measured live with `tools/bench/video.cjs`, numbers under "Speed" below):
 - *Straight to the target rung* (≥ 1080p when the screen allows; 1080p is the floor): no low start rung.
   The old ≤ 360p start rung was replaced before its first frame showed anyway (live 2 Nov 2026: every
@@ -618,15 +631,20 @@ captions and the watch-history URLs.
   200 ms (or a TV ←/→ scrub target) fetches that spot's video and audio segments ahead (one spot at a time,
   dropped when the pointer leaves without a click, last two kept per track, never judged throttled); a seek
   there appends them at once or takes the request over while it loads. What is behind the playhead stays
-  buffered (60 s), so back-seeks need nothing.
-- *Hover media prefetch* (`own/pre.rs`): when the pointer has rested on a video link 150 ms past its
-  VISIONOS answer, the index + up to 1 MB of segment 0 of exactly the formats the player will choose
+  buffered (60 s), so back-seeks need nothing. Seek hover keeps one pending rest timer: moves update
+  its target and deadline in Rust, and its wake waits any remaining time. Leaving cancels the intent;
+  the existing wake can serve a new rest without a timer per pointer event.
+- *Hover media prefetch* (`own/pre.rs`): once the pointer or focus has rested on a video link for
+  150 ms and its VISIONOS response and decodingInfo are available, the index + up to 1 MB of segment 0 of exactly the formats the player will choose
   (same ladder, decodingInfo, size cap and ABR) are fetched; the click then appends at once (a body still
   loading becomes the player's own request). One video at a time, cancelled when the pointer leaves the
   link before it finished, kept in memory 5 min (last 3 videos). Live: ~1.2 MB per rested-on link.
   Focus counts like a resting pointer (the TV remote, keyboard focus): the bridge reports a link's
   `focusin` as intent in a microtask, since focus moved by Rust itself (`spatial_focus`) fires inside
-  that call; a link whose VISIONOS response is already cached starts the dwell at once.
+  that call. The dwell starts at intent, overlapping the response and capability requests; an answer
+  arriving after that rest starts media immediately. Capability answers retry a waiting rest, keeping
+  the same format checks. A new link, leaving, or navigation ends the previous rest. In the controlled
+  0.13.2 regression (300 ms player response), response → media fell from 155–158 ms to 3–4 ms.
 - *Warm first frame* (3 Nov 2026, `own/warm.rs`; the owner: "ideally it should just be the start of the video
   already, without the preview"): once that prefetch's video body is in and the pointer or focus still rests on
   the link, a muted `<video>` outside the document with its own MediaSource decodes the first frame from those
@@ -1160,8 +1178,6 @@ but use the same rules), Shorts-style looping, storyboard thumbnails on the seek
   `expandableMetadata` (key-moment cards, up to 75 KB per result) that Lumen never renders, but a mask can only
   list what to keep, so every result renderer type would have to be named (an unknown name is an HTTP 400, a
   forgotten one silently drops results). Parse is 2–3 ms; the gain would be ~60 KB on the wire per search.
-- The VISIONOS `player` answers (the player's) are ~400 KB on the wire per channel → watch → watch session (hover and
-  cards-in-view prefetches); a `fields=` mask like `next`'s could roughly halve that.
 - The YouTube HTML document is still requested (and stopped at the first bytes, except Home with nothing ready,
   which reads it); the shell appears at roughly time-to-first-byte of that document.
 - After `window.stop()` the document's `load` event does not fire (readyState is `complete`); no effect

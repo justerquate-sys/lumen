@@ -129,8 +129,8 @@ const VISION_CACHE: usize = 40;
 /// How often a failed player re-checks a dropped connection.
 const NET_PROBE_MS: u32 = 3000;
 const VISION_MAX_AGE_MS: f64 = 30.0 * 60.0 * 1000.0;
-/// The pointer rests this long on a video link (after its VISIONOS answer) before its first media
-/// is prefetched; also enough for the warmed decodingInfo answers (4–55 ms) to be in.
+/// The pointer or focus rests this long on a video link before its first media is prefetched.
+/// The response and decodingInfo may arrive during that dwell; neither restarts it.
 const MEDIA_PRE_MS: u32 = 150;
 /// Fetch the next video's `next` + VISIONOS this close to the end (seconds).
 const UP_PREFETCH_S: f64 = 45.0;
@@ -177,7 +177,7 @@ struct Pending {
     sent: f64,
     /// Endpoint name for the perf report.
     ep: &'static str,
-    /// A field-masked request (`api::NEXT_FIELDS`): the same request without the mask, sent if
+    /// A field-masked request: the same request without the mask, sent if
     /// YouTube refuses the mask (HTTP 400).
     unmasked: Option<Box<Resend>>,
 }
@@ -303,6 +303,8 @@ pub struct App {
     marks: Vec<(&'static str, f64)>,
     timers: HashMap<u32, Timer>,
     hover: String,
+    /// The latest video intent and when its uninterrupted rest started.
+    media_rest: Option<(String, f64)>,
     preview_v: String,
     preview_on: bool,
     suggest_q: String,
@@ -498,6 +500,7 @@ pub fn boot() {
         marks: vec![("boot", t0)],
         timers: HashMap::new(),
         hover: String::new(),
+        media_rest: None,
         preview_v: String::new(),
         preview_on: false,
         suggest_q: String::new(),
@@ -785,18 +788,18 @@ impl App {
 
     // ----------------------------------------------------------- snapshots
 
-    fn snapshot(&self) -> Option<Snap> {
-        let head = self.feed.head.clone()?;
+    fn snapshot(&self) -> Option<snap::SnapRef<'_>> {
+        let head = self.feed.head.as_ref()?;
         if !self.rendered || self.feed.shown.is_empty() {
             return None;
         }
-        let items: Vec<Item> = self.feed.shown.iter().chain(self.feed.buf.iter()).take(snap::MAX_ITEMS).cloned().collect();
-        Some(Snap {
-            url: self.url.clone(),
+        Some(snap::SnapRef {
+            url: &self.url,
             head,
-            shown: self.feed.shown.len().min(items.len()),
-            items,
-            cont: self.feed.cont.clone(),
+            shown: self.feed.shown.len().min(snap::MAX_ITEMS),
+            items: &self.feed.shown,
+            buffered: &self.feed.buf,
+            cont: self.feed.cont.as_deref(),
             cont_ep: self.feed.cont_ep,
             scroll: bridge::scroll_y(),
             at: bridge::epoch(),
@@ -809,25 +812,25 @@ impl App {
             return; // topic and YouTube-chip cards stay in memory only
         }
         let Some(sn) = self.snapshot() else { return };
+        let json = snap::to_json_ref(&sn);
         self.snap_at.clear();
-        let json = snap::to_json(&sn);
         if json.len() > snap::MAX_BYTES {
             return;
         }
         let mut idx = snap::index_from(&bridge::session_get(snap::INDEX));
-        idx.retain(|u| *u != sn.url);
-        idx.insert(0, sn.url.clone());
+        idx.retain(|u| *u != self.url);
+        idx.insert(0, self.url.clone());
         while idx.len() > snap::MAX_SNAPS {
             if let Some(u) = idx.pop() {
                 bridge::session_del(&snap::key(&u));
             }
         }
-        if !bridge::session_set(&snap::key(&sn.url), &json) {
+        if !bridge::session_set(&snap::key(&self.url), &json) {
             // Quota (shared with YouTube's own pages in this tab): keep only this one.
             for u in idx.drain(1..) {
                 bridge::session_del(&snap::key(&u));
             }
-            if !bridge::session_set(&snap::key(&sn.url), &json) {
+            if !bridge::session_set(&snap::key(&self.url), &json) {
                 idx.clear();
             }
         }
@@ -928,6 +931,7 @@ impl App {
     }
 
     fn navigate(&mut self, route: Route, url: String, mode: Mode) {
+        self.media_rest = None;
         self.imp_end();
         self.voice_leave();
         self.tel_leave();
@@ -1418,12 +1422,13 @@ impl App {
         self.hover.strip_prefix("w:").and_then(|k| k.split('|').next()) == Some(v) || self.intent_v == v
     }
 
-    /// Its VISIONOS response is already here (an earlier hover, the cards-in-view prefetch): the
-    /// media prefetch's dwell starts now (otherwise it starts when that response arrives).
+    /// Start the intent's dwell now, even while its VISIONOS response is still loading.
     fn media_pre_soon(&mut self, v: &str) {
+        if self.media_rest.as_ref().is_none_or(|(old, _)| old != v) {
+            self.media_rest = Some((v.to_string(), bridge::now()));
+        }
         if self.vision_cached(v).is_some() {
-            let id = self.timer(Timer::MediaPre(v.to_string(), 0));
-            bridge::timer(id, MEDIA_PRE_MS);
+            self.media_pre(v, 0);
         }
     }
 
@@ -1431,6 +1436,13 @@ impl App {
     /// start with (`player::own::prefetch_media`; decodingInfo may still be on its way: two more tries).
     fn media_pre(&mut self, v: &str, n: u8) {
         if !self.hovering(v) || matches!(&self.route, Route::Watch { v: w, .. } if w == v) || self.player.as_ref().is_some_and(|p| p.v == v) {
+            return;
+        }
+        let Some((_, at)) = self.media_rest.as_ref().filter(|(rest, _)| rest == v) else { return };
+        let wait = (MEDIA_PRE_MS as f64 - (bridge::now() - at)).ceil();
+        if wait > 0.0 {
+            let id = self.timer(Timer::MediaPre(v.to_string(), n));
+            bridge::timer(id, wait as u32);
             return;
         }
         let Some(body) = self.vision_cached(v) else { return };
@@ -1471,6 +1483,13 @@ impl App {
             }
             _ => {}
         }
+        self.media_rest_check();
+    }
+
+    fn media_rest_check(&mut self) {
+        if self.media_rest.as_ref().is_some_and(|(v, _)| !self.hovering(v)) {
+            self.media_rest = None;
+        }
     }
 
     /// The current watch page's cache key.
@@ -1498,8 +1517,11 @@ impl App {
         }
         let (body, headers, opts) = crate::api::vision_request(&self.cfg, &self.auth, (bridge::epoch() / 1000.0) as u64, &route, v);
         let id = next_id();
-        bridge::fetch_opts(id, "POST", &crate::api::player_url(), &body, &headers, opts);
-        self.pending.insert(id, Pending { purpose: Purpose::VisionPrefetch { v: v.to_string(), spec, route }, sent: bridge::now(), ep: "player-visionos", unmasked: None });
+        let plain = crate::api::player_url();
+        let url = crate::api::vision_url();
+        bridge::fetch_opts(id, "POST", &url, &body, &headers, opts);
+        let unmasked = (url != plain).then(|| Box::new(Resend { url: plain, body, headers, opts }));
+        self.pending.insert(id, Pending { purpose: Purpose::VisionPrefetch { v: v.to_string(), spec, route }, sent: bridge::now(), ep: "player-visionos", unmasked });
         self.vision_prefetching.insert(v.to_string());
         if spec {
             self.spec_vision.1 += 1;
@@ -1603,6 +1625,7 @@ impl App {
             }
             _ => {}
         }
+        self.media_rest_check();
     }
 
     pub fn on_click(&mut self, href: &str, act: &str, arg: &str, mods: u32) -> bool {
@@ -2174,12 +2197,12 @@ impl App {
         // once and under the same id, and no mask for the rest of this document.
         if status == 400 {
             if let Some(r) = p.unmasked.take() {
-                crate::api::unmask();
+                if p.ep == "player-visionos" { crate::api::unmask_vision(); } else { crate::api::unmask(); }
                 if let Some(x) = self.hedge.forget(id) {
                     bridge::abort(x);
                 }
                 bridge::fetch_opts(id, "POST", &r.url, &r.body, &r.headers, r.opts);
-                // Seen in the speed telemetry as a `req.next` with status 400 (numbers only: an
+                // Seen in the speed telemetry with status 400 (numbers only: an
                 // incident would carry the page's URL, a search page's terms included).
                 self.tel_req(&p, status, body.len());
                 self.pending.insert(id, p);
@@ -2249,12 +2272,11 @@ impl App {
                         player::own::warm_origin(o);
                     }
                     // decodingInfo for its formats now too: the click then chooses at once.
-                    player::own::warm_caps(body);
-                    self.cache_vision(&v, Rc::new(body.to_vec()));
-                    if self.hovering(&v) {
-                        let id = self.timer(Timer::MediaPre(v.clone(), 0));
-                        bridge::timer(id, MEDIA_PRE_MS);
+                    if let Some(json) = json.as_ref() {
+                        player::own::warm_caps(json);
                     }
+                    self.cache_vision(&v, Rc::new(body.to_vec()));
+                    self.media_pre(&v, 0);
                 }
                 let stale = bot && route != self.vroute();
                 if let Some(pl) = self.player.as_mut().filter(|pl| pl.v == v) {
@@ -2983,6 +3005,10 @@ impl App {
 
     pub fn on_caps(&mut self, json: &str) {
         if player::own::warm_answer(json) {
+            if let Some((v, _)) = self.media_rest.as_ref() {
+                let v = v.clone();
+                self.media_pre(&v, 0);
+            }
             return;
         }
         if let Some(p) = self.player.as_mut() {

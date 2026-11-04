@@ -4,7 +4,7 @@
 // scenario. Live network only here: the e2e suite stays offline.
 //
 //   ./build.sh --dev && node tools/bench/video.cjs [--ext DIR] [--runs N] [--videos id,id,…]
-//       [--scenarios cold,spa,hover,quick] [--label NAME] [--out FILE.json] [--brave] [--starts]
+//       [--scenarios cold,spa,hover,brief,quick] [--label NAME] [--out FILE.json] [--brave] [--starts]
 // (--starts: starts only, no seek or quality change; much quicker)
 //
 // Slow YouTube (2 Nov 2026: "if requests to YouTube would slow down like 100 times, we should have
@@ -25,6 +25,7 @@
 //   spa    videos[i+1] a click from Home on a link that was never hovered (no prefetch)
 //   hover  videos[i+2] a click from Home after the pointer rested on the link for 1 s (prefetched)
 //   quick  videos[i+3] a click from Home 120 ms after the pointer came onto the link (prefetch in flight)
+//   brief  the next video, clicked after 350 ms of hover (a short rest while its responses arrive)
 // In each: first frame, ≥ 1080p on screen, then three seeks (`video.seek`, input → playing): to the
 // middle (a click on the seek bar: outside the buffer), 6 s ahead (inside it), and to a quarter after
 // the pointer rested there for 0.6 s (outside the buffer, the seek bar's hover known in advance),
@@ -241,7 +242,7 @@ async function scenario(b, col, kind, vid) {
       await page.evaluate(() => document.getElementById('bench-link').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, detail: 1, clientX: 400, clientY: 400 })));
     } else {
       await page.mouse.move(400, 380);
-      await page.waitForTimeout(kind === 'hover' ? 1000 : 120);
+      await page.waitForTimeout(kind === 'hover' ? 1000 : kind === 'brief' ? 350 : 120);
       await page.mouse.down(); await page.mouse.up();
     }
   }

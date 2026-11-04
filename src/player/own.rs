@@ -248,11 +248,13 @@ struct Inflight {
     buf: Vec<u8>,
     /// (Index requests) the index was parsed from the first pieces; later pieces went on as media.
     early: bool,
+    /// The exact masked VISIONOS request, for one immediate unmasked retry on HTTP 400.
+    unmasked: Option<Box<(String, String, &'static str)>>,
 }
 
 impl Inflight {
     fn new(req: Req, what: String) -> Inflight {
-        Inflight { req, sent: bridge::now(), what, base: String::new(), mirror: 0, ttfb: None, got: 0.0, want: 0.0, twin: None, hedge: false, flagged: false, chunked: false, at: 0, buf: Vec::new(), early: false }
+        Inflight { req, sent: bridge::now(), what, base: String::new(), mirror: 0, ttfb: None, got: 0.0, want: 0.0, twin: None, hedge: false, flagged: false, chunked: false, at: 0, buf: Vec::new(), early: false, unmasked: None }
     }
 }
 
@@ -420,6 +422,8 @@ pub struct Own {
     seek_pre: Vec<stream::SeekPre>,
     seekpre_at: f64,
     seekpre_gen: u32,
+    seekpre_deadline: Option<f64>,
+    seekpre_pending: bool,
     /// Last periodic ABR check (ms), so quality also rises while paused.
     abr_at: f64,
     /// Stalls during playback: (ms since navigation, duration ms).
@@ -686,6 +690,8 @@ impl Own {
             seek_pre: Vec::new(),
             seekpre_at: 0.0,
             seekpre_gen: 0,
+            seekpre_deadline: None,
+            seekpre_pending: false,
             abr_at: 0.0,
             stall_stepped: false,
             audio: None,
@@ -955,9 +961,12 @@ impl Own {
     fn send_vision(&mut self, cfg: &Config, route: &VisionRoute) {
         let (body, headers, opts) = api::vision_request(cfg, &self.auth, (bridge::epoch() / 1000.0) as u64, route, &self.v);
         let id = next_id();
-        bridge::fetch_opts(id, "POST", &api::player_url(), &body, &headers, opts);
+        let url = api::vision_url();
+        bridge::fetch_opts(id, "POST", &url, &body, &headers, opts);
         let what = if *route == VisionRoute::Anon { "player VISIONOS".to_string() } else { format!("player VISIONOS ({})", route.label()) };
-        self.fetches.insert(id, Inflight::new(Req::Vision(route.clone()), what));
+        let mut request = Inflight::new(Req::Vision(route.clone()), what);
+        request.unmasked = (url != api::player_url()).then(|| Box::new((body, headers, opts)));
+        self.fetches.insert(id, request);
         self.timer(Tm::VisionTimeout, VISION_TIMEOUT_MS);
     }
 
@@ -1023,7 +1032,7 @@ impl Own {
 
     /// Returns true when `id` was one of ours.
     pub fn on_fetch(&mut self, id: u32, status: u32, body: &[u8]) -> bool {
-        let Some(f) = self.fetches.remove(&id) else { return false };
+        let Some(mut f) = self.fetches.remove(&id) else { return false };
         if self.failed {
             return true;
         }
@@ -1039,6 +1048,15 @@ impl Own {
             self.reqlog.remove(0);
         }
         self.reqlog.push(format!("{:>7.0} ms  {} → HTTP {status} · {len} B · {ms:.0} ms", f.sent - self.nav_start, f.what));
+        if status == 400 {
+            if let Some(request) = f.unmasked.take() {
+                api::unmask_vision();
+                let (body, headers, opts) = *request;
+                bridge::fetch_opts(id, "POST", &api::player_url(), &body, &headers, opts);
+                self.fetches.insert(id, f);
+                return true;
+            }
+        }
         match f.req {
             Req::Head { .. } | Req::Seg { .. } if self.twin_answer(id, &f, status, len) => return true,
             Req::Vision(_) if status != 200 && self.vision_twin_pending(status) => return true,
@@ -3291,7 +3309,7 @@ impl Own {
             self.sb_tip(t);
             if morph {
                 let (curve, ms) = motion::ui();
-                bridge::box_morph(ui::TIP, ui::TIPI, &curve, ms, 0.0, 0);
+                bridge::box_morph(ui::TIP, ui::TIPI, curve, ms, 0.0, 0);
                 bridge::nudge(ui::TIPC, 0.0, motion::E_OUT, TIP_FADE_MS);
             }
             self.ch.tip = ch;
@@ -3304,12 +3322,14 @@ impl Own {
         let Some(sb) = self.story.as_ref().filter(|_| self.live.is_none()) else { return };
         let dpr = bridge::screen_px().get(2).copied().unwrap_or(1.0);
         let level = sb.level_for(TIP_FRAME_W, dpr);
-        let Some(c) = sb.frame_at(level, t, d) else { return };
-        if self.ch.tipf != Some((level, c.n)) {
-            self.ch.tipf = Some((level, c.n));
-            bridge::attr(ui::TIPF, "style", &storyboard::style(&c));
-            bridge::attr(ui::TIPF, "data-n", &c.n.to_string());
+        let Some(n) = sb.frame_index(level, t, d) else { return };
+        if self.ch.tipf == Some((level, n)) {
+            return;
         }
+        let c = sb.cell(level, n);
+        self.ch.tipf = Some((level, n));
+        bridge::attr(ui::TIPF, "style", &storyboard::style(&c));
+        bridge::attr(ui::TIPF, "data-n", &n.to_string());
     }
 
     fn grow(&mut self, seg: Option<usize>) {
@@ -3514,7 +3534,7 @@ impl Own {
         }
         if morph {
             let (curve, ms) = motion::ui();
-            bridge::box_morph(ui::MENU, ui::MENUI, &curve, ms, dx, MENU_FADE_MS);
+            bridge::box_morph(ui::MENU, ui::MENUI, curve, ms, dx, MENU_FADE_MS);
         } else {
             bridge::box_morph(ui::MENU, "", "", 0, 0.0, 0);
         }
@@ -4492,12 +4512,11 @@ thread_local! {
 
 /// A prefetched VISIONOS response (hover, focus, Up next): ask decodingInfo for its video formats
 /// now, so starting that video needs no wait for it.
-pub fn warm_caps(body: &[u8]) {
-    let Some(json) = json::parse(body) else { return };
+pub fn warm_caps(json: &Value) {
     let mut list = Vec::new();
     WARM.with(|w| {
         let mut w = w.borrow_mut();
-        for f in formats::parse(&json).iter().filter(|f| f.video) {
+        for f in formats::parse(json).iter().filter(|f| f.video) {
             let key = caps_key(f);
             if CAPS.with(|c| c.borrow().contains_key(&key)) || w.values().any(|k| *k == key) || w.len() > 200 {
                 continue;
