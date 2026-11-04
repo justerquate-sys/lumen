@@ -31,6 +31,8 @@ _To be added:_
   Extensions, quality and codec choice, speed 0.25–2.5×, chapters with storyboard frames on the seek bar,
   captions you can drag and resize, live streams with DVR, resume positions, watch history kept in your
   account. Failures stay in the player with the reason and a **Try again** / **Open on YouTube** choice.
+- **Captions on one click.** Click CC to toggle them; hover for language and audio options. The icon
+  is outlined when off and filled when on. From the keyboard, Enter/Space toggle and ↑/↓ open options.
 - **Hover navigation:** rest on a desktop sidebar link for 250 ms to open it. A short pass, dragging,
   typing or an open menu never activates it. Clicks and keyboard shortcuts work immediately.
 - **Watch later, newest saves first.** The list uses YouTube’s date-added order across pages. Removing

@@ -2074,6 +2074,66 @@ chrome.runtime.onMessage.addListener(m => {
     await waitT(() => document.documentElement.dataset.ytcEnded, null, 2000);
   });
 
+  await step('captions control: click toggles immediately, hover only opens options, keyboard reaches languages and the icon follows remembered state', async () => {
+    const before = await sw.evaluate(() => chrome.storage.local.get('ytcConfigV1'));
+    const t = await ctx.newPage();
+    try {
+      await t.goto('https://www.youtube.com/watch?v=ccjapanese1&t=4', { waitUntil: 'commit' });
+      await t.waitForFunction(() => document.documentElement.dataset.ytcFirstFrame, null, { timeout: 8000 });
+      const on = () => t.$eval('#ytc-player', p => p.classList.contains('cc'));
+      const wasOn = await on(), paused = await t.$eval('#ytc-video', v => v.paused);
+      const media = await t.$eval('#ytc-video', v => v.currentSrc);
+      const requests = log.api.filter(a => a.ep === 'player').length;
+      await t.click('#ytc-ccb');
+      assert.equal(await on(), !wasOn, 'the button toggles in its click task');
+      assert.equal(await t.getAttribute('#ytc-ccb', 'aria-pressed'), String(!wasOn));
+      await t.hover('#ytc-ccb'); await t.waitForSelector('#ytc-player.menu .mcc');
+      assert.equal(await t.locator('#ytc-menu [data-arg="cc:toggle"]').count(), 0, 'no duplicate on/off row');
+      assert.equal(await t.getAttribute('#ytc-ccb', 'aria-expanded'), 'true');
+      await t.hover('#ytc-menu [data-arg="cc:1"]'); await t.waitForTimeout(280);
+      assert.equal(await on(), !wasOn, 'hovering a language never enables or selects it');
+      await t.click('#ytc-menu [data-arg="cc:1"]');
+      assert.equal(await on(), true, 'choosing a language enables captions');
+      await t.waitForFunction(() => document.getElementById('ytc-cc').textContent.length > 0);
+      const captionRequests = log.timedtext.length;
+      await t.click('#ytc-ccb');
+      assert.equal(await on(), false); assert.equal(await t.textContent('#ytc-cc'), '');
+      if (process.env.YTC_SHOTS) { await t.waitForTimeout(200); await t.screenshot({ path: path.join(process.env.YTC_SHOTS, 'captions-click-off.png') }); }
+      await t.click('#ytc-ccb');
+      assert.equal(await on(), true);
+      assert.equal(log.timedtext.length, captionRequests, 'toggling reuses loaded captions');
+      assert.equal(log.api.filter(a => a.ep === 'player').length, requests, 'no player reload');
+      assert.equal(await t.$eval('#ytc-video', v => v.currentSrc), media);
+      assert.equal(await t.$eval('#ytc-video', v => v.paused), paused);
+      await t.mouse.move(5, 5); await t.waitForSelector('#ytc-player:not(.menu)');
+      await t.focus('#ytc-ccb'); await t.keyboard.press('Enter');
+      assert.equal(await on(), false); assert.equal(await t.evaluate(() => document.activeElement.id), 'ytc-ccb');
+      assert.equal(await t.$eval('#ytc-ccb .i-ccoff', e => getComputedStyle(e).opacity), '1', 'off icon');
+      await t.keyboard.press('Space');
+      assert.equal(await on(), true); assert.equal(await t.getAttribute('#ytc-ccb', 'aria-pressed'), 'true');
+      assert.equal(await t.$eval('#ytc-ccb .i-ccon', e => getComputedStyle(e).clipPath), 'inset(0px)', 'on icon is filled immediately for keyboard');
+      const volume = await t.$eval('#ytc-video', v => v.volume);
+      for (const key of ['ArrowDown', 'ArrowUp']) {
+        await t.keyboard.press(key); await t.waitForSelector('#ytc-player.menu .mcc');
+        assert.ok(await t.evaluate(() => document.getElementById('ytc-menu').contains(document.activeElement)), 'options receive keyboard focus');
+        assert.deepEqual(await t.$eval('#ytc-menu', e => { const s = getComputedStyle(e); return [s.opacity, s.transform]; }), ['1', 'none'], 'keyboard options are immediate');
+        await t.keyboard.press('Escape');
+        assert.equal(await t.getAttribute('#ytc-ccb', 'aria-expanded'), 'false');
+        assert.equal(await t.evaluate(() => document.activeElement.id), 'ytc-ccb');
+      }
+      assert.equal(await t.$eval('#ytc-video', v => v.volume), volume, 'options arrows do not change volume');
+      if (process.env.YTC_SHOTS) { await t.hover('#ytc-ccb'); await t.waitForTimeout(200); await t.screenshot({ path: path.join(process.env.YTC_SHOTS, 'captions-click-on-options.png') }); await t.keyboard.press('Escape'); }
+      await t.focus('#ytc-ccb'); await t.keyboard.press('Enter');
+      for (let i = 0; i < 40 && (await sw.evaluate(() => chrome.storage.local.get('ytcConfigV1'))).ytcConfigV1?.p?.cc !== false; i++) await t.waitForTimeout(50);
+      assert.equal((await sw.evaluate(() => chrome.storage.local.get('ytcConfigV1'))).ytcConfigV1.p.cc, false);
+      await t.reload({ waitUntil: 'commit' }); await t.waitForSelector('#ytc-ccb[aria-pressed="false"]');
+      assert.equal(await on(), false, 'off survives reload');
+    } finally {
+      await t.close(); await page.bringToFront();
+      await sw.evaluate(async cfg => { await chrome.storage.local.remove('ytcConfigV1'); await chrome.storage.local.set(cfg); }, before);
+    }
+  });
+
   await step('own player: captions on + quality remembered across a reload (chrome.storage)', async () => {
     await page.goto('https://www.youtube.com/watch?v=aqz-KE-bpKQ&t=4', { waitUntil: 'commit' });
     await waitT(() => document.getElementById('ytc-cc')?.textContent.startsWith('Caption line'), null, 8000);
@@ -2094,7 +2154,7 @@ chrome.runtime.onMessage.addListener(m => {
     await page.waitForFunction(() => document.getElementById('ytc-player').classList.contains('cc'));
     for (let i = 0; i < 40 && !lastCc(); i++) await page.waitForTimeout(100);
     assert.match(lastCc(), /lang=ja&tlang=en&fmt=json3$/, 'English translation of the human Japanese track');
-    await page.click('#ytc-ccb');
+    await page.hover('#ytc-ccb'); await page.waitForSelector('#ytc-menu .mls button');
     const items = page.locator('#ytc-menu .mls button');
     assert.deepEqual(await items.allTextContents(), ['Japanese (auto-generated)', 'Japanese', 'English (translated)']);
     assert.equal(await page.locator('#ytc-menu .mls button.on').textContent(), 'English (translated)');
@@ -2178,10 +2238,11 @@ chrome.runtime.onMessage.addListener(m => {
     await page.hover('#ytc-ccb');
     await page.waitForSelector('#ytc-menu .mcc', { timeout: 1000 });
     assert.equal(await page.locator('#ytc-menu .mtab').count(), 0, 'one audio track: no tabs');
-    assert.equal(await page.getAttribute('#ytc-menu .msw', 'aria-checked'), 'false');
-    await page.click('#ytc-menu .msw');
+    assert.equal(await page.locator('#ytc-menu .msw').count(), 0, 'no duplicate captions switch');
+    assert.equal(await page.getAttribute('#ytc-ccb', 'aria-pressed'), 'false');
+    await page.click('#ytc-ccb');
     await page.waitForSelector('#ytc-player.cc');
-    assert.equal(await page.getAttribute('#ytc-menu .msw', 'aria-checked'), 'true');
+    assert.equal(await page.getAttribute('#ytc-ccb', 'aria-pressed'), 'true');
     assert.ok(await page.locator('#ytc-player.menu').count(), 'stays open after a choice');
     await page.mouse.move(5, 5);
     await page.waitForSelector('#ytc-player:not(.menu)', { state: 'attached', timeout: 1500 });
@@ -2654,8 +2715,8 @@ chrome.runtime.onMessage.addListener(m => {
     await page.keyboard.press('c');
     await page.waitForTimeout(500);
     await page.evaluate(() => scrollTo(0, 0));
+    if (await page.locator('#ytc-player.cc').count()) await page.keyboard.press('c');
     await page.click('#ytc-ccb');
-    await page.click('#ytc-menu .msw');
     await page.waitForTimeout(900);
     { const b = await page.locator('#ytc-player').boundingBox(); await midShot('morph-cc-mid', { x: b.x + b.width - 300, y: b.y + b.height - 56, width: 300, height: 56 }); }
     await slow(1);
