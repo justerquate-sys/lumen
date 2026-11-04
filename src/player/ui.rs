@@ -69,7 +69,7 @@ pub const CHHC: &str = "ytc-chhc";
 pub const CHHN: &str = "ytc-chhn";
 /// The seek tooltip's storyboard frame picture (shown with `.player.sb`).
 pub const TIPF: &str = "ytc-tipf";
-/// The CC popup's Captions On/Off switch (toggled in place so its thumb can slide).
+/// TV's remote-operated Captions On/Off switch; desktop toggles on the CC shortcut.
 pub const MSW: &str = "ytc-msw";
 /// SponsorBlock: the skip toast (label + Undo/Jump button) and the
 /// tooltip's category label (`player::sponsor`).
@@ -125,7 +125,7 @@ pub fn shell() -> String {
 <button type=\"button\" class=\"plive\" data-act=\"p-live\" aria-label=\"Jump to live\">LIVE</button>\
 <span id=\"{TIME}\" class=\"ptime\">0:00 / 0:00</span>\
 <button type=\"button\" id=\"{CHB}\" class=\"pchap\" data-n=\"0\" data-act=\"p-chap\" aria-label=\"Chapters\"><span id=\"{CHL}\" class=\"pchl\"></span></button><span class=\"pfill\"></span>\
-<button type=\"button\" class=\"pb\" id=\"{CCB}\" data-act=\"p-menu\" data-arg=\"cc\" data-hov=\"tb\" aria-haspopup=\"true\" aria-label=\"Captions (c)\">{CC_OFF}{CC_ON}</button>\
+<button type=\"button\" class=\"pb\" id=\"{CCB}\" data-act=\"p-cc\" data-arg=\"cc\" data-hov=\"tb\" aria-pressed=\"false\" aria-haspopup=\"dialog\" aria-controls=\"{MENU}\" aria-expanded=\"false\" aria-keyshortcuts=\"c ArrowUp ArrowDown\" aria-label=\"Captions (c); Up or Down for options\">{CC_OFF}{CC_ON}</button>\
 <button type=\"button\" class=\"pb pw\" id=\"{SPEED}\" data-act=\"p-menu\" data-arg=\"speed\" data-hov=\"tb\" data-wheel=\"speed\" aria-haspopup=\"true\" aria-label=\"Speed (&lt; &gt;)\"><span id=\"{RATEB}\" class=\"plbl\">1×</span></button>\
 <button type=\"button\" class=\"pb pw\" id=\"{QUAL}\" data-act=\"p-menu\" data-arg=\"quality\" data-hov=\"tb\" data-wheel=\"quality\" aria-haspopup=\"true\" aria-label=\"Quality\"><span id=\"{QLBL}\" class=\"plbl pq\">Auto</span></button>\
 <button type=\"button\" class=\"pb\" data-act=\"p-theater\" aria-label=\"Theater (t)\">{THEATER}</button>\
@@ -488,10 +488,10 @@ pub fn quality_menu(rungs: &[Rung], pref: u32, cur: u32, codecs: &[(&str, &str)]
 }
 
 /// CC popup. Tabs only when there are several audio tracks; hovering a tab
-/// switches it. The remembered On/Off switch is the full-width last row.
+/// switches it. `toggle`: keep the remembered On/Off row for a TV remote without hover.
 /// `tracks` = caption names (selected = `sel` while captions are on),
 /// `audio` = (id, name) with `audio_sel` the playing id.
-pub fn cc_menu(audio_tab: bool, tracks: &[String], sel: Option<usize>, on: bool, audio: &[(String, String)], audio_sel: &str) -> String {
+pub fn cc_menu(audio_tab: bool, tracks: &[String], sel: Option<usize>, on: bool, audio: &[(String, String)], audio_sel: &str, toggle: bool) -> String {
     let mut out = String::from("<div class=\"mcc\">");
     let tabs = audio.len() > 1;
     let audio_tab = tabs && audio_tab;
@@ -517,9 +517,11 @@ pub fn cc_menu(audio_tab: bool, tracks: &[String], sel: Option<usize>, on: bool,
             choice(&mut out, &format!("cc:{i}"), t, if on && sel == Some(i) { "on" } else { "" }, false);
         }
     }
-    out.push_str(&format!(
-        "</div><button type=\"button\" id=\"{MSW}\" class=\"msw\" role=\"switch\" aria-checked=\"{on}\" data-act=\"p-set\" data-arg=\"cc:toggle\">Captions<i></i></button></div>"
-    ));
+    out.push_str("</div>");
+    if toggle {
+        out.push_str(&format!("<button type=\"button\" id=\"{MSW}\" class=\"msw\" role=\"switch\" aria-checked=\"{on}\" data-act=\"p-set\" data-arg=\"cc:toggle\">Captions<i></i></button>"));
+    }
+    out.push_str("</div>");
     out
 }
 
@@ -734,9 +736,10 @@ mod tests {
         assert_eq!(rate_label(1.25), "1.25×");
         let s = shell();
         assert!(s.contains("id=\"ytc-video\"") && s.contains("data-hov=\"menu\""));
-        for id in [CCB, SPEED, QUAL] {
+        for id in [SPEED, QUAL] {
             assert!(s.contains(&format!("id=\"{id}\" data-act=\"p-menu\"")), "{id}");
         }
+        assert!(s.contains(&format!("id=\"{CCB}\" data-act=\"p-cc\"")) && s.contains("aria-pressed=\"false\""));
         assert!(!s.contains("title="), "no custom tooltips");
     }
 
@@ -748,7 +751,6 @@ mod tests {
         assert_eq!(progress(10.0, 0.0, 100.0, f64::NAN, true), 0.1);
         let s = shell();
         assert!(s.contains("id=\"ytc-seek\" class=\"pseek\""));
-        assert!(cc_menu(false, &[], None, true, &[], "").contains("id=\"ytc-msw\""));
     }
 
     #[test]
@@ -929,20 +931,22 @@ mod tests {
     #[test]
     fn cc_popup() {
         let tr = vec!["English".to_string(), "Deutsch <b>".to_string()];
-        let m = cc_menu(false, &tr, Some(1), true, &[], "");
+        let m = cc_menu(false, &tr, Some(1), true, &[], "", false);
         assert!(!m.contains("mtab"), "caption-only: no tabs");
         assert!(m.contains("data-arg=\"cc:1\" class=\"on\">Deutsch &lt;b&gt;<"));
-        assert!(m.ends_with("aria-checked=\"true\" data-act=\"p-set\" data-arg=\"cc:toggle\">Captions<i></i></button></div>"));
-        let off = cc_menu(false, &tr, Some(1), false, &[], "");
-        assert!(!off.contains("class=\"on\"") && off.contains("aria-checked=\"false\""));
-        assert!(cc_menu(false, &[], None, true, &[], "").contains("No captions"));
+        assert!(!m.contains("cc:toggle") && !m.contains("role=\"switch\""), "desktop uses the CC shortcut");
+        let off = cc_menu(false, &tr, Some(1), false, &[], "", false);
+        assert!(!off.contains("class=\"on\""));
+        assert!(cc_menu(false, &[], None, true, &[], "", false).contains("No captions"));
         let au = vec![("en.4".to_string(), "English original".to_string()), ("de.3".to_string(), "German".to_string())];
-        let m = cc_menu(true, &tr, Some(0), true, &au, "de.3");
+        let m = cc_menu(true, &tr, Some(0), true, &au, "de.3", false);
         assert!(m.contains("data-hov=\"tab\" data-arg=\"audio\" class=\"on\">Audio<"));
         assert!(m.contains("data-arg=\"au:de.3\" class=\"on\">German<") && !m.contains("cc:0"));
-        assert!(m.contains("cc:toggle"), "switch in the Audio view too");
+        assert!(!m.contains("cc:toggle"), "no desktop switch in the Audio view either");
+        let tv = cc_menu(false, &tr, Some(0), false, &au, "de.3", true);
+        assert!(tv.contains("id=\"ytc-msw\"") && tv.contains("aria-checked=\"false\""), "TV retains its remote toggle");
         // One audio track: Audio view requested but there is no Audio tab.
-        assert!(!cc_menu(true, &tr, None, true, &au[..1], "en.4").contains("au:"));
+        assert!(!cc_menu(true, &tr, None, true, &au[..1], "en.4", false).contains("au:"));
     }
 
     #[test]

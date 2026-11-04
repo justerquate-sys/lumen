@@ -3442,6 +3442,7 @@ impl Own {
         }
         if c != self.classes {
             bridge::attr(ui::BOX, "class", &c);
+            if !crate::tv::on() { bridge::attr(ui::CCB, "aria-pressed", if self.prefs.captions { "true" } else { "false" }); }
             self.classes = c;
         }
     }
@@ -3485,6 +3486,7 @@ impl Own {
     }
 
     fn render_menu(&mut self) {
+        if !crate::tv::on() { bridge::attr(ui::CCB, "aria-expanded", if self.mc.open == Some("cc") { "true" } else { "false" }); }
         let html = match self.mc.open {
             Some("speed") => ui::speed_menu(bridge::media_get(self.vid, "playbackRate")),
             Some("quality") => {
@@ -3501,7 +3503,7 @@ impl Own {
                 let names: Vec<String> = self.cc_tracks().iter().map(|t| if t.name.is_empty() { t.lang.clone() } else { t.name.clone() }).collect();
                 let audio = self.audio_tracks();
                 let playing = self.audio.as_ref().map(|f| f.audio_id.clone()).unwrap_or_default();
-                ui::cc_menu(self.cc_audio, &names, self.cc_sel, self.prefs.captions, &audio, &playing)
+                ui::cc_menu(self.cc_audio, &names, self.cc_sel, self.prefs.captions, &audio, &playing, crate::tv::on())
             }
             // Closing keeps the content: the panel fades out with it (hidden and inert after).
             None => {
@@ -3576,7 +3578,7 @@ impl Own {
     }
 
     /// A choice changes the open menu in place (class/attribute toggles, no
-    /// re-render): hover, focus and the switch's slide survive, and nothing flickers.
+    /// re-render): hover, focus and selection motion survive, and nothing flickers.
     fn sync_menu(&self) {
         let pick = |group: &str, arg: Option<String>, class: &str| {
             bridge::class_all(&format!("#{} {group}", ui::MENU), class, false);
@@ -3600,7 +3602,7 @@ impl Own {
                 pick(".mls [data-arg^=\"cc:\"]", self.cc_sel.filter(|_| on).map(|i| format!("cc:{i}")), "on");
                 let playing = self.audio.as_ref().map(|f| f.audio_id.clone()).unwrap_or_default();
                 pick(".mls [data-arg^=\"au:\"]", Some(format!("au:{playing}")), "on");
-                bridge::attr(ui::MSW, "aria-checked", if on { "true" } else { "false" });
+                if crate::tv::on() { bridge::attr(ui::MSW, "aria-checked", if on { "true" } else { "false" }); }
             }
             None => {}
         }
@@ -3889,6 +3891,11 @@ impl Own {
                 self.set_volume(v, !m);
                 bridge::value(ui::VOL, &format!("{}", if m { v } else { 0.0 }));
             }
+            "p-cc" => {
+                self.set_captions(!self.prefs.captions);
+                if self.mc.open == Some("cc") { self.sync_menu(); }
+                keep_focus = kbd;
+            }
             "p-menu" => {
                 let Some(m) = ui::menu_name(arg) else { return false };
                 let d = self.mc.click(m, kbd);
@@ -4047,6 +4054,16 @@ impl Own {
             self.chap_panel(PanelHow::Key);
             if foc {
                 bridge::focus(ui::CHH);
+            }
+            return true;
+        }
+        // CC activation toggles captions; arrows on its focused desktop shortcut open options.
+        if matches!(key, "ArrowUp" | "ArrowDown") && !crate::tv::on() && bridge::focus_id() == ui::CCB {
+            if self.mc.open == Some("cc") && self.mc.src == ui::Src::Key {
+                bridge::focus_in(ui::MENU, 0);
+            } else {
+                let d = self.mc.click("cc", true);
+                self.menu_do(d);
             }
             return true;
         }

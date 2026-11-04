@@ -721,13 +721,16 @@ dark player surface at the final geometry until the first frame; the card's `mqd
 different picture from the video's start) is no longer scaled up to the player. The three shortcuts **open on hover** (16 ms intent; leaving closes
 after 400 ms, or 180 ms once the pointer was in the menu; travel with a button held is not intent and a
 held slider is never dismissed). In CC hover never selects anything; **Speed and Quality choose with zero clicks**
-(since 2 Nov 2026, see below). A click pins a menu (a second click, Esc
+(since 2 Nov 2026, see below). Clicking **CC** toggles captions immediately; its outlined/filled icon
+and `aria-pressed` follow the remembered state. Hover opens its language/audio options without changing
+captions. Enter/Space toggle too; ↑/↓ on the focused CC button opens the options with immediate focus,
+and Escape returns to CC. Speed/Quality clicks pin their menus (a second click, Esc
 or a click on the video closes it); after a mouse choice it closes when the pointer leaves. Enter/Space on
-a shortcut opens it with focus on the current choice, arrows move, Esc returns focus to the shortcut.
+Speed/Quality opens the menu with focus on the current choice, arrows move, Esc returns to the shortcut.
 **Motion** (motion law; all class toggles on the persistent `#ytc-player`, transform/opacity only): the
 menu is one persistent panel: the first open fades + scales from `.97` at its shortcut (170 ms ease-out,
 clickable on its first frame), moving between shortcuts only swaps the content (no re-animation), it
-closes in 110 ms; choices toggle classes in place (the CC switch thumb slides on the house spring). The
+closes in 110 ms; choices toggle classes in place. The
 control bar fades out on idle or when the pointer leaves the player while playing and comes back on the
 same frame; a stall over 0.6 s brings it back softly and the empty track breathes mint (no spinner).
 The seek track grows with `scaleY` (instant in, eased out), the knob rides on `translateX`; while playing
@@ -768,9 +771,10 @@ quickly (lines that stay never move). Keyboard shortcuts add no motion.
   restarts it, and rows passed over on the way (the bottom ones, entering from the toolbar) never select.
   A row that came under a still pointer by itself (the list scrolled after a wheel step, the panel opened
   from the keyboard) starts no dwell for 250 ms. A click still chooses at once; the keyboard is unchanged.
-- **CC**: caption languages, then a full-width remembered **Captions On/Off** switch. An **Audio** tab
+- **CC**: caption languages, with on/off handled by the desktop CC shortcut. An **Audio** tab
   (switches on hover) appears only when the video has several audio tracks; choosing one cuts the new
-  language in about 1 s later through the normal quality-switch path.
+  language in about 1 s later through the normal quality-switch path. The TV remote keeps its existing
+  menu opener and full-width Captions On/Off row, since it has no hover.
 - **SponsorBlock** (2 Nov 2026; `player/sponsor.rs` pure, `player/own/sb.rs` glue): sponsor
   segments from SponsorBlock's public database are skipped in our own player (the SponsorBlock extension cannot act
   on it). *Lookup:* k-anonymous: `GET https://sponsor.ajay.app/api/skipSegments/<first 4 hex of SHA-256(video id)>`
