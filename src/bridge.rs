@@ -95,6 +95,8 @@ extern "C" {
     pub fn value(id: &str, v: &str);
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn focus(id: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn focus_id() -> String;
     /// Focuses a control inside `id`: 0 = the `.on` one (else the first), ±1 = next/previous.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn focus_in(id: &str, delta: i32);
@@ -247,6 +249,16 @@ extern "C" {
     pub fn storage_get(key: &str);
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn storage_set(key: &str, json: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn extension_page() -> bool;
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn storage_watch(key: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn storage_write(id: u32, key: &str, json: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn message_listen();
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn active_message(id: u32, message: &str);
     /// Calls `on_timer(id)` after `ms`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn timer(id: u32, ms: u32);

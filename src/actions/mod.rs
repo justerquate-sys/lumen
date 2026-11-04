@@ -1260,9 +1260,11 @@ impl Actions {
 
     // ----------------------------------------------------------- responses
 
-    pub fn on_fetch(&mut self, net: &Net, id: u32, status: u32, body: &[u8]) {
-        let Some(job) = self.jobs.remove(&id) else { return };
+    /// Returns a confirmed Watch later membership change for the app's shared card state/cache.
+    pub fn on_fetch(&mut self, net: &Net, id: u32, status: u32, body: &[u8]) -> Option<(String, bool)> {
+        let Some(job) = self.jobs.remove(&id) else { return None };
         let res = req::outcome(status, body);
+        let mut watch_later = None;
         match job {
             Job::Like { v } => {
                 let ok = res.is_ok();
@@ -1337,6 +1339,7 @@ impl Actions {
             Job::Edit { v, pl } => {
                 let add = self.list_mut(&v).and_then(|l| l.iter().find(|(p, _)| p.id == pl)).and_then(|(_, t)| t.inflight).map(|x| x.1).unwrap_or(true);
                 let ok = res.as_ref().is_ok_and(req::edit_ok);
+                if ok && pl == "WL" { watch_later = Some((v.clone(), add)); }
                 let next = self.list_mut(&v).and_then(|l| l.iter_mut().find(|(p, _)| p.id == pl)).and_then(|(_, t)| t.done(id, ok));
                 if let Some(n) = next {
                     self.send_edit(net, &v, &pl, n);
@@ -1421,6 +1424,7 @@ impl Actions {
                 }
             }
         }
+        watch_later
     }
 
     pub fn debug(&self) -> String {

@@ -153,6 +153,7 @@ enum Purpose {
     /// Is the network there at all? (`generate_204`; a player failure that looked like a dropped connection)
     NetProbe,
     Page { nav: u32 },
+    WatchLaterOrder { nav: u32 },
     Resolve { nav: u32, path: String },
     Cont { nav: u32, generation: u32 },
     /// `spec` = speculative (cards in view, idle time): cancelled on navigation.
@@ -269,6 +270,8 @@ pub struct App {
     /// chrome.storage config read. Feeds never wait for it (they use the tab's
     /// mirror or the fallback); the player does, for its prefs and switches.
     cfg_ready: bool,
+    /// This visit already requested the owned playlist's newest-save order.
+    wl_ordering: bool,
     auth: Auth,
     hl: String,
     route: Route,
@@ -453,6 +456,7 @@ pub fn boot() {
     // first request goes out now; chrome.storage only refines later requests.
     let mirror = bridge::session_get(CFG_SESSION);
     let cfg = if mirror.is_empty() { Config::default() } else { Config::from_json(&mirror) };
+    cfg.palette.apply();
     // YouTube's own document for this tab (the extension's loader leaves it running): when it is the Home answer
     // the client would fetch anyway (a Home load from YouTube's document, `homeready::on_doc_script`), it keeps
     // streaming with its nodes held out of the page; else it stops now, before any request of ours goes out (a
@@ -469,6 +473,7 @@ pub fn boot() {
     }
     let mut app = App {
         cfg_ready: false,
+        wl_ordering: false,
         cfg,
         auth: crate::tv::auth(),
         hl,
@@ -596,6 +601,8 @@ pub fn boot() {
     let main = snap.map(|s| app.adopt_snap(s, trim));
     app.side_at = render::side_index(app.route.nav_key()).unwrap_or(0);
     bridge::doc(&render::shell(&app.route, &app.url, main.as_deref()));
+    bridge::storage_watch(config::STORAGE_KEY);
+    bridge::message_listen();
     if keep_doc {
         bridge::doc_hold("var ytInitialData = ", "ytcfg.set(");
         app.hr.nav_doc = homeready::NavDoc::Held;
@@ -762,7 +769,7 @@ impl App {
         let stale: Vec<u32> = self
             .pending
             .iter()
-            .filter(|(_, p)| matches!(p.purpose, Purpose::Page { .. } | Purpose::Resolve { .. } | Purpose::Cont { .. }))
+            .filter(|(_, p)| matches!(p.purpose, Purpose::Page { .. } | Purpose::WatchLaterOrder { .. } | Purpose::Resolve { .. } | Purpose::Cont { .. }))
             .map(|(id, _)| *id)
             .collect();
         for id in stale {
@@ -848,7 +855,11 @@ impl App {
         if s.is_empty() {
             return None;
         }
-        snap::from_json(&s, &self.url).filter(|s| !s.items.is_empty())
+        snap::from_json(&s, &self.url).filter(|s| {
+            // Pre-0.13.4 Watch later snapshots have a playlist metadata header and the old
+            // server order. New Watch later pages use the plain feed header.
+            !s.items.is_empty() && (self.url != crate::features::watch_later::PAGE_URL || matches!(s.head, Head::Feed { .. }))
+        })
     }
 
     /// Takes over a snapshot's state; returns its page HTML. `trim`: the page opens at its top,
@@ -950,6 +961,7 @@ impl App {
         self.marks = vec![("navigate", 0.0)];
         self.rendered = false;
         self.retried = false;
+        self.wl_ordering = false;
         self.generation += 1;
         self.feed = FeedState { cont_ep: "browse", ..Default::default() };
         self.cont_busy = false;
@@ -1077,6 +1089,7 @@ impl App {
 
     /// Immediate UI for the current route, then `load()`.
     fn start_route(&mut self) {
+        self.wl_ordering = false;
         let native = native_url(&self.url);
         match self.route.clone() {
             Route::Unknown { .. } => {
@@ -1228,6 +1241,7 @@ impl App {
             bridge::session_set(CFG_SESSION, &self.cfg.to_json());
         }
         self.cfg_ready = true;
+        self.cfg.palette.apply();
         let hold = std::mem::take(&mut self.home_hold);
         if hold && !au_changed && self.route == Route::Home && !self.rendered {
             if self.cfg.visitor.is_some() {
@@ -1252,6 +1266,27 @@ impl App {
             let id = self.timer(Timer::ConfigRefresh);
             bridge::timer(id, CONFIG_REFRESH_DELAY_MS);
         }
+    }
+
+    /// Toolbar changes apply in place, without navigation or restarting playback.
+    pub fn on_storage_change(&mut self, key: &str, json: &str) {
+        if key != config::STORAGE_KEY { return; }
+        let cfg = Config::from_json(json);
+        self.cfg.palette = cfg.palette;
+        self.cfg.prefs.sb_on = cfg.prefs.sb_on;
+        self.cfg.prefs.sb_skip = cfg.prefs.sb_skip;
+        self.cfg.palette.apply();
+        bridge::session_set(CFG_SESSION, &self.cfg.to_json());
+        if let Some(p) = self.player.as_mut() { p.apply_sponsor_prefs(cfg.prefs.sb_on, cfg.prefs.sb_skip); }
+    }
+
+    pub fn toolbar_message(&mut self, message: &str) -> String {
+        if !matches!(message, "sponsor-status" | "sponsor-undo") { return "{}".into(); }
+        if message == "sponsor-undo" {
+            if let Some(p) = self.player.as_mut() { p.toolbar_sponsor_undo(); }
+            self.after_player();
+        }
+        self.player.as_ref().map_or_else(|| "{}".into(), |p| p.toolbar_sponsor_status().to_string())
     }
 
     /// chrome.storage (persistent) plus this tab's sessionStorage mirror.
@@ -1854,6 +1889,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: &str, editable: bool) -> bool {
+        self.logo_done();
         self.last_input = bridge::now();
         crate::telemetry::input("keyboard");
         self.last_key = self.last_input;
@@ -2159,7 +2195,11 @@ impl App {
             return;
         }
         if self.acts.owns_fetch(id) {
-            self.acts.on_fetch(&net!(self), id, status, body);
+            if let Some((v, add)) = self.acts.on_fetch(&net!(self), id, status, body) {
+                use crate::features::watch_later::{Edit, Outcome};
+                self.fx_wl_settle(&v, if add { Edit::Add } else { Edit::Remove }, &Outcome::Changed);
+                if matches!(&self.route, Route::Playlist { list } if list == "WL") { self.fx_wl_redraw(); }
+            }
             self.tv_drawer_focus();
             for (kind, reason) in std::mem::take(&mut self.acts.incidents) {
                 self.incident(kind, &reason, None);
@@ -2389,6 +2429,16 @@ impl App {
                 }
                 self.on_page_body(status, body);
             }
+            Purpose::WatchLaterOrder { nav } => {
+                if nav != self.nav { return; }
+                if ok && json::parse(body).and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string)).as_deref() == Some("STATUS_SUCCEEDED") {
+                    self.fx_wl_invalidate();
+                    self.cont_cache.clear();
+                    self.page_request(Req::Browse { id: "VLWL".into(), params: None });
+                } else {
+                    self.fail(status, "Watch later could not be sorted newest first.");
+                }
+            }
         }
     }
 
@@ -2442,6 +2492,13 @@ impl App {
             self.fail(status, if ok { "YouTube returned an unreadable response." } else { "YouTube did not return this page." });
             return;
         };
+        if matches!(&self.route, Route::Playlist { list } if list == "WL") && !self.wl_ordering {
+            if let Some(req) = crate::features::watch_later::newest_order(&json) {
+                self.wl_ordering = true;
+                self.send(req, Purpose::WatchLaterOrder { nav: self.nav }, false);
+                return;
+            }
+        }
         if self.swr {
             self.swr = false;
             if bridge::scroll_y() > SWAP_MAX_Y {
@@ -3064,7 +3121,7 @@ impl App {
     /// Hover zones (`data-hov`): the player's menus open/close from these.
     pub fn on_hov(&mut self, zone: &str, arg: &str, held: bool) {
         self.voice_hov(zone, held);
-        self.logo_hov(zone, held);
+        self.logo_hov(zone, arg, held);
         self.fx.ed_in = zone == "fxed";
         if zone == "wl" {
             if !held {

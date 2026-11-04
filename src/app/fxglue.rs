@@ -243,7 +243,8 @@ impl App {
     pub(super) fn fx_visible(&self, items: &[Item]) -> Vec<Item> {
         let surf = self.fx_surface();
         let any_blocked = !rules_empty();
-        if !filters::active(surf, &self.fx.prefs, any_blocked) {
+        let wl = matches!(&self.route, Route::Playlist { list } if list == "WL");
+        if !wl && !filters::active(surf, &self.fx.prefs, any_blocked) {
             return items.to_vec();
         }
         let prefs = &self.fx.prefs;
@@ -251,7 +252,7 @@ impl App {
         features::shared(|s| {
             let rules = &s.rules;
             let blocked = |id: &str| checker.verdict(id, rules) == Some(websites::Verdict::Blocked);
-            items.iter().filter(|it| filters::keep(it, surf, prefs, &blocked)).cloned().collect()
+            items.iter().filter(|it| (!wl || !s.saves.hidden(it.key())) && filters::keep(it, surf, prefs, &blocked)).cloned().collect()
         })
     }
 
@@ -333,6 +334,9 @@ impl App {
 
     /// Every painted page (fresh, snapshot, memory): the bar, checks, topic state.
     pub(super) fn fx_painted(&mut self) {
+        if matches!(&self.route, Route::Playlist { list } if list == "WL") && features::shared(|s| self.feed.shown.iter().any(|i| s.saves.hidden(i.key()))) {
+            self.fx_wl_redraw();
+        }
         if self.fx.parked && self.route == Route::Home {
             self.fx_topic_reset();
         }
@@ -1202,6 +1206,15 @@ impl App {
             return;
         }
         let Some(edit) = features::shared(|s| Some(s.saves.click(v))).flatten() else { return };
+        let library = matches!(&self.route, Route::Playlist { list } if list == "WL") && edit == Edit::Remove;
+        let focus = if library && kbd {
+            let items = self.fx_visible(&self.feed.shown);
+            items.iter().position(|i| i.key() == v).and_then(|at| items.get(at + 1).or_else(|| at.checked_sub(1).and_then(|n| items.get(n)))).map(|i| wl::btn_id(i.key()))
+        } else { None };
+        // Only surviving cards move. The removed card itself is gone on this frame.
+        let reflow = library && !kbd && !bridge::reduced_motion();
+        let selector = format!(".c[data-v]:not([data-v=\"{v}\"])");
+        if reflow { bridge::flip_mark(LIST, &selector); }
         let st = State::Saving(edit);
         features::shared(|s| s.saves.state.insert(v.to_string(), st.clone()));
         let pop = edit == Edit::Add && !kbd;
@@ -1211,6 +1224,14 @@ impl App {
             self.fx.wl_pop.remove(v);
         }
         Self::fx_wl_paint(v, &st, pop);
+        if library {
+            self.fx_wl_redraw();
+            if reflow {
+                let (curve, ms) = motion::ui();
+                bridge::flip_play(LIST, &selector, curve, ms, 0);
+            }
+            if kbd { bridge::focus(focus.as_deref().unwrap_or("ytc-nav-wl")); }
+        }
         if !self.auth.signed_in() {
             let out = Outcome::Failed { reason: "Sign in required".into(), detail: String::new() };
             self.fx_wl_settle(v, edit, &out);
@@ -1219,7 +1240,7 @@ impl App {
         self.fx_wl_send(v, Some(edit));
     }
 
-    fn fx_wl_settle(&mut self, v: &str, edit: Edit, out: &Outcome) {
+    pub(super) fn fx_wl_settle(&mut self, v: &str, edit: Edit, out: &Outcome) {
         let st = features::shared(|s| {
             s.saves.settle(v, edit, out);
             s.saves.probed.insert(v.to_string(), true);
@@ -1229,11 +1250,49 @@ impl App {
         if let Some(st) = st {
             Self::fx_wl_paint(v, &st, pop);
         }
+        let library = matches!(&self.route, Route::Playlist { list } if list == "WL");
+        if matches!(out, Outcome::Failed { .. }) {
+            if edit == Edit::Remove {
+                self.fx_wl_invalidate();
+                if library { self.fx_wl_redraw(); }
+            }
+        } else {
+            if library && edit == Edit::Remove {
+                self.feed.shown.retain(|i| i.key() != v);
+                self.feed.buf.retain(|i| i.key() != v);
+                self.mark_items();
+            }
+            self.fx_wl_invalidate();
+        }
         if let Outcome::Failed { reason, detail } = out {
             self.fx.last_wl_error = format!("{edit:?} {v}: {detail}");
             let what = if edit == Edit::Add { "save to" } else { "remove from" };
             self.incident("watch-later", &format!("{what} Watch later failed for {v}: {reason} ({detail})"), None);
         }
+    }
+
+    /// Membership changes invalidate only Watch later's old page copies. This also handles a
+    /// removal that finishes while the user is elsewhere; old in-flight bodies stay filtered.
+    pub(super) fn fx_wl_invalidate(&mut self) {
+        self.saved.retain(|s| s.url != wl::PAGE_URL);
+        self.page_cache.retain(|(u, _, _)| u != wl::PAGE_URL);
+        self.snap_at.remove(wl::PAGE_URL);
+        bridge::session_del(&crate::snap::key(wl::PAGE_URL));
+        let pending = self.page_prefetching.remove(wl::PAGE_URL);
+        if let Some(id) = pending { self.pending.remove(&id); self.abort_req(id); }
+        if self.await_page.as_deref() == Some(wl::PAGE_URL) {
+            self.await_page = None;
+            if matches!(&self.route, Route::Playlist { list } if list == "WL") && !self.rendered { self.load(); }
+        }
+    }
+
+    pub(super) fn fx_wl_redraw(&mut self) {
+        let focus = bridge::focus_id();
+        self.fx_refilter(false);
+        if self.fx_visible(&self.feed.shown).is_empty() && !self.has_more() {
+            bridge::html(LIST, "<p class=\"empty\" role=\"status\">This playlist is empty.</p>");
+        }
+        if focus.starts_with("ytc-wl-") { bridge::focus(&focus); }
     }
 
     /// First hover/focus of a card's button: ask whether it is already saved.

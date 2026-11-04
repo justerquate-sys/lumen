@@ -71,9 +71,8 @@ pub const CHHN: &str = "ytc-chhn";
 pub const TIPF: &str = "ytc-tipf";
 /// The CC popup's Captions On/Off switch (toggled in place so its thumb can slide).
 pub const MSW: &str = "ytc-msw";
-/// SponsorBlock: the toolbar shortcut (opens its menu), the skip toast (label + Undo/Jump button) and the
+/// SponsorBlock: the skip toast (label + Undo/Jump button) and the
 /// tooltip's category label (`player::sponsor`).
-pub const SBB: &str = "ytc-sbb";
 pub const SBT: &str = "ytc-sbt";
 pub const SBTL: &str = "ytc-sbtl";
 pub const SBTB: &str = "ytc-sbtb";
@@ -100,8 +99,6 @@ const CC_ON: &str = "<svg class=\"i-ccon\" viewBox=\"0 0 24 24\"><path fill-rule
 const THEATER: &str = "<svg class=\"o i-th\" viewBox=\"0 0 24 24\"><path/></svg>";
 /// Fullscreen: four corners that fold inward in fullscreen.
 const FULL: &str = "<svg class=\"o i-fs\" viewBox=\"0 0 24 24\"><path/></svg>";
-/// SponsorBlock: playback jumping over part of the track; off draws a slash through it (client.css).
-const SKIP: &str = "<svg class=\"o i-sb\" viewBox=\"0 0 24 24\"><path class=\"tr\" d=\"M3 16.75h18\"/><path class=\"jp\" d=\"M6 13.25a6 6 0 0 1 12 0M15.9 11.15l2.1 2.1 2.1-2.1\"/><path class=\"sl\" d=\"M4.5 4.5l15 15\"/></svg>";
 
 /// The player's inner markup (inside the 16:9 `#ytc-player` box, so there is
 /// no layout shift between loading, playing and errors).
@@ -128,7 +125,6 @@ pub fn shell() -> String {
 <button type=\"button\" class=\"plive\" data-act=\"p-live\" aria-label=\"Jump to live\">LIVE</button>\
 <span id=\"{TIME}\" class=\"ptime\">0:00 / 0:00</span>\
 <button type=\"button\" id=\"{CHB}\" class=\"pchap\" data-n=\"0\" data-act=\"p-chap\" aria-label=\"Chapters\"><span id=\"{CHL}\" class=\"pchl\"></span></button><span class=\"pfill\"></span>\
-<button type=\"button\" class=\"pb\" id=\"{SBB}\" data-act=\"p-menu\" data-arg=\"sb\" data-hov=\"tb\" aria-haspopup=\"true\" aria-label=\"Segment skipping (SponsorBlock)\">{SKIP}</button>\
 <button type=\"button\" class=\"pb\" id=\"{CCB}\" data-act=\"p-menu\" data-arg=\"cc\" data-hov=\"tb\" aria-haspopup=\"true\" aria-label=\"Captions (c)\">{CC_OFF}{CC_ON}</button>\
 <button type=\"button\" class=\"pb pw\" id=\"{SPEED}\" data-act=\"p-menu\" data-arg=\"speed\" data-hov=\"tb\" data-wheel=\"speed\" aria-haspopup=\"true\" aria-label=\"Speed (&lt; &gt;)\"><span id=\"{RATEB}\" class=\"plbl\">1×</span></button>\
 <button type=\"button\" class=\"pb pw\" id=\"{QUAL}\" data-act=\"p-menu\" data-arg=\"quality\" data-hov=\"tb\" data-wheel=\"quality\" aria-haspopup=\"true\" aria-label=\"Quality\"><span id=\"{QLBL}\" class=\"plbl pq\">Auto</span></button>\
@@ -585,7 +581,6 @@ pub fn menu_name(arg: &str) -> Option<&'static str> {
         "speed" => Some("speed"),
         "quality" => Some("quality"),
         "cc" => Some("cc"),
-        "sb" => Some("sb"),
         // The watch page's Save chooser (`actions`, its own `MenuCtl`; zones `sv`/`svm`).
         "save" => Some("save"),
         _ => None,

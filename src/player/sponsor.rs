@@ -9,7 +9,7 @@
 //! never reported back (no `viewedVideoSponsorTime`).
 
 use crate::json::{self, Value};
-use crate::util::{esc_into, is_video_id};
+use crate::util::is_video_id;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -346,30 +346,6 @@ pub fn marks_html(segs: &[Seg], d: f64, lo: f64, hi: f64) -> String {
     out
 }
 
-pub const MENU_CATS: &str = "ytc-msbc";
-pub const MENU_SW: &str = "ytc-msbsw";
-
-/// The SponsorBlock menu: auto-skip choices per category (two columns, a
-/// color dot and this video's count), then the remembered On/Off switch.
-/// Categories not chosen still show on the seek bar.
-pub fn menu_html(on: bool, mask: u16, segs: &[Seg]) -> String {
-    let mut out = String::from("<div class=\"msb\"><p class=\"msbh\">Auto-skip</p>");
-    out.push_str(&format!("<div id=\"{MENU_CATS}\" class=\"msbc\" role=\"group\" aria-label=\"Auto-skip\">"));
-    for c in SKIPPABLE {
-        let n = segs.iter().filter(|s| s.cat == c).count();
-        let sel = mask & c.bit() != 0;
-        out.push_str(&format!("<button type=\"button\" id=\"ytc-m-sb:{}\" data-act=\"p-set\" data-arg=\"sb:{}\" aria-pressed=\"{sel}\"{}><i class=\"k{}\"></i><span>", c.key(), c.key(), if sel { " class=\"on\"" } else { "" }, c.idx()));
-        esc_into(&mut out, c.label());
-        out.push_str("</span>");
-        if n > 0 {
-            out.push_str(&format!("<small>{n}</small>"));
-        }
-        out.push_str("</button>");
-    }
-    out.push_str(&format!("</div><button type=\"button\" id=\"{MENU_SW}\" class=\"msw\" role=\"switch\" aria-checked=\"{on}\" data-act=\"p-set\" data-arg=\"sb:toggle\">SponsorBlock<i></i></button></div>"));
-    out
-}
-
 /// Toast text after a skip.
 pub fn skipped_label(c: Cat) -> String {
     format!("Skipped {}", c.noun())
@@ -513,22 +489,10 @@ mod tests {
     }
 
     #[test]
-    fn menu_lists_categories_with_counts() {
-        let h = menu_html(true, default_mask(), &segs());
-        assert!(h.contains("data-arg=\"sb:sponsor\" aria-pressed=\"true\" class=\"on\"><i class=\"k0\"></i><span>Sponsor</span><small>1</small>"), "{h}");
-        assert!(h.contains("data-arg=\"sb:intro\" aria-pressed=\"false\"><i class=\"k3\"></i><span>Intro</span><small>1</small>"), "{h}");
-        assert!(h.contains("data-arg=\"sb:filler\" aria-pressed=\"false\"><i class=\"k7\"></i><span>Filler</span></button>"), "{h}");
-        assert!(h.contains("role=\"switch\" aria-checked=\"true\" data-act=\"p-set\" data-arg=\"sb:toggle\">SponsorBlock"));
-        assert!(!h.contains("poi_highlight"));
-        assert_eq!(skipped_label(Cat::Sponsor), "Skipped sponsor");
-    }
-
-    #[test]
-    fn player_markup_has_the_shortcut_toast_and_bar_marks() {
+    fn player_keeps_skip_feedback_and_bar_marks_without_settings() {
         use crate::player::ui;
         let sh = ui::shell();
-        assert!(sh.contains("id=\"ytc-sbb\" data-act=\"p-menu\" data-arg=\"sb\" data-hov=\"tb\""), "shortcut opens like the others");
-        assert!(sh.find("id=\"ytc-sbb\"") < sh.find("id=\"ytc-ccb\""), "left of CC");
+        assert!(!sh.contains("ytc-sbb") && !sh.contains("data-arg=\"sb\""), "settings live in the browser toolbar");
         assert!(sh.contains("id=\"ytc-sbt\" class=\"psbt\" role=\"status\"") && sh.contains("data-act=\"p-sb\" data-arg=\"undo\" tabindex=\"-1\""));
         assert_eq!(ui::bars_html_with(&[], &|_, _| String::new()), ui::bars_html(&[]), "no marks: the plain bar");
         let s = segs();

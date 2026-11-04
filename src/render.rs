@@ -85,6 +85,10 @@ pub fn go_href(key: &str) -> Option<&'static str> {
     GO.iter().find(|(k, _)| *k == key).map(|(_, h)| *h)
 }
 
+pub fn side_href(key: &str) -> Option<&'static str> {
+    SIDE.iter().find(|s| s.1 == key).map(|s| s.0)
+}
+
 /// The keyboard sheet (`?`).
 pub const KEYS: &str = "ytc-keys";
 
@@ -192,7 +196,7 @@ fn sidebar(out: &mut String, at: usize) {
     out.push_str(&format!("<nav id=\"ytc-side\" aria-label=\"Browse\"><i id=\"{SIDE_PILL}\" class=\"sdi\" aria-hidden=\"true\" style=\"--st:{t};--sb:{b}\"></i>"));
     for (href, key, label, d) in SIDE {
         let go = GO.iter().find(|g| g.1 == href).map_or("", |g| g.0);
-        out.push_str(&format!("<a href=\"{href}\" data-nav=\"{key}\" aria-keyshortcuts=\"g {go}\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"{d}\"/></svg>{label}</a>"));
+        out.push_str(&format!("<a id=\"ytc-nav-{key}\" href=\"{href}\" data-hov=\"side\" data-arg=\"{key}\" data-nav=\"{key}\" aria-keyshortcuts=\"g {go}\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"{d}\"/></svg>{label}</a>"));
     }
     out.push_str("</nav>");
 }
@@ -402,7 +406,9 @@ fn video_img(out: &mut String, v: &Video, plan: ImgPlan, i: usize) {
 
 fn video_card(out: &mut String, v: &Video, plan: ImgPlan, i: usize) {
     let href = format!("/watch?v={}", v.id);
-    out.push_str("<div class=\"c\" data-v=\"");
+    out.push_str("<div class=\"c\" data-k=\"");
+    out.push_str(&v.id);
+    out.push_str("\" data-v=\"");
     out.push_str(&v.id);
     out.push_str("\"><a class=\"th\" href=\"");
     out.push_str(&href);
@@ -598,7 +604,8 @@ pub fn channel_head(c: &ChannelPage) -> Head {
 }
 
 pub fn playlist_head(p: &PlaylistPage, wl: bool) -> Head {
-    Head::Playlist { title: if wl && p.title.is_empty() { "Watch later".into() } else { p.title.clone() }, meta: p.meta.clone() }
+    if wl { return feed_head("Watch later"); }
+    Head::Playlist { title: p.title.clone(), meta: p.meta.clone() }
 }
 
 /// TV: a calm card in the middle of the content (a heading, a line, its buttons; the first is focused).
@@ -1177,7 +1184,7 @@ mod tests {
         let v = Video { id: "abcdefghijk".into(), title: "T".into(), ..Default::default() };
         let mut out = String::new();
         cards(&mut out, &[Item::Video(v.clone())], ImgPlan::lazy(Lay::Grid));
-        assert!(out.starts_with("<div class=\"c\" data-v=\"abcdefghijk\">") && !out.contains("class=\"ca\""));
+        assert!(out.starts_with("<div class=\"c\" data-k=\"abcdefghijk\" data-v=\"abcdefghijk\">") && !out.contains("class=\"ca\""));
         set_card_hook(hook);
         let mut out = String::new();
         cards(&mut out, &[Item::Video(v)], ImgPlan::lazy(Lay::Grid));

@@ -215,6 +215,7 @@ const YTC = (() => {
     class_all(sel, cls, on) { for (const el of d.querySelectorAll(sel)) el.classList.toggle(cls, !!on); },
     get_html: id => { const el = byId(id); return el ? el.innerHTML : ''; },
     attr(id, name, value) { const el = byId(id); if (el) el.setAttribute(name, value); },
+    focus_id() { return d.activeElement?.id || ''; },
     toggle: (id, cls) => { const el = byId(id); return el ? el.classList.toggle(cls) : false; },
     value(id, v) { const el = byId(id); if (el) el.value = v; },
     // Focuses a control inside `id`: delta 0 = the selected (.on) one or the first; ±1 = next/previous (wrapping).
@@ -562,9 +563,25 @@ const YTC = (() => {
     abort(id) { const c = ctl.get(id); if (c) { ctl.delete(id); c.abort(); } },
     storage_get(key) {
       const done = v => call('on_storage', key, JSON.stringify(v && v[key] !== undefined ? v[key] : null));
-      try { chrome.storage.local.get(key).then(done, () => done(null)); } catch { done(null); }
+      try { chrome.storage.local.get(key).then(done, () => done(null)); } catch { queueMicrotask(() => done(null)); }
     },
     storage_set(key, json) { try { chrome.storage.local.set({ [key]: JSON.parse(json) }); } catch {} },
+    extension_page() { return /^(chrome|moz)-extension:$/.test(location.protocol); },
+    storage_watch(key) {
+      if (YTC._sw) return;
+      try { chrome.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch[key]) call('on_storage_change', key, JSON.stringify(ch[key].newValue ?? null)); }); YTC._sw = true; } catch {}
+    },
+    storage_write(id, key, json) {
+      try { chrome.storage.local.set({ [key]: JSON.parse(json) }).then(() => call('on_store_result', id, true), () => call('on_store_result', id, false)); }
+      catch { queueMicrotask(() => call('on_store_result', id, false)); }
+    },
+    message_listen() {
+      try { chrome.runtime.onMessage.addListener((message, sender, reply) => { if (typeof message === 'string' && sender.id === chrome.runtime.id) reply(call('on_extension_message', message)); }); } catch {}
+    },
+    active_message(id, message) {
+      try { chrome.tabs.query({ active: true, currentWindow: true }).then(tabs => tabs[0]?.id == null ? '' : chrome.tabs.sendMessage(tabs[0].id, message)).then(value => call('on_message_result', id, typeof value === 'string' ? value : ''), () => call('on_message_result', id, '')); }
+      catch { queueMicrotask(() => call('on_message_result', id, '')); }
+    },
     timer(id, ms) { setTimeout(() => call('on_timer', id), ms); },
     idle(id, ms) { (globalThis.requestIdleCallback || (f => setTimeout(f, 1)))(() => call('on_timer', id), { timeout: ms }); },
     // Tab-lifetime storage (sessionStorage); never chrome.storage or localStorage.

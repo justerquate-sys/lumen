@@ -26,7 +26,7 @@ pub fn route_kind(r: &Route) -> &'static str {
 
 fn purpose(p: &Purpose) -> &'static str {
     match p {
-        Purpose::Page { .. } => "page",
+        Purpose::Page { .. } | Purpose::WatchLaterOrder { .. } => "page",
         Purpose::Resolve { .. } => "resolve",
         Purpose::Cont { .. } => "cont",
         Purpose::Prefetch { spec: true, .. } => "spec",
@@ -84,7 +84,7 @@ impl App {
         }
         let ms = bridge::now() - p.sent;
         let mine = match &p.purpose {
-            Purpose::Page { nav } | Purpose::Resolve { nav, .. } => *nav == self.nav,
+            Purpose::Page { nav } | Purpose::WatchLaterOrder { nav } | Purpose::Resolve { nav, .. } => *nav == self.nav,
             Purpose::Prefetch { v, list, .. } => !self.rendered && self.route_wkey().as_deref() == Some(wkey(v, list.as_deref()).as_str()),
             Purpose::PagePrefetch { url, .. } => self.await_page.as_deref() == Some(url.as_str()),
             _ => false,

@@ -1,4 +1,4 @@
-//! Zero-click Home (2 Nov 2026: hovering the YouTube logo activates it, no click needed; the same idea as the player's Speed/Quality dwell). Resting the pointer on the
+//! Hover navigation: the logo and desktop sidebar share the same cancellable dwell. Resting the pointer on the
 //! header logo (`data-hov="logo"`: the tile or the word) for `DWELL_MS` goes Home; the logo's mint
 //! pill fills left to right over that time (client.css `.logo.dw`). Home's first page is fetched the
 //! moment the pointer enters, so at the end of the dwell Home renders from memory. Passing over never
@@ -15,7 +15,13 @@ use crate::render::{LOGO_ID, PILL};
 use crate::route::Route;
 use crate::snap;
 
-/// Rest this long on the logo to go Home (client.css draws the fill over the same time).
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Logo,
+    Side(&'static str),
+}
+
+/// Rest this long on the logo or a sidebar link (client.css draws the fill over the same time).
 pub const DWELL_MS: u32 = 250;
 /// The pointer moved this recently (the bridge reports moves at most every 150 ms): entering is
 /// the pointer's own doing. Otherwise the logo came under a still pointer (the watch page's top bar
@@ -43,6 +49,7 @@ pub(super) enum Dwell {
 
 #[derive(Default)]
 pub(super) struct Logo {
+    target: Option<Target>,
     state: Dwell,
     generation: u32,
     /// The last pointer move (`on_move`).
@@ -65,8 +72,16 @@ fn next(state: Dwell, inside: bool, held: bool, busy: bool, moving: bool) -> (Dw
 
 impl App {
     /// Every hover-zone change (`on_hov`): entering the logo starts the dwell, leaving cancels it.
-    pub(super) fn logo_hov(&mut self, zone: &str, held: bool) {
-        let inside = zone == "logo";
+    pub(super) fn logo_hov(&mut self, zone: &str, arg: &str, held: bool) {
+        let target = if zone == "logo" { Some(Target::Logo) } else if zone == "side" && !crate::tv::on() {
+            crate::render::side_href(arg).and_then(crate::route::parse).map(|r| Target::Side(r.nav_key()))
+        } else { None };
+        if self.logo.target != target {
+            if self.logo.state == Dwell::Running { self.logo_cancel(); }
+            self.logo.state = Dwell::Out;
+            self.logo.target = target;
+        }
+        let inside = target.is_some();
         let state = self.logo.state;
         if !inside && state == Dwell::Out {
             return;
@@ -97,16 +112,31 @@ impl App {
     }
 
     fn logo_start(&mut self) {
-        self.logo_prefetch();
+        match self.logo.target {
+            Some(Target::Logo | Target::Side("home")) => self.logo_prefetch(),
+            Some(Target::Side(key)) => {
+                if let Some(url) = crate::render::side_href(key) { self.prefetch_page(url); }
+            }
+            None => return,
+        }
         self.logo.generation = self.logo.generation.wrapping_add(1);
-        bridge::class_all(&format!("#{LOGO_ID}"), "dw", true);
+        self.logo_mark(true);
         let id = self.timer(Timer::Logo { generation: self.logo.generation });
         bridge::timer(id, DWELL_MS);
     }
 
     fn logo_cancel(&mut self) {
         self.logo.generation = self.logo.generation.wrapping_add(1);
-        bridge::class_all(&format!("#{LOGO_ID}"), "dw", false);
+        self.logo_mark(false);
+    }
+
+    fn logo_mark(&self, on: bool) {
+        let id = match self.logo.target {
+            Some(Target::Logo) => LOGO_ID.to_string(),
+            Some(Target::Side(key)) => format!("ytc-nav-{key}"),
+            None => return,
+        };
+        bridge::class_all(&format!("#{id}"), "dw", on);
     }
 
     /// A navigation started some other way (a click on the logo, a key): a running dwell is over.
@@ -130,18 +160,29 @@ impl App {
         if generation != self.logo.generation || self.logo.state != Dwell::Running {
             return;
         }
+        let route = match self.logo.target {
+            Some(Target::Logo) => Route::Home,
+            Some(Target::Side(key)) => {
+                let Some(route) = crate::render::side_href(key).and_then(crate::route::parse) else { return };
+                route
+            }
+            None => return,
+        };
+        let side = matches!(self.logo.target, Some(Target::Side(_)));
         self.logo_done();
         if self.logo_busy() {
             return;
         }
-        crate::telemetry::act_label("logo.home", Some("hover"), "");
+        crate::telemetry::act_label(if side { "sidebar.navigate" } else { "logo.home" }, Some("hover"), "");
         self.last_input = bridge::now();
-        if self.home_in_place() {
+        if route == Route::Home && self.home_in_place() {
             self.home_again();
             return;
         }
-        self.mo_click(false, &Route::Home);
-        self.navigate(Route::Home, "/".to_string(), Mode::Push);
+        if route == self.route { return; }
+        let url = route.url();
+        self.mo_click(false, &route);
+        self.navigate(route, url, Mode::Push);
         self.mo_flush();
     }
 
