@@ -99,10 +99,44 @@ fn child(b: &[u8], from: usize, to: usize, ty: &[u8; 4]) -> Option<(usize, usize
     None
 }
 
+/// The complete `moof`'s sample ends and elapsed durations. Once the header is in, progressive
+/// coverage needs only the received byte count; the media payload itself need not be retained.
+pub struct Mp4Coverage {
+    samples: Vec<(i64, u64)>,
+    total: u64,
+}
+
+impl Mp4Coverage {
+    pub fn parse(b: &[u8]) -> Option<Self> {
+        let mut samples = Vec::new();
+        let total = mp4_samples(b, |end, duration| samples.push((end, duration)))?;
+        Some(Self { samples, total })
+    }
+
+    pub fn covered(&self, bytes: usize) -> f64 {
+        let end = self.samples.partition_point(|sample| sample.0 <= bytes as i64);
+        let have = end.checked_sub(1).map_or(0, |i| self.samples[i].1);
+        have as f64 / self.total as f64
+    }
+}
+
 /// The share (0–1) of an fMP4 media segment's duration (`b` starts at its `moof`) whose samples are
 /// all in `b` (decode order). None when `b` does not start with a complete `moof` yet, or for a
-/// layout this does not read (an absolute base data offset).
+/// layout this does not read (an absolute base data offset). The one-shot reader allocates nothing.
 pub fn mp4_covered(b: &[u8]) -> Option<f64> {
+    let mut have = 0;
+    let mut whole = true;
+    let total = mp4_samples(b, |end, duration| {
+        if whole && end <= b.len() as i64 {
+            have = duration;
+        } else {
+            whole = false;
+        }
+    })?;
+    Some(have as f64 / total as f64)
+}
+
+fn mp4_samples(b: &[u8], mut sample: impl FnMut(i64, u64)) -> Option<u64> {
     let mut o = 0;
     // `styp`/`sidx`/`emsg` boxes may come first.
     let (moof, mh, mn) = loop {
@@ -136,8 +170,7 @@ pub fn mp4_covered(b: &[u8]) -> Option<f64> {
         p += 4;
     }
     let mut at = moof as i64 + data as i64;
-    let (mut total, mut have) = (0u64, 0u64);
-    let mut whole = true;
+    let mut total = 0u64;
     for _ in 0..count.min(100_000) {
         let dur = if flags & 0x100 != 0 { let d = be32(b, p)?; p += 4; d } else { def_dur };
         let size = if flags & 0x200 != 0 { let s = be32(b, p)?; p += 4; s } else { def_size };
@@ -149,16 +182,12 @@ pub fn mp4_covered(b: &[u8]) -> Option<f64> {
         }
         at += size as i64;
         total += dur as u64;
-        if whole && at <= b.len() as i64 {
-            have += dur as u64;
-        } else {
-            whole = false;
-        }
+        sample(at, total);
     }
     if total == 0 {
         return None;
     }
-    Some(have as f64 / total as f64)
+    Some(total)
 }
 
 /// EBML variable-size integer at `o`: (value, length); `marker` keeps the length bits (element IDs).
@@ -314,6 +343,56 @@ pub(crate) mod tests {
         // A styp box before the moof.
         let s = [bx(b"styp", b"msdh0000"), f.clone()].concat();
         assert_eq!(mp4_covered(&s[..s.len() - 30]), Some(0.75));
+    }
+
+    fn compare_mp4_prefixes(f: &[u8]) {
+        let mut plan = None;
+        for end in 0..=f.len() {
+            if plan.is_none() {
+                plan = Mp4Coverage::parse(&f[..end]);
+            }
+            assert_eq!(plan.as_ref().map(|p| p.covered(end)), mp4_covered(&f[..end]), "prefix {end}");
+        }
+    }
+
+    #[test]
+    fn mp4_plan_keeps_sample_boundaries_for_every_prefix() {
+        let f = fragment(&[(100, 50), (0, 10), (200, 0), (50, 30)]);
+        compare_mp4_prefixes(&f);
+        compare_mp4_prefixes(&[bx(b"styp", b"msdh0000"), f.clone()].concat());
+        compare_mp4_prefixes(&fragment(&[(0, 20), (0, 10)]));
+        // The signed data offset and unsupported absolute base have the same interpretation.
+        let mut negative = f.clone();
+        let tr = negative.windows(4).position(|b| b == b"trun").unwrap();
+        negative[tr + 12..tr + 16].copy_from_slice(&(-4i32).to_be_bytes());
+        compare_mp4_prefixes(&negative);
+        let mut absolute = f;
+        let tf = absolute.windows(4).position(|b| b == b"tfhd").unwrap();
+        absolute[tf + 7] |= 1;
+        assert!(Mp4Coverage::parse(&absolute).is_none());
+        compare_mp4_prefixes(&absolute);
+    }
+
+    #[test]
+    fn mp4_plan_reads_default_sample_fields() {
+        // tfhd: sample-description index, default duration and size. trun: first-sample flags,
+        // no per-sample fields or data offset (the implicit position follows moof + mdat header).
+        let mut tf = vec![0, 2, 0, 0x1a];
+        for n in [1u32, 7, 100, 25] {
+            tf.extend_from_slice(&n.to_be_bytes());
+        }
+        let mut tr = vec![0, 0, 0, 4];
+        tr.extend_from_slice(&4u32.to_be_bytes());
+        tr.extend_from_slice(&0u32.to_be_bytes());
+        let moof = bx(b"moof", &bx(b"traf", &[bx(b"tfhd", &tf), bx(b"trun", &tr)].concat()));
+        let f = [moof, bx(b"mdat", &[0xAB; 100])].concat();
+        let data = f.len() - 100;
+        let p = Mp4Coverage::parse(&f).unwrap();
+        assert_eq!(p.covered(data + 24), 0.0);
+        assert_eq!(p.covered(data + 25), 0.25);
+        assert_eq!(p.covered(data + 75), 0.75);
+        assert_eq!(p.covered(f.len()), 1.0);
+        compare_mp4_prefixes(&f);
     }
 
     /// An EBML element with an 8-byte size (0x01 + 7 bytes), like YouTube's muxer.
