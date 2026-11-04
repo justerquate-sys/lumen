@@ -61,5 +61,17 @@ and the last-card empty state. Rust tests cover supplied sort values and stale-r
 Two additional review reproductions cover failure after navigation and re-saving through the player;
 both fail on the initial 0.13.4 build. The full public-build regression suite is run before merging.
 
+## Independent review
+
+Two sol-loop rounds used GPT-6.1 Sol with max reasoning effort. Round 2 approved the behavior.
+
+- S1 (should): fixed rollback after navigation by invalidating cached Watch later copies on failure.
+- S2 (nit): fixed re-saving through the player by confirming its Watch later edits through shared state.
+- Both reproductions failed before the fixes; the expanded focused run passes 12/12, including the
+  existing sidebar, Watch later, Like, Subscribe and Save checks. No findings were declined or remain open.
+- The base diff was 37 files, 1,610 insertions/394 deletions before review and 38 files,
+  1,675 insertions/398 deletions at approval, including generated public code and the two reproductions.
+  This final review/proof note is documentation only. Review usage was not exposed by the tool.
+
 Design process adapted from [Unslop](https://heydamir.design/unslop) by
 [Damir Sokolovsky](https://x.com/heydamir), licensed under CC BY 4.0.

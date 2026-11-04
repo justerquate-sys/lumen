@@ -6253,6 +6253,7 @@ chrome.runtime.onMessage.addListener(m => {
   });
 
   await step('Watch later library: re-saving a removed card through the player chooser makes it visible without a reload', async () => {
+    const historyBefore = await sw.evaluate(() => chrome.storage.local.get('yourTubeHistoryV1'));
     try {
       LIBRARY.on = true; LIBRARY.newest = true; LIBRARY.ids = [libraryId(0), EVIL_ID];
       LIBRARY.delay = 0; LIBRARY.fail = false; LIBRARY.sortFail = false;
@@ -6276,7 +6277,10 @@ chrome.runtime.onMessage.addListener(m => {
       await page.click('#ytc-side a[data-nav=wl]'); await page.waitForSelector('#ytc-list .c');
       assert.equal(await page.locator(button).count(), 1, 're-saved card is visible in the same tab');
       assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), EVIL_ID, 'newest save returns to the top');
-    } finally { await endLibrary(); }
+    } finally {
+      await endLibrary();
+      await sw.evaluate(async before => { await chrome.storage.local.remove('yourTubeHistoryV1'); await chrome.storage.local.set(before); }, historyBefore);
+    }
   });
 
   await step('Watch later library: a rejected newest-sort command shows Retry and never paints the oldest-first list', async () => {
