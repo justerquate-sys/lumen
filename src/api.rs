@@ -10,6 +10,8 @@ pub const CHANNEL_VIDEOS_PARAMS: &str = "EgZ2aWRlb3PyBgQKAjoA";
 #[derive(Clone, Debug, PartialEq)]
 pub enum Req {
     Browse { id: String, params: Option<String> },
+    /// YouTube's own Watch later sort-menu command (values supplied by the page).
+    WatchLaterOrder { order: u32, params: Option<String> },
     /// `params` = YouTube's own search-filter value (verbatim).
     Search { q: String, params: Option<String> },
     Next { v: String },
@@ -37,6 +39,7 @@ impl Req {
     pub fn endpoint(&self) -> &'static str {
         match self {
             Req::Browse { .. } => "browse",
+            Req::WatchLaterOrder { .. } => "browse/edit_playlist",
             Req::Search { .. } => "search",
             Req::Next { .. } | Req::NextList { .. } => "next",
             Req::Resolve { .. } => "navigation/resolve_url",
@@ -59,13 +62,21 @@ impl Req {
 
     pub fn body(&self, cfg: &Config, hl: &str, page_url: &str) -> String {
         let mut body = Map::new();
-        body.insert("context".into(), context(cfg, hl, page_url));
+        let wl = matches!(self, Req::Browse { id, .. } if id == "VLWL") || matches!(self, Req::WatchLaterOrder { .. });
+        // The owned playlist's sort menu is parsed by its English label; the order value and
+        // context params still come from YouTube, never from a locally reversed chunk.
+        body.insert("context".into(), context(cfg, if wl { "en" } else { hl }, page_url));
         match self {
             Req::Browse { id, params } => {
                 body.insert("browseId".into(), id.clone().into());
                 if let Some(p) = params {
                     body.insert("params".into(), p.clone().into());
                 }
+            }
+            Req::WatchLaterOrder { order, params } => {
+                body.insert("playlistId".into(), "WL".into());
+                body.insert("actions".into(), json!([{"action":"ACTION_SET_PLAYLIST_VIDEO_ORDER","playlistVideoOrder":order}]));
+                if let Some(p) = params { body.insert("params".into(), p.clone().into()); }
             }
             Req::Search { q, params } => {
                 body.insert("query".into(), q.clone().into());

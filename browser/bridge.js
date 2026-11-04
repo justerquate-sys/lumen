@@ -215,6 +215,7 @@ const YTC = (() => {
     class_all(sel, cls, on) { for (const el of d.querySelectorAll(sel)) el.classList.toggle(cls, !!on); },
     get_html: id => { const el = byId(id); return el ? el.innerHTML : ''; },
     attr(id, name, value) { const el = byId(id); if (el) el.setAttribute(name, value); },
+    focus_id() { return d.activeElement?.id || ''; },
     toggle: (id, cls) => { const el = byId(id); return el ? el.classList.toggle(cls) : false; },
     value(id, v) { const el = byId(id); if (el) el.value = v; },
     // Focuses a control inside `id`: delta 0 = the selected (.on) one or the first; ±1 = next/previous (wrapping).

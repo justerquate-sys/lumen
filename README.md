@@ -31,6 +31,10 @@ _To be added:_
   Extensions, quality and codec choice, speed 0.25–2.5×, chapters with storyboard frames on the seek bar,
   captions you can drag and resize, live streams with DVR, resume positions, watch history kept in your
   account. Failures stay in the player with the reason and a **Try again** / **Open on YouTube** choice.
+- **Hover navigation:** rest on a desktop sidebar link for 250 ms to open it. A short pass, dragging,
+  typing or an open menu never activates it. Clicks and keyboard shortcuts work immediately.
+- **Watch later, newest saves first.** The list uses YouTube’s date-added order across pages. Removing
+  a bookmark removes the card immediately; a failed request restores it in place with a retry action.
 - **SponsorSkip** built into the player, with its switch and category choices in the browser’s **Lumen**
   extension popup. Segment data from SponsorBlock; privacy-preserving (see "Privacy").
 - **No Shorts unless you want them**, no ads, no Premium/membership upsells. Optional filters: minimum length, Music, Live, popularity order, playlists only.

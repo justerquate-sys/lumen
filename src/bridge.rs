@@ -95,6 +95,8 @@ extern "C" {
     pub fn value(id: &str, v: &str);
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn focus(id: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn focus_id() -> String;
     /// Focuses a control inside `id`: 0 = the `.on` one (else the first), ±1 = next/previous.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn focus_in(id: &str, delta: i32);

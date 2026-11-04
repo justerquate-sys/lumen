@@ -105,6 +105,28 @@ const SLOWSEG = new Map();
 // Hedged reads: the first matching InnerTube request never answers (`{ ep, q | v, n }`).
 const HEDGE = { stall: null };
 const FX = { bot: null, botVideo: null, homeChips: false, wlMock: false, wl: new Set(), wlFail: false, linked: new Set(), checkDelay: 0, checksInFlight: 0, checksMax: 0, homeLabels: false, homeShorts: false };
+// An owned Watch later playlist: saved oldest-first initially, with a native sort command and
+// enough pages to prove that newest-first applies to the entire library, not each loaded chunk.
+const LIBRARY = { on: false, newest: false, ids: [], delay: 0, fail: false, sortFail: false };
+const libraryId = n => 'savedWL' + String(n).padStart(4, '0');
+const libraryPage = offset => {
+  const ids = LIBRARY.newest ? [...LIBRARY.ids].reverse() : LIBRARY.ids;
+  const rows = ids.slice(offset, offset + 12).map((id, i) => ({ playlistVideoRenderer: {
+    videoId: id, title: { simpleText: ['Drawing expressive characters', 'Making a short film', 'Learning to animate', 'A walk through the studio'][i % 4] },
+    shortBylineText: { simpleText: 'Studio notes' }, lengthText: { simpleText: '12:34' },
+    thumbnail: { thumbnails: [{ url: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, width: 480, height: 360 }] },
+    // These upload ages deliberately disagree with the save order.
+    videoInfo: { runs: [{ text: '12K views' }, { text: ' · ' }, { text: i % 2 ? '1 day ago' : '3 years ago' }] },
+  } }));
+  if (offset + 12 < ids.length) rows.push({ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: `WLLIB:${offset + 12}` } } } });
+  const sorts = { sortFilterSubMenuRenderer: { subMenuItems: [
+    { title: 'Date added (oldest)', selected: !LIBRARY.newest, serviceEndpoint: { playlistEditEndpoint: { playlistId: 'WL', actions: [{ action: 'ACTION_SET_PLAYLIST_VIDEO_ORDER', playlistVideoOrder: 2 }], params: 'fixtureOrderContext' } } },
+    { title: 'Date added (newest)', selected: LIBRARY.newest, serviceEndpoint: { playlistEditEndpoint: { playlistId: 'WL', actions: [{ action: 'ACTION_SET_PLAYLIST_VIDEO_ORDER', playlistVideoOrder: 1 }], params: 'fixtureOrderContext' } } },
+  ] } };
+  if (offset) return { onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: rows } }] };
+  return { header: { playlistHeaderRenderer: { title: { simpleText: 'Watch later' }, ownerText: { simpleText: 'Fixture owner' }, numVideosText: { simpleText: `${ids.length} videos` }, viewCountText: { simpleText: 'No views' } } },
+    contents: { sectionListRenderer: { contents: [{ itemSectionRenderer: { contents: [{ playlistVideoListRenderer: { contents: rows } }] } }], header: sorts } } };
+};
 // ---- SponsorBlock (sponsor.ajay.app): the k-anonymity API answers a whole sha256-prefix bucket. Our fixture video
 // sits in the real bucket 671e (its other entries, 2 Nov 2026, are the decoys; aqz-KE-bpKQ hashes there too).
 const sha4 = id => require('node:crypto').createHash('sha256').update(id).digest('hex').slice(0, 4);
@@ -562,6 +584,17 @@ async function handle(route) {
       if (home) { FX.homeInFlight = (FX.homeInFlight || 0) + 1; FX.homeMax = Math.max(FX.homeMax || 0, FX.homeInFlight); }
       await new Promise(r => setTimeout(r, FX.checkDelay));
       FX.checksInFlight--; if (home) FX.homeInFlight--;
+    }
+    if (LIBRARY.on) {
+      if (ep === 'browse' && (body.browseId === 'VLWL' || body.continuation?.startsWith('WLLIB:'))) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(libraryPage(body.continuation ? +body.continuation.split(':')[1] : 0)) });
+      if (ep === 'browse/edit_playlist' && body.playlistId === 'WL') {
+        const a = body.actions[0], sort = a.action === 'ACTION_SET_PLAYLIST_VIDEO_ORDER';
+        if (LIBRARY.delay && !sort) await new Promise(r => setTimeout(r, LIBRARY.delay));
+        if ((sort && LIBRARY.sortFail) || (!sort && LIBRARY.fail)) return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":{"message":"Try again"}}' });
+        if (sort) { assert.equal(a.playlistVideoOrder, 1); assert.equal(body.params, 'fixtureOrderContext'); LIBRARY.newest = true; }
+        else if (a.action === 'ACTION_REMOVE_VIDEO_BY_VIDEO_ID') LIBRARY.ids = LIBRARY.ids.filter(id => id !== a.removedVideoId);
+        return route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"STATUS_SUCCEEDED"}' });
+      }
     }
     // The card Watch later checks use their own membership mock (FX.wlMock).
     const act = FX.wlMock && /^(playlist\/get_add_to_playlist|browse\/edit_playlist)$/.test(ep) ? null : actFixture(ep, body);
@@ -6099,6 +6132,132 @@ chrome.runtime.onMessage.addListener(m => {
       HOME.rich = false; FX.homeChips = false; FX.wlMock = false;
       if (had) await ctx.addCookies([had]); else await ctx.clearCookies({ name: 'SAPISID' });
     }
+  });
+
+  await step('sidebar hover: short passes, drag and typing never navigate; resting activates every left-side link once; click and keyboard stay immediate', async () => {
+    await ctx.addCookies([{ name: 'SAPISID', value: 'e2eSAPISID', domain: '.youtube.com', path: '/', secure: true }]);
+    const searchUrl = 'https://www.youtube.com/results?search_query=sidebar';
+    try {
+      await page.goto(searchUrl, { waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      const here = page.url(), history = '#ytc-side a[data-nav=history]';
+      await page.hover(history); await page.waitForTimeout(80); await page.mouse.move(700, 120); await page.waitForTimeout(300);
+      assert.equal(page.url(), here, 'a short pass does not navigate');
+      await page.focus('#ytc-q'); await page.hover(history); await page.waitForTimeout(350);
+      assert.equal(page.url(), here, 'typing focus blocks a dwell');
+      await page.locator('#ytc-q').evaluate(n => n.blur());
+      await page.mouse.move(700, 120); await page.mouse.down(); await page.hover(history); await page.waitForTimeout(350); await page.mouse.up(); await page.waitForTimeout(300);
+      assert.equal(page.url(), here, 'a held gesture and release do not navigate');
+      for (const key of ['history', 'wl', 'subs', 'playlists', 'liked', 'home']) {
+        await page.mouse.move(700, 120); await page.hover(`#ytc-side a[data-nav=${key}]`);
+        await page.waitForFunction(key => document.body.dataset.nav === key, key, { timeout: 1500 });
+        const url = page.url(), count = await page.evaluate(() => window.history.length);
+        await page.waitForTimeout(350);
+        assert.equal(page.url(), url); assert.equal(await page.evaluate(() => window.history.length), count, 'one activation per visit');
+      }
+      await page.mouse.move(700, 120); await page.goto(searchUrl, { waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      await page.focus(history); await page.waitForTimeout(350); assert.equal(page.url(), searchUrl, 'keyboard focus does not activate');
+      await page.keyboard.press('Enter'); await page.waitForFunction(() => document.body.dataset.nav === 'history');
+      await page.mouse.move(700, 120); await page.click('#ytc-side a[data-nav=wl]');
+      assert.equal(await page.evaluate(() => document.body.dataset.nav), 'wl', 'click does not wait for hover dwell');
+    } finally { await ctx.clearCookies(); }
+  });
+
+  const startLibrary = async (newest = false) => {
+    LIBRARY.on = true; LIBRARY.newest = newest; LIBRARY.ids = Array.from({ length: 60 }, (_, n) => libraryId(n));
+    LIBRARY.delay = 0; LIBRARY.fail = false; LIBRARY.sortFail = false;
+    await ctx.addCookies([{ name: 'SAPISID', value: 'e2eSAPISID', domain: '.youtube.com', path: '/', secure: true }]);
+    await page.goto('https://www.youtube.com/playlist?list=WL', { waitUntil: 'commit' });
+  };
+  const endLibrary = async () => { LIBRARY.on = false; LIBRARY.delay = 0; LIBRARY.fail = false; LIBRARY.sortFail = false; await ctx.clearCookies(); };
+
+  await step('Watch later library: heading has no owner, video-count or views metadata row', async () => {
+    try {
+      await startLibrary(true); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.textContent('#ytc-main h1'), 'Watch later');
+      assert.equal(await page.locator('#ytc-main .sub').count(), 0, 'metadata row removed');
+      assert.ok(!(await page.textContent('#ytc-main')).includes('Fixture owner'));
+    } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library: native newest-save sorting applies before first paint and across every continuation', async () => {
+    try {
+      const from = log.api.length;
+      await startLibrary(); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), libraryId(59), 'newest save first, regardless of upload age');
+      for (let n = 0; n < 10 && await page.locator('#ytc-list .c').count() < 60; n++) { await page.evaluate(() => scrollTo(0, document.body.scrollHeight)); await page.waitForTimeout(150); }
+      assert.deepEqual(await page.$$eval('#ytc-list .c', cs => cs.map(c => c.dataset.v)), Array.from({ length: 60 }, (_, n) => libraryId(59 - n)), 'global order across pages');
+      const sort = log.api.slice(from).filter(a => a.ep === 'browse/edit_playlist' && a.body.actions?.[0]?.action === 'ACTION_SET_PLAYLIST_VIDEO_ORDER');
+      assert.equal(sort.length, 1); assert.equal(sort[0].body.actions[0].playlistVideoOrder, 1);
+      assert.match(sort[0].headers.authorization, /^SAPISIDHASH /);
+      await page.reload({ waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), libraryId(59));
+      assert.equal(log.api.slice(from).filter(a => a.ep === 'browse/edit_playlist' && a.body.actions?.[0]?.action === 'ACTION_SET_PLAYLIST_VIDEO_ORDER').length, 1, 'already-newest does not reorder again');
+    } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library: unbookmark removes a card before the response; a failed removal returns it in place and retry stays removed on back and reload', async () => {
+    try {
+      await startLibrary(true); await page.waitForSelector('#ytc-list .c .wl');
+      const id = libraryId(59), card = `#ytc-list .c[data-v="${id}"]`, button = '#ytc-wl-' + id;
+      LIBRARY.delay = 700; LIBRARY.fail = true;
+      await page.click(button);
+      assert.equal(await page.locator(card).count(), 0, 'removed on the click before the slow server replies');
+      assert.ok(LIBRARY.ids.includes(id), 'server has not answered yet');
+      await page.waitForSelector(button + '.error');
+      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), id, 'failure restores exact position');
+      assert.match(await page.getAttribute(button, 'aria-label'), /Couldn’t remove.*503/);
+      // A keyboard failure also keeps the next bookmark focused while the old row returns.
+      await page.focus(button); await page.keyboard.press('Enter');
+      assert.equal(await page.locator(card).count(), 0);
+      await page.waitForSelector(button + '.error');
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'ytc-wl-' + libraryId(58), 'rollback preserves keyboard focus');
+      LIBRARY.fail = false;
+      await page.focus(button); await page.keyboard.press('Enter');
+      assert.equal(await page.locator(card).count(), 0, 'keyboard removal is immediate too');
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'ytc-wl-' + libraryId(58), 'focus moves to the next bookmark');
+      await page.waitForTimeout(850); assert.ok(!LIBRARY.ids.includes(id));
+      await page.click('#ytc-side a[data-nav=history]'); await page.goBack({ waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.locator(card).count(), 0, 'back does not resurrect the removed card');
+      await page.reload({ waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.locator(card).count(), 0, 'reload stays removed');
+      if (process.env.YTC_SHOTS) {
+        await page.mouse.move(700, 100); await page.screenshot({ path: path.join(process.env.YTC_SHOTS, 'watch-later-library-mint.png') });
+        const cfg = await storedConfig();
+        try {
+          await sw.evaluate(cfg => chrome.storage.local.set({ ytcConfigV1: { ...cfg, theme: 'youtube' } }), cfg);
+          await page.waitForFunction(() => document.documentElement.dataset.ytcPalette === 'youtube');
+          await page.waitForTimeout(170);
+          await page.screenshot({ path: path.join(process.env.YTC_SHOTS, 'watch-later-library-youtube.png') });
+        } finally { await sw.evaluate(cfg => chrome.storage.local.set({ ytcConfigV1: cfg }), cfg); }
+      }
+    } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library: a rejected newest-sort command shows Retry and never paints the oldest-first list', async () => {
+    try {
+      LIBRARY.on = true; LIBRARY.newest = false; LIBRARY.ids = [libraryId(0), libraryId(1)]; LIBRARY.sortFail = true;
+      await ctx.addCookies([{ name: 'SAPISID', value: 'e2eSAPISID', domain: '.youtube.com', path: '/', secure: true }]);
+      await page.goto('https://www.youtube.com/playlist?list=WL', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-main .msg');
+      assert.equal(await page.locator('#ytc-list .c').count(), 0);
+      assert.match(await page.textContent('#ytc-main'), /could not be sorted newest first/);
+      LIBRARY.sortFail = false;
+      await page.click('[data-act=retry]'); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), libraryId(1));
+    } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library: removing the last card immediately shows the empty state with keyboard focus on its sidebar link', async () => {
+    try {
+      LIBRARY.on = true; LIBRARY.newest = true; LIBRARY.ids = [libraryId(0)]; LIBRARY.delay = 400;
+      await ctx.addCookies([{ name: 'SAPISID', value: 'e2eSAPISID', domain: '.youtube.com', path: '/', secure: true }]);
+      await page.goto('https://www.youtube.com/playlist?list=WL', { waitUntil: 'commit' });
+      const button = '#ytc-wl-' + libraryId(0); await page.waitForSelector(button); await page.focus(button); await page.keyboard.press('Enter');
+      assert.equal(await page.locator('#ytc-list .c').count(), 0);
+      assert.equal(await page.textContent('#ytc-list .empty'), 'This playlist is empty.');
+      assert.equal(await page.evaluate(() => document.activeElement.id), 'ytc-nav-wl');
+      await page.waitForTimeout(500); assert.equal(LIBRARY.ids.length, 0);
+    } finally { await endLibrary(); }
   });
 
   await step('Watch later (signed in, mocked): lazy saved check on hover, save/remove through browse/edit_playlist, error state with reason, keyboard', async () => {

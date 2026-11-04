@@ -232,6 +232,13 @@ The debug overlay shows `voice · key set|no key · phase · dictations · last:
 later, `g p` Playlists, `g l` Liked; arrow keys walk the cards on feed pages (↑/↓ by the rendered row),
 Enter opens; on watch pages the player keys below apply.
 
+
+The six desktop sidebar links share the logo’s 250 ms dwell (`app/logo.rs`): the row fills in the chosen
+palette, the page prefetch starts on entry, and resting opens it once. Passing over, held travel, a press,
+a key, a focused text field or an open menu cancels/blocks it. The pointer must leave before another
+activation; moving between links starts a new dwell. Clicks and keyboard focus/activation stay immediate.
+The TV rail keeps its remote interaction and does not get desktop hover activation.
+
 Pages: Home (`FEwhat_to_watch`; signed out or history off → a search-first page), Subscriptions,
 History, Search (YouTube's recommendation shelves inside the results are dropped, first page and
 continuations: "People also watched", "For you", "People also search for", "Previously watched", "From
@@ -1061,6 +1068,22 @@ for the hedge deadline.
   Watch later playlist are known saved. Keyboard: Tab to it, Enter/Space. The bookmark fills on the click
   (optimistic, class `on` while the request runs) and empties at once on a remove; a press squeezes it and it
   springs back to size.
+  On the Watch later page, a removal takes the card out of the grid in the click’s task; surviving cards
+  reflow on the existing curve (keyboard/reduced motion instant), and keyboard focus moves to the next
+  bookmark, or the previous one/Watch later navigation link at the end. A failure restores the card at its
+  original place with the reason and retry action. Confirmed removals are kept in tab memory so old
+  continuations cannot resurrect them; removed items are pruned from the feed and Watch later’s saved-page,
+  prefetch and session snapshot copies are invalidated. A removal that settles on another page also
+  invalidates those copies. Only Watch later cards disappear; cards in search/Home/related remain.
+
+  Watch later has the plain **Watch later** heading; its owner/video-count/views metadata row is omitted.
+  Before its first fresh paint, `watch_later::newest_order` reads YouTube’s **Date added (newest)** menu
+  choice and applies the supplied `playlistEditEndpoint` order/params through `api::Req::WatchLaterOrder`,
+  then browses the newly ordered playlist. This uses YouTube’s native playlist preference, so subsequent
+  pages and other YouTube views follow it too. Already-selected newest makes no edit. Owned Watch later
+  requests use English menu labels; order values and context params are copied from the response. A failed
+  sort shows the normal Retry panel instead of an oldest-first list. Old Watch later snapshots, identified
+  by their pre-0.13.4 playlist metadata header, are rejected; other snapshots keep their existing behavior.
 - **Filters** (`#ytc-filters` on Home and Search; hover opens after 40 ms, 180 ms departure grace; keyboard
   focus or a click opens it too): minimum length Any/10+/20+/30+/60+ or a slider to 180 min (Home + Search,
   known durations only; live and unknown stay), **Shorts** (default off: hidden everywhere exactly as before;
