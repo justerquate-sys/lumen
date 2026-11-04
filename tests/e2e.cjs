@@ -104,7 +104,7 @@ const NET = { down: false, probes: 0 };
 const SLOWSEG = new Map();
 // Hedged reads: the first matching InnerTube request never answers (`{ ep, q | v, n }`).
 const HEDGE = { stall: null };
-const FX = { bot: null, homeChips: false, wlMock: false, wl: new Set(), wlFail: false, linked: new Set(), checkDelay: 0, checksInFlight: 0, checksMax: 0, homeLabels: false, homeShorts: false };
+const FX = { bot: null, botVideo: null, homeChips: false, wlMock: false, wl: new Set(), wlFail: false, linked: new Set(), checkDelay: 0, checksInFlight: 0, checksMax: 0, homeLabels: false, homeShorts: false };
 // ---- SponsorBlock (sponsor.ajay.app): the k-anonymity API answers a whole sha256-prefix bucket. Our fixture video
 // sits in the real bucket 671e (its other entries, 2 Nov 2026, are the decoys; aqz-KE-bpKQ hashes there too).
 const sha4 = id => require('node:crypto').createHash('sha256').update(id).digest('hex').slice(0, 4);
@@ -206,7 +206,7 @@ const unstall = v => { STALL.hold.delete(v); for (const p of STALL.parked.splice
 const BOT = { responseContext: {}, playabilityStatus: { status: 'LOGIN_REQUIRED', reason: 'Sign in to confirm you’re not a bot' } };
 const FRESH_VD = 'CgtGcmVzaEUyRTAwMSjAgICABjIKCgJERRIEEgAgQw%3D%3D';
 // FX.bot: 'visitor' = bot check unless the fresh visitor; 'account' = unless signed (SAPISIDHASH); 'all' = always.
-const botChecked = (body, headers) => FX.bot === 'visitor' ? body.context.client.visitorData !== FRESH_VD : FX.bot === 'account' ? !headers.authorization : FX.bot === 'all';
+const botChecked = (body, headers) => (!FX.botVideo || body.videoId === FX.botVideo) && (FX.bot === 'visitor' ? body.context.client.visitorData !== FRESH_VD : FX.bot === 'account' ? !headers.authorization : FX.bot === 'all');
 function visionFixture(v) {
   if (v === 'unplayable1') return { playabilityStatus: { status: 'UNPLAYABLE', reason: 'Forced failure (e2e)' } };
   if (v === 'members0001') return { playabilityStatus: { status: 'UNPLAYABLE', reason: 'Join this channel to get access to members-only content like this video, and other exclusive perks.' } };
@@ -501,6 +501,8 @@ function applyMask(m, v) {
 }
 // NEXT.refuse: YouTube answers a masked watch `next` with HTTP 400 (a field it no longer knows).
 const NEXT_MASK = { refused: 0, served: 0 };
+// A selected VISIONOS request can reject fields; unrelated background requests still answer.
+const VISION_MASK = { refuse: null, refused: 0, served: 0 };
 
 async function handle(route) {
   const req = route.request(), url = new URL(req.url());
@@ -538,7 +540,7 @@ async function handle(route) {
     const ep = homeDocReq ? 'browse' : p.slice('/youtubei/v1/'.length);
     const body = homeDocReq ? { browseId: 'FEwhat_to_watch' } : req.postDataJSON() || {};
     const docN = homeDocReq ? ++HOME.docs : 0;
-    log.api.push({ ep, body, headers: req.headers(), t: Date.now(), url: req.url(), ...(homeDocReq ? { doc: 'home', eid: 'e2eHomeEvent' + String(docN).padStart(4, '0') } : {}) });
+    log.api.push({ ep, body, postData: req.postData(), headers: req.headers(), t: Date.now(), url: req.url(), ...(homeDocReq ? { doc: 'home', eid: 'e2eHomeEvent' + String(docN).padStart(4, '0') } : {}) });
     // (The Home document's answer: the same data inside YouTube's page.)
     const ct = homeDocReq ? 'text/html; charset=utf-8' : 'application/json';
     const wrap = out => homeDocReq ? homeDoc(out, docN) : out;
@@ -552,6 +554,8 @@ async function handle(route) {
     const masked = ep === 'next' && isCheck(url) && body.videoId && !body.continuation;
     const pageMask = ep === 'next' && !isCheck(url) && url.searchParams.get('fields');
     if (pageMask && NEXT.refuse) { NEXT_MASK.refused++; return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 400, message: 'Request contains an invalid argument.', status: 'INVALID_ARGUMENT' } }) }); }
+    const visionMask = ep === 'player' && body.context?.client?.clientName === 'VISIONOS' && url.searchParams.get('fields');
+    if (visionMask && VISION_MASK.refuse?.(body, req.headers())) { VISION_MASK.refused++; return route.fulfill({ status: 400, contentType: 'application/json', body: '{"error":{"code":400,"status":"INVALID_ARGUMENT"}}' }); }
     if (masked && FX.checkDelay) {
       const home = /H\dz$/.test(body.videoId); // Home fixture ids (counted apart from other pages' checks)
       FX.checksInFlight++; FX.checksMax = Math.max(FX.checksMax, FX.checksInFlight);
@@ -585,6 +589,7 @@ async function handle(route) {
     if (home && (HOME.latency || (HOME.delay && !body.continuation))) await new Promise(r => setTimeout(r, HOME.latency + (body.continuation ? 0 : HOME.delay)));
     if (ep === 'next' && NEXT.latency && !body.continuation && !masked) await new Promise(r => setTimeout(r, NEXT.latency));
     if (out && pageMask) { NEXT_MASK.served++; out = JSON.stringify(applyMask(parseMask(pageMask), JSON.parse(out))); }
+    if (out && visionMask) { VISION_MASK.served++; out = JSON.stringify(applyMask(parseMask(visionMask), JSON.parse(out))); }
     return out ? route.fulfill({ status: 200, contentType: ct, body: wrap(out) }).catch(() => {}) : route.fulfill({ status: 404, body: '{}' });
   }
   if (p.startsWith('/api/stats/')) { log.stats.push(req.url()); return route.fulfill({ status: 204, body: '' }); }
@@ -904,6 +909,97 @@ chrome.runtime.onMessage.addListener(m => {
       NEXT.refuse = false;
       await p2.close();
     }
+  });
+
+  await step('VISIONOS field mask: direct playback keeps formats; HTTP 400 retries the identical anonymous, fresh-visitor or account request and disables only that mask', async () => {
+    const p2 = await ctx.newPage();
+    const vision = (v, from) => log.api.slice(from).filter(a => a.ep === 'player' && a.body.videoId === v && a.body.context?.client?.clientName === 'VISIONOS');
+    const hasMask = a => new URL(a.url).searchParams.has('fields');
+    const frame = () => p2.waitForFunction(() => +document.documentElement.dataset.ytcFirstFrame > 0 && document.getElementById('ytc-video')?.readyState >= 2, null, { timeout: 8000 });
+    const had = (await ctx.cookies('https://www.youtube.com')).find(c => c.name === 'SAPISID');
+    const inc = incidents.length;
+    try {
+      const from = log.api.length, served = VISION_MASK.served;
+      await p2.goto('https://www.youtube.com/watch?v=vismaskOK01', { waitUntil: 'commit' });
+      await frame();
+      const normal = vision('vismaskOK01', from);
+      assert.equal(normal.length, 1);
+      assert.equal(new URL(normal[0].url).searchParams.get('fields'), 'responseContext,playabilityStatus,streamingData,captions,videoDetails');
+      assert.ok(VISION_MASK.served > served, 'the stub applied the mask to a playable answer');
+      assert.ok(log.api.slice(from).some(a => a.ep === 'player' && a.body.context?.client?.clientName === 'WEB' && !hasMask(a)), 'WEB metadata call stays whole');
+      // Each navigation is a new document, so each route starts with its own enabled mask.
+      for (const [v, route] of [['vismaskAN01', 'anonymous'], ['vismaskFR01', 'fresh'], ['vismaskAC01', 'account']]) {
+        // Only this video's recovery is under test; unrelated related-card prefetches
+        // must not turn the document's separate bot-check hold on afterwards.
+        FX.botVideo = v;
+        FX.bot = route === 'fresh' ? 'visitor' : route === 'account' ? 'account' : null;
+        if (route === 'account') await ctx.addCookies([{ name: 'SAPISID', value: 'e2e-mask-sapisid', domain: '.youtube.com', path: '/', secure: true }]);
+        const selected = (b, h) => b.videoId === v && (route === 'account' ? !!h.authorization : route === 'fresh' ? b.context.client.visitorData === FRESH_VD : true);
+        VISION_MASK.refuse = selected;
+        const mark = log.api.length, refused = VISION_MASK.refused;
+        await p2.goto(`https://www.youtube.com/watch?v=${v}`, { waitUntil: 'commit' });
+        await frame();
+        const pair = vision(v, mark).filter(a => selected(a.body, a.headers));
+        assert.equal(pair.length, 2, `${route}: one refusal and one immediate resend`);
+        assert.ok(hasMask(pair[0]) && !hasMask(pair[1]), `${route}: resend is whole`);
+        assert.equal(pair[0].postData, pair[1].postData, `${route}: exact body, including cpn/session fields`);
+        assert.deepEqual(pair[0].headers, pair[1].headers, `${route}: exact auth and visitor headers`);
+        assert.equal(VISION_MASK.refused, refused + 1);
+        if (route !== 'account') assert.ok(pair.every(a => !a.headers.authorization && !a.headers.cookie), 'anonymous credentials remain omitted');
+        else assert.match(pair[1].headers.authorization, /^SAPISIDHASH \d+_[0-9a-f]{40}$/);
+        assert.ok(log.api.slice(mark).some(a => a.ep === 'next' && a.body.videoId === v && hasMask(a)), 'next mask remains enabled');
+        // App's hover prefetch shares Own's disable for subsequent requests in this document.
+        const later = v.slice(0, -1) + '2';
+        await p2.waitForSelector('#ytc-list .c a.t[href^="/watch"]');
+        await p2.mouse.move(2, 2);
+        await p2.evaluate(id => document.querySelector('#ytc-list .c a.t[href^="/watch"]').setAttribute('href', '/watch?v=' + id), later);
+        await p2.hover(`#ytc-list .c a.t[href="/watch?v=${later}"]`);
+        for (let i = 0; i < 60 && !vision(later, mark).length; i++) await p2.waitForTimeout(20);
+        const after = vision(later, mark);
+        assert.equal(after.length, 1, `${route}: later prefetch asked once`);
+        assert.ok(after.every(a => !hasMask(a)), 'document stays unmasked after refusal');
+        FX.bot = null; FX.botVideo = null; VISION_MASK.refuse = null;
+      }
+      assert.deepEqual(problems(inc), [], 'a refused mask is not an incident');
+    } finally {
+      FX.bot = null; FX.botVideo = null; VISION_MASK.refuse = null;
+      if (had) await ctx.addCookies([had]); else await ctx.clearCookies({ name: 'SAPISID' });
+      await p2.close();
+    }
+  });
+
+  await step('VISIONOS field mask: a refused hover prefetch retries whole; the click reuses it and future player requests stay unmasked', async () => {
+    const p2 = await ctx.newPage();
+    const v = 'vismaskPRE1', later = 'vismaskNXT1';
+    const from = log.api.length, inc = incidents.length;
+    const vision = id => log.api.slice(from).filter(a => a.ep === 'player' && a.body.videoId === id && a.body.context?.client?.clientName === 'VISIONOS');
+    VISION_MASK.refuse = b => b.videoId === v;
+    try {
+      await p2.goto('https://www.youtube.com/results?search_query=vision+mask+prefetch', { waitUntil: 'commit' });
+      await p2.waitForSelector('#ytc-list .c a.t');
+      await p2.mouse.move(2, 2);
+      await p2.evaluate(id => document.querySelector('#ytc-list .c a.t').setAttribute('href', '/watch?v=' + id), v);
+      const link = p2.locator(`#ytc-list .c a.t[href="/watch?v=${v}"]`);
+      await link.hover();
+      for (let i = 0; i < 100 && log.gv.filter(g => g.v === v).length < 2; i++) await p2.waitForTimeout(20);
+      assert.equal(log.gv.filter(g => g.v === v).length, 2, 'prefetch includes both media tracks');
+      const pair = vision(v);
+      assert.equal(pair.length, 2);
+      assert.ok(new URL(pair[0].url).searchParams.has('fields') && !new URL(pair[1].url).searchParams.has('fields'));
+      assert.equal(pair[0].postData, pair[1].postData, 'the exact prefetch body');
+      assert.deepEqual(pair[0].headers, pair[1].headers, 'the exact prefetch headers');
+      await link.click();
+      await p2.waitForFunction(() => +document.documentElement.dataset.ytcFirstFrame > 0 && document.getElementById('ytc-video')?.readyState >= 2, null, { timeout: 8000 });
+      assert.equal(vision(v).length, 2, 'the click consumed the successful prefetch');
+      // A direct SPA request exercises Own with App's document-level disable.
+      await p2.waitForSelector('#ytc-list .c a.t[href^="/watch"]');
+      await p2.evaluate(id => document.querySelector('#ytc-list .c a.t[href^="/watch"]').setAttribute('href', '/watch?v=' + id), later);
+      await p2.locator(`#ytc-list .c a.t[href="/watch?v=${later}"]`).evaluate(a => a.click());
+      await p2.waitForFunction(id => new URLSearchParams(location.search).get('v') === id && +document.documentElement.dataset.ytcFirstFrame > 0, later, { timeout: 8000 });
+      assert.equal(vision(later).length, 1);
+      assert.ok(!new URL(vision(later)[0].url).searchParams.has('fields'));
+      assert.deepEqual(problems(inc), [], 'no incident');
+    } finally { VISION_MASK.refuse = null; await p2.close(); }
   });
 
   await step('a typing pause fetches the search results, so Enter paints from cache', async () => {
@@ -1842,7 +1938,7 @@ chrome.runtime.onMessage.addListener(m => {
     const web = players.find(a => a.body.context.client.clientName === 'WEB');
     assert.ok(vis && web, 'both player calls');
     assert.equal(players.length, 2, 'happy path: one VISIONOS + one WEB player call');
-    assert.equal(log.api.filter(a => a.ep === 'visitor_id').length, 0, 'happy path: no visitor_id');
+    assert.equal(log.api.slice(mark0).filter(a => a.ep === 'visitor_id').length, 0, 'happy path: no visitor_id');
     assert.ok(!vis.headers.authorization && !vis.headers.cookie, 'happy path: VISIONOS anonymous');
     assert.equal(vis.headers['x-youtube-client-name'], '101');
     assert.ok(vis.headers['x-goog-visitor-id']?.startsWith('Cg'), 'visitor data');
@@ -3133,6 +3229,38 @@ chrome.runtime.onMessage.addListener(m => {
     await waitT(() => document.documentElement.dataset.ytcFirstFrame, null, 8000);
     const after = log.gv.filter(g => g.v === 'mediapre001').slice(2);
     assert.ok(!after.some(g => g.a === 0), 'the prefetched first requests were used, not asked again: ' + JSON.stringify(after));
+  });
+
+  await step('own player: media intent dwell overlaps a slow VISIONOS response instead of starting again after it', async () => {
+    const ids = ['mediarest01', 'mediarest02', 'mediarest03'];
+    const answered = new Map(), waits = [];
+    const hold = async route => {
+      const b = route.request().postDataJSON();
+      if (ids.includes(b?.videoId) && b?.context?.client?.clientName === 'VISIONOS') {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        answered.set(b.videoId, Date.now());
+      }
+      await route.fallback();
+    };
+    await page.route('**/youtubei/v1/player*', hold);
+    try {
+      for (const id of ids) {
+        await page.goto('https://www.youtube.com/results?search_query=media+rest', { waitUntil: 'commit' });
+        await page.waitForSelector('#ytc-list .c a.t');
+        await page.mouse.move(2, 2);
+        await page.evaluate(v => document.querySelector('#ytc-list .c a.t').setAttribute('href', '/watch?v=' + v), id);
+        await page.hover('#ytc-list .c a.t[href="/watch?v=' + id + '"]');
+        for (let i = 0; i < 120 && log.gv.filter(g => g.v === id).length < 2; i++) await page.waitForTimeout(10);
+        const heads = log.gv.filter(g => g.v === id);
+        assert.equal(heads.length, 2, 'both tracks start while the pointer rests');
+        waits.push(heads[0].t - answered.get(id));
+        await page.mouse.move(2, 2);
+      }
+      // Three independent documents tolerate an isolated scheduling pause. The old
+      // response-then-dwell path waits at least 150 ms in every one.
+      assert.ok(median(waits) < 120, 'no second 150 ms dwell after the response: ' + waits.join(', '));
+      console.log('     response → first media request, ms: ' + waits.join(', '));
+    } finally { await page.unroute('**/youtubei/v1/player*', hold); }
   });
 
   // The warm first frame (own/warm.rs): the zoom shows the video's own first frame, never a thumbnail scaled up.

@@ -146,12 +146,18 @@ impl Storyboard {
     /// like YouTube's seek preview). `dur` = the player's duration when the
     /// response had no length.
     pub fn frame_at(&self, level: usize, t: f64, dur: f64) -> Option<Cell> {
+        self.frame_index(level, t, dur).map(|n| self.cell(level, n))
+    }
+
+    /// The displayed frame number, without constructing its sheet URL. A pointer can move
+    /// many times inside one frame's interval; callers can check their last frame first.
+    pub(crate) fn frame_index(&self, level: usize, t: f64, dur: f64) -> Option<u32> {
         let step = self.step(level, self.dur(dur));
         if step <= 0.0 || !t.is_finite() {
             return None;
         }
         // A hair of tolerance so an exact boundary (20 s / 10 s) is frame 2, not 1.999….
-        Some(self.cell(level, ((t.max(0.0) + 1e-6) / step).floor() as u32))
+        Some((((t.max(0.0) + 1e-6) / step).floor() as u32).min(self.levels[level].count - 1))
     }
 
     /// The frame for a chapter `[start, end)`: the first one taken inside it
@@ -167,7 +173,7 @@ impl Storyboard {
         Some(self.cell(level, n as u32))
     }
 
-    fn cell(&self, level: usize, n: u32) -> Cell {
+    pub(crate) fn cell(&self, level: usize, n: u32) -> Cell {
         let lv = &self.levels[level];
         let n = n.min(lv.count - 1);
         let per = lv.cols * lv.rows;
@@ -308,6 +314,24 @@ mod tests {
         nolen.dur = 0.0;
         assert_eq!(nolen.frame_at(0, 317.0, 634.0).unwrap().n, 50);
         assert_eq!(nolen.frame_at(0, 317.0, 0.0), None);
+    }
+
+    #[test]
+    fn frame_index_preserves_boundaries_clamping_and_duration_fallback() {
+        let sb = parse(BBB, 634.0).unwrap();
+        for (t, n) in [(-10.0, 0), (0.0, 0), (4.99, 0), (5.0, 1), (9.99, 1), (10.0, 2), (630.0, 126), (634.0, 126), (1e10, 127)] {
+            assert_eq!(sb.frame_index(3, t, 0.0), Some(n), "time {t}");
+            assert_eq!(sb.frame_at(3, t, 0.0).unwrap().n, n);
+        }
+        for t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(sb.frame_index(3, t, 0.0), None);
+        }
+        let sb = parse("https://i.ytimg.com/sb/x/L$L/$N.jpg|80#45#10#5#2#0#M$M", 0.0).unwrap();
+        for (t, n) in [(0.0, 0), (9.99, 0), (10.0, 1), (29.99, 2), (30.0, 3), (100.0, 9)] {
+            assert_eq!(sb.frame_index(0, t, 100.0), Some(n), "fallback duration at {t}");
+            assert_eq!(sb.frame_at(0, t, 100.0).unwrap().n, n);
+        }
+        assert_eq!(sb.frame_index(0, 0.0, 0.0), None);
     }
 
     #[test]

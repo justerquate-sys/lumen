@@ -50,14 +50,6 @@ pub(super) struct Motion {
     src: Option<Vec<f64>>,
     /// A pointer click toggles theater mode: morph the player into its new box.
     pub theater: bool,
-    /// Springs from `motion.rs`, computed once: soft (the morph), ui (theater).
-    springs: Option<[(String, u32); 2]>,
-}
-
-impl Motion {
-    fn springs(&mut self) -> &[(String, u32); 2] {
-        self.springs.get_or_insert_with(|| [motion::soft(), motion::ui()])
-    }
 }
 
 impl App {
@@ -108,8 +100,8 @@ impl App {
             bridge::fade_in(player::ui::BOX, motion::E_OUT, PLAYER_FADE_MS);
             return;
         }
-        let (curve, ms) = self.mo.springs()[0].clone();
-        bridge::flip_from(player::ui::BOX, r[0], r[1], r[2], r[3], &curve, ms);
+        let (curve, ms) = motion::soft();
+        bridge::flip_from(player::ui::BOX, r[0], r[1], r[2], r[3], curve, ms);
     }
 
     /// `next` replaced the watch page's skeletons, unless this paint is instant: after a pointer
@@ -160,8 +152,8 @@ impl App {
         let from = if morph { bridge::rect(player::ui::BOX) } else { Vec::new() };
         bridge::attr("ytc-watch", "class", if on { "watch theater" } else { "watch" });
         if from.len() == 4 {
-            let (curve, ms) = self.mo.springs()[1].clone();
-            bridge::flip_from(player::ui::BOX, from[0], from[1], from[2], from[3], &curve, ms);
+            let (curve, ms) = motion::ui();
+            bridge::flip_from(player::ui::BOX, from[0], from[1], from[2], from[3], curve, ms);
         }
     }
 }

@@ -621,12 +621,12 @@ impl App {
         if let Some(old) = chip_before.filter(|_| !still) {
             let new = self.fx_chip_sel_id();
             if new != old {
-                bridge::pill_slide(features::CHIPS, &old, &new, PILL_CLS, &curve, ms);
+                bridge::pill_slide(features::CHIPS, &old, &new, PILL_CLS, curve, ms);
             }
         }
         if reflow {
-            bridge::flip_play(features::BAR, CHIP_ITEMS, &curve, ms, FLIP_OUT_MS);
-            bridge::flip_play(features::BAR, NL_ITEMS, &curve, ms, FLIP_OUT_MS);
+            bridge::flip_play(features::BAR, CHIP_ITEMS, curve, ms, FLIP_OUT_MS);
+            bridge::flip_play(features::BAR, NL_ITEMS, curve, ms, FLIP_OUT_MS);
         }
         if matches!(act, "fx-dur" | "fx-order") {
             let p = self.fx.prefs.clone();
@@ -637,7 +637,7 @@ impl App {
                 if still {
                     bridge::pill_slide(row, "", "", "", "", 0);
                 } else if a != b {
-                    bridge::pill_slide(row, &features::control_id(act, &a), &features::control_id(act, &b), PILL_CLS, &curve, ms);
+                    bridge::pill_slide(row, &features::control_id(act, &a), &features::control_id(act, &b), PILL_CLS, curve, ms);
                 }
             }
         }

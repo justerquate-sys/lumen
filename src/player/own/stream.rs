@@ -358,12 +358,18 @@ pub(super) const SEEK_PRE_MS: u32 = 200;
 /// Fetched-ahead segments kept per track.
 const SEEK_PRE_KEEP: usize = 2;
 
+fn seek_pre_wait(deadline: f64, now: f64) -> Option<u32> {
+    (deadline > now).then(|| (deadline - now).ceil() as u32)
+}
+
 impl Own {
     /// The seek bar's pointer (or a TV scrub) is at `t` (None: it left): fetch that spot's
     /// segments once it rests there.
     pub(super) fn seek_pre_hint(&mut self, t: Option<f64>) {
-        self.seekpre_gen = self.seekpre_gen.wrapping_add(1);
         let Some(t) = t else {
+            // Keep the one wake already queued: re-entering before it fires can reuse it.
+            // With no current deadline that wake does nothing, including after a leave.
+            self.seekpre_deadline = None;
             // Gone without a click: what is still loading is no longer needed.
             let ids: Vec<u32> = self.seek_pre.iter().filter_map(|p| p.id).collect();
             for id in ids {
@@ -373,11 +379,27 @@ impl Own {
             return;
         };
         self.seekpre_at = t;
-        self.timer(super::Tm::SeekPre(self.seekpre_gen), SEEK_PRE_MS);
+        self.seekpre_deadline = Some(bridge::now() + f64::from(SEEK_PRE_MS));
+        if !self.seekpre_pending {
+            self.seekpre_pending = true;
+            self.seekpre_gen = self.seekpre_gen.wrapping_add(1);
+            self.timer(super::Tm::SeekPre(self.seekpre_gen), SEEK_PRE_MS);
+        }
     }
 
     pub(super) fn seek_pre_due(&mut self, g: u32) {
-        if g != self.seekpre_gen || self.live.is_some() || self.first_frame.is_none() || self.failed || self.refreshing || !self.sbs_made {
+        if g != self.seekpre_gen {
+            return;
+        }
+        self.seekpre_pending = false;
+        let Some(deadline) = self.seekpre_deadline else { return };
+        if let Some(ms) = seek_pre_wait(deadline, bridge::now()) {
+            self.seekpre_pending = true;
+            self.timer(super::Tm::SeekPre(g), ms);
+            return;
+        }
+        self.seekpre_deadline = None;
+        if self.live.is_some() || self.first_frame.is_none() || self.failed || self.refreshing || !self.sbs_made {
             return;
         }
         let t = self.seekpre_at;
@@ -466,6 +488,17 @@ impl Own {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seek_prefetch_waits_until_the_latest_pointer_rest_deadline() {
+        // A move at 0 queues one wake at 200; moving at 180 shifts the rest deadline
+        // to 380. The old wake waits the remaining time rather than prefetching early.
+        assert_eq!(seek_pre_wait(380.0, 200.0), Some(180));
+        assert_eq!(seek_pre_wait(560.0, 380.0), Some(180));
+        assert_eq!(seek_pre_wait(560.0, 559.25), Some(1));
+        assert_eq!(seek_pre_wait(560.0, 560.0), None);
+        assert_eq!(seek_pre_wait(560.0, 600.0), None);
+    }
 
     #[test]
     fn mp4_switch_releases_payload_and_tracks_contiguous_bytes() {

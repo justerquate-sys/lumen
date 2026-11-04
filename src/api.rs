@@ -193,6 +193,25 @@ pub fn player_url() -> String {
     format!("{ORIGIN}/youtubei/v1/player?prettyPrint=false")
 }
 
+/// All VISIONOS consumers use these groups. Keep each subtree whole, including every format,
+/// codec, audio track and caption option; WEB's tracking/storyboards call remains unmasked.
+pub const VISION_FIELDS: &str = "responseContext,playabilityStatus,streamingData,captions,videoDetails";
+static VISION_UNMASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn vision_url() -> String {
+    let url = player_url();
+    if VISION_UNMASKED.load(std::sync::atomic::Ordering::Relaxed) {
+        url
+    } else {
+        format!("{url}&fields={}", crate::util::pct_encode(VISION_FIELDS))
+    }
+}
+
+/// A refused VISIONOS mask disables only that mask for this document.
+pub fn unmask_vision() {
+    VISION_UNMASKED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// VISIONOS `player` body and headers. `hl` is always "en" so playability
 /// reasons (e.g. the bot check) are recognisable; metadata comes from WEB.
 pub fn vision_player(cfg: &Config, video_id: &str) -> (String, String) {
@@ -442,6 +461,73 @@ mod tests {
             assert_eq!(sum(&wa), sum(&wb), "{name}");
         }
         eprintln!("{n} answers: whole {a} bytes, masked {b} bytes ({:.0} %)", 100.0 * b as f64 / a.max(1) as f64);
+    }
+
+    fn vision_mask_parity(full: &Value) -> (usize, usize) {
+        let masked = mask_apply(&mask_parse(VISION_FIELDS), full);
+        // These groups are deliberately whole: new codecs, tracks and live fields survive too.
+        for k in ["responseContext", "playabilityStatus", "streamingData", "captions", "videoDetails"] {
+            assert_eq!(full.get(k), masked.get(k), "{k}");
+        }
+        let (a, b) = (full.to_string(), masked.to_string());
+        let (pa, pb) = (crate::json::parse_str(&a).unwrap(), crate::json::parse_str(&b).unwrap());
+        assert_eq!(format!("{:?}", crate::player::formats::parse(&pa)), format!("{:?}", crate::player::formats::parse(&pb)));
+        assert_eq!(crate::player::captions::list(&pa), crate::player::captions::list(&pb));
+        (a.len(), b.len())
+    }
+
+    #[test]
+    fn vision_mask_keeps_all_playback_formats_captions_and_live_fields() {
+        let full = json!({
+            "responseContext": {"visitorData": "fixture"},
+            "playabilityStatus": {"status": "OK", "reason": "fixture"},
+            "streamingData": {"hlsManifestUrl": "https://manifest.googlevideo.com/fixture.m3u8",
+                "adaptiveFormats": [
+                    {"itag": 337, "url": "https://rr1---sn-fixture.googlevideo.com/video", "mimeType": "video/webm; codecs=\"vp09.02.51.10\"",
+                        "width": 3840, "height": 2160, "fps": 60, "qualityLabel": "2160p60 HDR", "bitrate": 14000000,
+                        "initRange": {"start": "0", "end": "219"}, "indexRange": {"start": "220", "end": "400"},
+                        "contentLength": "90000000", "approxDurationMs": "240000", "colorInfo": {"transferCharacteristics": "COLOR_TRANSFER_CHARACTERISTICS_HLG"}},
+                    {"itag": 140, "url": "https://rr2---sn-fixture.googlevideo.com/audio", "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                        "bitrate": 128000, "initRange": {"end": "199"}, "indexRange": {"end": "399"}, "contentLength": "4000000",
+                        "approxDurationMs": "240000", "audioTrack": {"id": "ja.0", "displayName": "Japanese", "audioIsDefault": false}}
+                ]},
+            "captions": {"playerCaptionsTracklistRenderer": {
+                "captionTracks": [{"baseUrl": "https://www.youtube.com/api/timedtext?lang=ja", "languageCode": "ja", "kind": "asr",
+                    "name": {"simpleText": "Japanese"}, "isTranslatable": true}],
+                "audioTracks": [{"defaultCaptionTrackIndex": 0}], "defaultAudioTrackIndex": 0,
+                "translationLanguages": [{"languageCode": "en"}]}},
+            "videoDetails": {"lengthSeconds": "240", "isLive": true, "isUpcoming": false},
+            "playerConfig": {"unused": [1, 2, 3]}, "playbackTracking": {"unused": "WEB owns history"},
+            "storyboards": {"unused": "WEB owns storyboards"}
+        });
+        let encoded = full.to_string();
+        let parsed = crate::json::parse_str(&encoded).unwrap();
+        let formats = crate::player::formats::parse(&parsed);
+        assert_eq!(formats.len(), 2);
+        assert!(formats[0].hdr && formats[0].hlg && formats[1].alt_audio);
+        let captions = crate::player::captions::list(&parsed);
+        assert_eq!((captions.tracks.len(), captions.default), (2, Some(0)));
+        let (a, b) = vision_mask_parity(&full);
+        assert!(b < a);
+        vision_mask_parity(&crate::util::test_fixture("player.json").to_serde());
+        vision_mask_parity(&json!({"playabilityStatus": {"status": "LIVE_STREAM_OFFLINE", "reason": "Premieres later"},
+            "videoDetails": {"isUpcoming": true, "isLiveContent": true}, "playerConfig": {"unused": true}}));
+    }
+
+    /// Local successful VISIONOS captures, kept outside the repository (may contain signed URLs).
+    /// `YTC_VISION_FILE=<whole answer> cargo test -- --ignored vision_mask_live`
+    #[test]
+    #[ignore]
+    fn vision_mask_live() {
+        let file = std::env::var("YTC_VISION_FILE").expect("YTC_VISION_FILE");
+        let full: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        assert_eq!(full.pointer("/playabilityStatus/status").and_then(Value::as_str), Some("OK"));
+        let (a, b) = vision_mask_parity(&full);
+        let encoded = full.to_string();
+        let parsed = crate::json::parse_str(&encoded).unwrap();
+        let n = crate::player::formats::parse(&parsed).len();
+        assert!(n > 0, "successful playable formats");
+        eprintln!("{n} formats unchanged: whole {a} bytes, masked {b} bytes ({:.0} %)", 100.0 * b as f64 / a as f64);
     }
 
     #[test]
