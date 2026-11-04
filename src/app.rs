@@ -2195,7 +2195,11 @@ impl App {
             return;
         }
         if self.acts.owns_fetch(id) {
-            self.acts.on_fetch(&net!(self), id, status, body);
+            if let Some((v, add)) = self.acts.on_fetch(&net!(self), id, status, body) {
+                use crate::features::watch_later::{Edit, Outcome};
+                self.fx_wl_settle(&v, if add { Edit::Add } else { Edit::Remove }, &Outcome::Changed);
+                if matches!(&self.route, Route::Playlist { list } if list == "WL") { self.fx_wl_redraw(); }
+            }
             self.tv_drawer_focus();
             for (kind, reason) in std::mem::take(&mut self.acts.incidents) {
                 self.incident(kind, &reason, None);

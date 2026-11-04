@@ -587,12 +587,14 @@ async function handle(route) {
     }
     if (LIBRARY.on) {
       if (ep === 'browse' && (body.browseId === 'VLWL' || body.continuation?.startsWith('WLLIB:'))) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(libraryPage(body.continuation ? +body.continuation.split(':')[1] : 0)) });
+      if (ep === 'playlist/get_add_to_playlist') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ contents: [{ addToPlaylistRenderer: { playlists: [{ playlistAddToOptionRenderer: { playlistId: 'WL', title: { simpleText: 'Watch later' }, containsSelectedVideos: LIBRARY.ids.includes(body.videoIds[0]) ? 'ALL' : 'NONE' } }] } }] }) });
       if (ep === 'browse/edit_playlist' && body.playlistId === 'WL') {
         const a = body.actions[0], sort = a.action === 'ACTION_SET_PLAYLIST_VIDEO_ORDER';
         if (LIBRARY.delay && !sort) await new Promise(r => setTimeout(r, LIBRARY.delay));
         if ((sort && LIBRARY.sortFail) || (!sort && LIBRARY.fail)) return route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":{"message":"Try again"}}' });
         if (sort) { assert.equal(a.playlistVideoOrder, 1); assert.equal(body.params, 'fixtureOrderContext'); LIBRARY.newest = true; }
         else if (a.action === 'ACTION_REMOVE_VIDEO_BY_VIDEO_ID') LIBRARY.ids = LIBRARY.ids.filter(id => id !== a.removedVideoId);
+        else if (a.action === 'ACTION_ADD_VIDEO' && !LIBRARY.ids.includes(a.addedVideoId)) LIBRARY.ids.push(a.addedVideoId);
         return route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"STATUS_SUCCEEDED"}' });
       }
     }
@@ -6230,6 +6232,50 @@ chrome.runtime.onMessage.addListener(m => {
           await page.screenshot({ path: path.join(process.env.YTC_SHOTS, 'watch-later-library-youtube.png') });
         } finally { await sw.evaluate(cfg => chrome.storage.local.set({ ytcConfigV1: cfg }), cfg); }
       }
+    } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library: failed removal after navigation restores the card and retry state on Back', async () => {
+    try {
+      await startLibrary(true); await page.waitForSelector('#ytc-list .c .wl');
+      const id = libraryId(59), button = '#ytc-wl-' + id;
+      LIBRARY.delay = 700; LIBRARY.fail = true;
+      await page.click(button);
+      assert.equal(await page.locator(button).count(), 0);
+      await page.click('#ytc-side a[data-nav=history]');
+      await page.waitForTimeout(850);
+      assert.ok(LIBRARY.ids.includes(id), 'failed request leaves server membership intact');
+      await page.goBack({ waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.locator(button).count(), 1, 'Back restores the failed removal');
+      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), id, 'original position restored');
+      assert.match(await page.getAttribute(button, 'aria-label'), /Couldn’t remove.*503/);
+    } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library: re-saving a removed card through the player chooser makes it visible without a reload', async () => {
+    try {
+      LIBRARY.on = true; LIBRARY.newest = true; LIBRARY.ids = [libraryId(0), EVIL_ID];
+      LIBRARY.delay = 0; LIBRARY.fail = false; LIBRARY.sortFail = false;
+      await ctx.addCookies([{ name: 'SAPISID', value: 'e2eSAPISID', domain: '.youtube.com', path: '/', secure: true }]);
+      await page.goto('https://www.youtube.com/playlist?list=WL', { waitUntil: 'commit' });
+      const button = '#ytc-wl-' + EVIL_ID;
+      await page.waitForSelector(button);
+      const removed = page.waitForResponse(r => r.url().includes('/browse/edit_playlist') && r.request().postDataJSON()?.actions?.[0]?.removedVideoId === EVIL_ID);
+      await page.click(button); await removed;
+      assert.ok(!LIBRARY.ids.includes(EVIL_ID));
+      await page.fill('#ytc-q', 'resave'); await page.press('#ytc-q', 'Enter');
+      const card = `#ytc-list .c[data-v="${EVIL_ID}"]`;
+      await page.waitForSelector(card); await page.click(card + ' a.th');
+      await page.waitForSelector('#ytc-save-b'); await page.click('#ytc-save-b');
+      await page.waitForSelector('#ytc-pl-0');
+      assert.equal(await page.getAttribute('#ytc-pl-0', 'aria-checked'), 'false');
+      await page.click('#ytc-pl-0');
+      await page.waitForFunction(() => !document.querySelector('#ytc-save-p .busy'));
+      assert.ok(LIBRARY.ids.includes(EVIL_ID), 'chooser confirmed the save');
+      await page.goBack({ waitUntil: 'commit' }); await page.waitForSelector('#ytc-list .c');
+      await page.click('#ytc-side a[data-nav=wl]'); await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.locator(button).count(), 1, 're-saved card is visible in the same tab');
+      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), EVIL_ID, 'newest save returns to the top');
     } finally { await endLibrary(); }
   });
 

@@ -43,7 +43,10 @@ discarded. Other playlist headers and snapshots retain their behavior.
 Removing a video updates the visible list in the click’s task. Confirmation prunes the feed and
 invalidates Watch later’s old cached copies, including when the response finishes after navigation.
 Tab-memory removal state keeps stale responses from bringing the card back. Failed removals remain
-retryable in their original position. Search, Home and related cards keep their place.
+retryable in their original position, including when the response arrives after navigating away and
+returning with Back. The player's Save chooser confirms through the same Rust state, so re-saving a
+removed video clears its removal marker and invalidates old Watch later copies. Search, Home and
+related cards keep their place.
 
 The native command shape was checked against the primary
 [yt-watch-later-tools implementation](https://github.com/jadenjsj/yt-watch-later-tools/blob/main/yt-watch-later-tools.user.js).
@@ -55,7 +58,8 @@ The real unpacked extension in Chromium reproduced all four original failures be
 The focused checks pass for sidebar intent/cancellation, the header, newest-first ordering across
 60 videos and multiple continuations, optimistic removal/rollback/back/reload, sort failure/retry,
 and the last-card empty state. Rust tests cover supplied sort values and stale-response removal state.
-The full public-build regression suite is run before merging.
+Two additional review reproductions cover failure after navigation and re-saving through the player;
+both fail on the initial 0.13.4 build. The full public-build regression suite is run before merging.
 
 Design process adapted from [Unslop](https://heydamir.design/unslop) by
 [Damir Sokolovsky](https://x.com/heydamir), licensed under CC BY 4.0.

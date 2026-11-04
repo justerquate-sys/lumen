@@ -1240,7 +1240,7 @@ impl App {
         self.fx_wl_send(v, Some(edit));
     }
 
-    fn fx_wl_settle(&mut self, v: &str, edit: Edit, out: &Outcome) {
+    pub(super) fn fx_wl_settle(&mut self, v: &str, edit: Edit, out: &Outcome) {
         let st = features::shared(|s| {
             s.saves.settle(v, edit, out);
             s.saves.probed.insert(v.to_string(), true);
@@ -1252,7 +1252,10 @@ impl App {
         }
         let library = matches!(&self.route, Route::Playlist { list } if list == "WL");
         if matches!(out, Outcome::Failed { .. }) {
-            if library && edit == Edit::Remove { self.fx_wl_redraw(); }
+            if edit == Edit::Remove {
+                self.fx_wl_invalidate();
+                if library { self.fx_wl_redraw(); }
+            }
         } else {
             if library && edit == Edit::Remove {
                 self.feed.shown.retain(|i| i.key() != v);
@@ -1283,7 +1286,7 @@ impl App {
         }
     }
 
-    fn fx_wl_redraw(&mut self) {
+    pub(super) fn fx_wl_redraw(&mut self) {
         let focus = bridge::focus_id();
         self.fx_refilter(false);
         if self.fx_visible(&self.feed.shown).is_empty() && !self.has_more() {
