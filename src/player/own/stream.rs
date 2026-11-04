@@ -36,11 +36,25 @@ pub(super) struct SegAsm {
     /// The instant switch reads how much time the bytes so far cover.
     pub keep: bool,
     pub kept: Vec<u8>,
+    mp4: Option<frag::Mp4Coverage>,
 }
 
 impl SegAsm {
     pub fn new(itag: u32, idx: usize, start: u64, end: u64, asked: u64) -> SegAsm {
-        SegAsm { itag, idx, asm: frag::Asm::new(start, end), asked, keep: false, kept: Vec::new() }
+        SegAsm { itag, idx, asm: frag::Asm::new(start, end), asked, keep: false, kept: Vec::new(), mp4: None }
+    }
+
+    /// Once the MP4 sample table is complete, release its buffered payload and advance coverage
+    /// by the assembler's contiguous byte count. A switch keeps a few KiB of metadata, not a segment.
+    fn mp4_covered(&mut self, bytes: &[u8]) -> Option<f64> {
+        if self.mp4.is_none() {
+            self.kept.extend_from_slice(bytes);
+            self.mp4 = frag::Mp4Coverage::parse(&self.kept);
+            if self.mp4.is_some() {
+                self.kept = Vec::new();
+            }
+        }
+        self.mp4.as_ref().map(|m| m.covered((self.asm.frontier() - self.asm.start) as usize))
     }
 }
 
@@ -144,13 +158,15 @@ impl Own {
         // The instant switch's segment: how far its appended bytes reach.
         let kept = match (a.keep, fl) {
             (true, Some((webm, t0, t1))) => {
-                a.kept.extend_from_slice(&out);
+                if webm {
+                    a.kept.extend_from_slice(&out);
+                }
                 Some(if done {
                     Some(t1)
                 } else if webm {
                     frag::webm_covered(&a.kept)
                 } else {
-                    frag::mp4_covered(&a.kept).map(|x| t0 + x * (t1 - t0))
+                    a.mp4_covered(&out).map(|x| t0 + x * (t1 - t0))
                 })
             }
             _ => None,
@@ -444,5 +460,28 @@ impl Own {
         if !p.data.is_empty() {
             self.feed(kind, itag, idx, start, &p.data);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mp4_switch_releases_payload_and_tracks_contiguous_bytes() {
+        let data = frag::tests::fragment(&[(100, 50), (0, 10), (200, 0), (50, 30)]);
+        let mut a = SegAsm::new(299, 2, 1000, 999 + data.len() as u64, 1000);
+        let mut planned = false;
+        for (i, b) in data.iter().enumerate() {
+            let out = a.asm.add(1000 + i as u64, &[*b]);
+            assert_eq!(a.mp4_covered(&out), frag::mp4_covered(&data[..=i]), "byte {i}");
+            if a.mp4.is_some() {
+                assert_eq!(a.kept.capacity(), 0, "metadata is enough; no retained payload allocation");
+                planned = true;
+            }
+        }
+        assert!(planned && a.asm.done());
+        assert_eq!(a.mp4.as_ref().unwrap().covered(data.len()), 1.0);
+        assert!(SegAsm::new(299, 3, 2000, 2999, 2000).mp4.is_none(), "a new segment starts without the old plan");
     }
 }

@@ -7,7 +7,7 @@ use crate::parse::{ChannelCard, Item, PlaylistCard, Video, anim_url};
 use crate::render::Head;
 use crate::util::{is_safe_id, is_video_id, safe_img, safe_rel_href};
 use crate::json::{self, Value as In};
-use serde_json::{Map, Value, json};
+use serde::{Serialize, Serializer, ser::SerializeMap};
 
 pub const PREFIX: &str = "ytc:snap:";
 pub const INDEX: &str = "ytc:snaps";
@@ -39,72 +39,88 @@ pub fn key(url: &str) -> String {
     format!("{PREFIX}{url}")
 }
 
-fn opt(m: &mut Map<String, Value>, k: &str, v: &Option<String>) {
+fn opt<M: SerializeMap>(m: &mut M, k: &str, v: &Option<String>) -> Result<(), M::Error> {
     if let Some(v) = v {
-        m.insert(k.into(), v.clone().into());
+        m.serialize_entry(k, v)?;
     }
+    Ok(())
 }
 
-fn nonempty(m: &mut Map<String, Value>, k: &str, v: &str) {
+fn nonempty<M: SerializeMap>(m: &mut M, k: &str, v: &str) -> Result<(), M::Error> {
     if !v.is_empty() {
-        m.insert(k.into(), v.into());
+        m.serialize_entry(k, v)?;
+    }
+    Ok(())
+}
+
+/// Borrowed records write the same compact schema without building a tree of cloned strings.
+struct ItemRecord<'a>(&'a Item);
+
+impl Serialize for ItemRecord<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut m = serializer.serialize_map(None)?;
+        // Keep the old map's byte-sorted field order as well as its omissions.
+        match self.0 {
+            Item::Video(v) => {
+                opt(&mut m, "a", &v.anim)?;
+                opt(&mut m, "b", &v.channel_bid)?;
+                nonempty(&mut m, "c", &v.channel)?;
+                nonempty(&mut m, "d", &v.duration)?;
+                opt(&mut m, "h", &v.channel_href)?;
+                m.serialize_entry("i", &v.id)?;
+                m.serialize_entry("k", "v")?;
+                if v.live {
+                    m.serialize_entry("l", &true)?;
+                }
+                nonempty(&mut m, "m", &v.meta)?;
+                if v.progress > 0 {
+                    m.serialize_entry("p", &v.progress)?;
+                }
+                if v.short {
+                    m.serialize_entry("r", &true)?;
+                }
+                opt(&mut m, "s", &v.thumb)?;
+                if v.thumb_w > 0 {
+                    m.serialize_entry("sw", &v.thumb_w)?;
+                }
+                nonempty(&mut m, "t", &v.title)?;
+                if v.music {
+                    m.serialize_entry("u", &true)?;
+                }
+                opt(&mut m, "x", &v.thumb2x)?;
+                if v.thumb2x_w > 0 {
+                    m.serialize_entry("xw", &v.thumb2x_w)?;
+                }
+            }
+            Item::Playlist(p) => {
+                nonempty(&mut m, "c", &p.channel)?;
+                opt(&mut m, "f", &p.first_video)?;
+                opt(&mut m, "h", &p.channel_href)?;
+                m.serialize_entry("i", &p.id)?;
+                m.serialize_entry("k", "p")?;
+                nonempty(&mut m, "n", &p.count)?;
+                opt(&mut m, "s", &p.thumb)?;
+                nonempty(&mut m, "t", &p.title)?;
+            }
+            Item::Channel(c) => {
+                opt(&mut m, "b", &c.bid)?;
+                m.serialize_entry("h", &c.href)?;
+                m.serialize_entry("k", "c")?;
+                nonempty(&mut m, "m", &c.meta)?;
+                opt(&mut m, "s", &c.avatar)?;
+                nonempty(&mut m, "t", &c.title)?;
+            }
+        }
+        m.end()
     }
 }
 
-pub(crate) fn item_json(it: &Item) -> Value {
-    let mut m = Map::new();
-    match it {
-        Item::Video(v) => {
-            m.insert("k".into(), "v".into());
-            m.insert("i".into(), v.id.clone().into());
-            nonempty(&mut m, "t", &v.title);
-            nonempty(&mut m, "c", &v.channel);
-            opt(&mut m, "h", &v.channel_href);
-            opt(&mut m, "b", &v.channel_bid);
-            nonempty(&mut m, "m", &v.meta);
-            nonempty(&mut m, "d", &v.duration);
-            if v.live {
-                m.insert("l".into(), true.into());
-            }
-            if v.progress > 0 {
-                m.insert("p".into(), v.progress.into());
-            }
-            if v.music {
-                m.insert("u".into(), true.into());
-            }
-            if v.short {
-                m.insert("r".into(), true.into());
-            }
-            opt(&mut m, "s", &v.thumb);
-            if v.thumb_w > 0 {
-                m.insert("sw".into(), v.thumb_w.into());
-            }
-            opt(&mut m, "x", &v.thumb2x);
-            if v.thumb2x_w > 0 {
-                m.insert("xw".into(), v.thumb2x_w.into());
-            }
-            opt(&mut m, "a", &v.anim);
-        }
-        Item::Playlist(p) => {
-            m.insert("k".into(), "p".into());
-            m.insert("i".into(), p.id.clone().into());
-            nonempty(&mut m, "t", &p.title);
-            nonempty(&mut m, "c", &p.channel);
-            opt(&mut m, "h", &p.channel_href);
-            nonempty(&mut m, "n", &p.count);
-            opt(&mut m, "s", &p.thumb);
-            opt(&mut m, "f", &p.first_video);
-        }
-        Item::Channel(c) => {
-            m.insert("k".into(), "c".into());
-            m.insert("h".into(), c.href.clone().into());
-            opt(&mut m, "b", &c.bid);
-            nonempty(&mut m, "t", &c.title);
-            nonempty(&mut m, "m", &c.meta);
-            opt(&mut m, "s", &c.avatar);
-        }
+pub(crate) struct ItemRecords<'a>(pub &'a [Item]);
+
+impl Serialize for ItemRecords<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(ItemRecord))
     }
-    Value::Object(m)
 }
 
 const TEXT_MAX: usize = 5000;
@@ -167,11 +183,30 @@ pub(crate) fn item_from(v: &In) -> Option<Item> {
     }
 }
 
-fn head_json(h: &Head) -> Value {
-    match h {
-        Head::Feed { title } => json!({"k": "f", "t": title}),
-        Head::Channel { title, avatar, meta, about } => json!({"k": "c", "t": title, "a": avatar, "m": meta, "ab": about}),
-        Head::Playlist { title, meta } => json!({"k": "p", "t": title, "m": meta}),
+struct HeadRecord<'a>(&'a Head);
+
+impl Serialize for HeadRecord<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut m = serializer.serialize_map(None)?;
+        match self.0 {
+            Head::Feed { title } => {
+                m.serialize_entry("k", "f")?;
+                m.serialize_entry("t", title)?;
+            }
+            Head::Channel { title, avatar, meta, about } => {
+                m.serialize_entry("a", avatar)?;
+                m.serialize_entry("ab", about)?;
+                m.serialize_entry("k", "c")?;
+                m.serialize_entry("m", meta)?;
+                m.serialize_entry("t", title)?;
+            }
+            Head::Playlist { title, meta } => {
+                m.serialize_entry("k", "p")?;
+                m.serialize_entry("m", meta)?;
+                m.serialize_entry("t", title)?;
+            }
+        }
+        m.end()
     }
 }
 
@@ -192,20 +227,24 @@ pub fn ep(s: &str) -> Option<&'static str> {
     ["browse", "search", "next"].into_iter().find(|e| *e == s)
 }
 
+impl Serialize for Snap {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut m = serializer.serialize_map(Some(9))?;
+        m.serialize_entry("c", &self.cont)?;
+        m.serialize_entry("e", self.cont_ep)?;
+        m.serialize_entry("h", &HeadRecord(&self.head))?;
+        m.serialize_entry("i", &ItemRecords(&self.items[..self.items.len().min(MAX_ITEMS)]))?;
+        m.serialize_entry("n", &self.shown.min(MAX_ITEMS))?;
+        m.serialize_entry("t", &self.at)?;
+        m.serialize_entry("u", &self.url)?;
+        m.serialize_entry("v", &VERSION)?;
+        m.serialize_entry("y", &self.scroll.max(0.0).round())?;
+        m.end()
+    }
+}
+
 pub fn to_json(sn: &Snap) -> String {
-    let items: Vec<Value> = sn.items.iter().take(MAX_ITEMS).map(item_json).collect();
-    json!({
-        "v": VERSION,
-        "u": sn.url,
-        "h": head_json(&sn.head),
-        "i": items,
-        "n": sn.shown.min(MAX_ITEMS),
-        "c": sn.cont,
-        "e": sn.cont_ep,
-        "y": sn.scroll.max(0.0).round(),
-        "t": sn.at,
-    })
-    .to_string()
+    serde_json::to_string(sn).expect("snapshot serializes to JSON")
 }
 
 /// Parses and re-validates a snapshot written for `url`.
@@ -236,12 +275,56 @@ pub fn index_from(s: &str) -> Vec<String> {
 }
 
 pub fn index_json(urls: &[String]) -> String {
-    Value::Array(urls.iter().map(|u| Value::from(u.as_str())).collect()).to_string()
+    serde_json::to_string(urls).expect("snapshot index serializes to JSON")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compact_schema_bytes_and_escaping_stay_compatible() {
+        let text = "A \"quote\", \\ slash, \n\0東京🦀";
+        let items = vec![
+            Item::Video(Video { id: "abcdefghijk".into(), title: text.into(), channel: "Channel".into(), channel_href: Some(String::new()), channel_bid: Some("UCchannel".into()), meta: "1.2M views".into(), duration: "1:23".into(), live: true, progress: 42, thumb: Some("https://i.ytimg.com/one.jpg".into()), thumb2x: Some("https://i.ytimg.com/two.jpg".into()), thumb_w: 360, thumb2x_w: 720, anim: Some(String::new()), music: true, short: true }),
+            Item::Playlist(PlaylistCard { id: "PLone".into(), title: text.into(), channel: "Channel".into(), channel_href: Some("/@channel".into()), count: "12 videos".into(), thumb: Some("https://i.ytimg.com/list.jpg".into()), first_video: Some("abcdefghijk".into()) }),
+            Item::Channel(ChannelCard { href: "/@channel".into(), bid: Some("UCchannel".into()), title: text.into(), meta: "12 videos".into(), avatar: Some("https://yt3.ggpht.com/a.jpg".into()) }),
+            Item::Video(Video::default()), Item::Playlist(PlaylistCard::default()), Item::Channel(ChannelCard::default()),
+        ];
+        let compact = json!([
+            {"a":"", "b":"UCchannel", "c":"Channel", "d":"1:23", "h":"", "i":"abcdefghijk", "k":"v", "l":true, "m":"1.2M views", "p":42, "r":true, "s":"https://i.ytimg.com/one.jpg", "sw":360, "t":text, "u":true, "x":"https://i.ytimg.com/two.jpg", "xw":720},
+            {"c":"Channel", "f":"abcdefghijk", "h":"/@channel", "i":"PLone", "k":"p", "n":"12 videos", "s":"https://i.ytimg.com/list.jpg", "t":text},
+            {"b":"UCchannel", "h":"/@channel", "k":"c", "m":"12 videos", "s":"https://yt3.ggpht.com/a.jpg", "t":text},
+            {"i":"", "k":"v"}, {"i":"", "k":"p"}, {"h":"", "k":"c"},
+        ]);
+        for (head, compact_head) in [
+            (Head::Feed { title: text.into() }, json!({"k":"f", "t":text})),
+            (Head::Channel { title: text.into(), avatar: Some(String::new()), meta: vec![text.into()], about: text.into() }, json!({"a":"", "ab":text, "k":"c", "m":[text], "t":text})),
+            (Head::Channel { title: String::new(), avatar: None, meta: vec![], about: String::new() }, json!({"a":null, "ab":"", "k":"c", "m":[], "t":""})),
+            (Head::Playlist { title: text.into(), meta: vec![text.into()] }, json!({"k":"p", "m":[text], "t":text})),
+        ] {
+            let sn = Snap { url: "/".into(), head, items: items.clone(), shown: 3, cont: None, cont_ep: "browse", scroll: 19.6, at: 1000.25 };
+            assert_eq!(to_json(&sn), json!({"c":null, "e":"browse", "h":compact_head, "i":compact, "n":3, "t":1000.25, "u":"/", "v":1, "y":20.0}).to_string());
+        }
+        let index = vec![text.to_string(), "/results?search_query=x".into()];
+        assert_eq!(index_json(&index), json!(index).to_string());
+    }
+
+    #[test]
+    fn serialization_keeps_item_caps_and_float_policy() {
+        let mut sn = Snap { url: "/".into(), head: Head::Feed { title: "Home".into() }, items: vec![Item::Video(Video::default()); MAX_ITEMS + 1], shown: MAX_ITEMS + 1, cont: None, cont_ep: "browse", scroll: -12.5, at: f64::NAN };
+        let v: serde_json::Value = serde_json::from_str(&to_json(&sn)).unwrap();
+        assert_eq!(v["i"].as_array().unwrap().len(), MAX_ITEMS);
+        assert_eq!(v["n"], MAX_ITEMS);
+        assert_eq!(v["t"], json!(f64::NAN));
+        assert_eq!(v["y"], json!(0.0));
+        sn.scroll = f64::INFINITY;
+        sn.at = f64::NEG_INFINITY;
+        let v: serde_json::Value = serde_json::from_str(&to_json(&sn)).unwrap();
+        assert_eq!((v["t"].clone(), v["y"].clone()), (json!(f64::NEG_INFINITY), json!(f64::INFINITY)));
+    }
+
     #[test]
     fn roundtrip_and_validation() {
         let v = Video {

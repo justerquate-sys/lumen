@@ -481,14 +481,15 @@ impl<'a> Map<'a> {
     fn from_members(mut m: Vec<(Cow<'a, str>, Value<'a>)>) -> Self {
         if m.len() > 1 && !m.windows(2).all(|w| w[0].0 < w[1].0) {
             m.sort_by(|a, b| a.0.cmp(&b.0)); // stable: equal keys stay in document order
-            let mut out: Vec<(Cow<'a, str>, Value<'a>)> = Vec::with_capacity(m.len());
-            for (k, v) in m {
-                match out.last_mut() {
-                    Some(last) if last.0 == k => last.1 = v,
-                    _ => out.push((k, v)),
+            m.dedup_by(|later, kept| {
+                if later.0 == kept.0 {
+                    kept.1 = std::mem::take(&mut later.1);
+                    true
+                } else {
+                    false
                 }
-            }
-            m = out;
+            });
+            m.shrink_to_fit();
         }
         Map(m)
     }
@@ -763,6 +764,42 @@ mod tests {
             let theirs: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert!(ours.to_serde() == theirs, "{f}");
             assert_eq!(ours.to_string(), theirs.to_string(), "{f}");
+        }
+    }
+
+    #[test]
+    fn duplicate_members_keep_the_last_value_in_sorted_order() {
+        for doc in [
+            r#"{"b":1,"a":2,"b":3,"b":4}"#,
+            r#"{"z":{"old":[1,2]},"a":null,"z":["last"],"a":{"new":true}}"#,
+            r#"{"b":"first","\u0062":{"nested":[false,null]},"a":0,"b":"last"}"#,
+            r#"{"\u0062":"first","a":0,"b":{"last":[1,2,3]}}"#,
+        ] {
+            same(doc);
+            let value = parse_str(doc).unwrap();
+            let keys: Vec<_> = value.as_object().unwrap().iter().map(|(k, _)| k).collect();
+            assert!(keys.windows(2).all(|w| w[0] < w[1]));
+        }
+    }
+
+    /// `cargo test --release --locked json::tests::benchmark_response_parsing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual parser timing on signed-out fixtures"]
+    fn benchmark_response_parsing() {
+        use std::{hint::black_box, time::Instant};
+        for name in ["search.json", "next.json", "home.json", "comments.json", "channel.json", "chapters_next.json", "browse_cont.json", "player.json", "tv_shelves.json"] {
+            let bytes = crate::util::fixture_bytes(name);
+            drop(black_box(parse(black_box(&bytes)).unwrap()));
+            let mut samples = Vec::with_capacity(15);
+            for _ in 0..15 {
+                let start = Instant::now();
+                for _ in 0..32 {
+                    drop(black_box(parse(black_box(&bytes)).unwrap()));
+                }
+                samples.push(start.elapsed().as_nanos() as f64 / 32_000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!("{name}: {} bytes, median {:.2} µs per parse/drop", bytes.len(), samples[samples.len() / 2]);
         }
     }
 

@@ -1190,21 +1190,32 @@ chrome.runtime.onMessage.addListener(m => {
   });
 
   await step('back from another document restores Home at its scroll position without refetching', async () => {
-    await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
-    // The fresh feed may show only its first chunk (page shorter than 1500 + viewport):
-    // scroll on until more cards have been appended and the position sticks.
-    await page.waitForFunction(() => { scrollTo(0, 1500); return scrollY === 1500; }, null, { timeout: 8000, polling: 50 });
-    await page.waitForTimeout(100);
-    await page.goto('https://www.youtube.com/results?search_query=back+test', { waitUntil: 'commit' });
-    await page.waitForSelector('#ytc-list .c');
-    const n = apiCount('browse');
-    await page.goBack({ waitUntil: 'commit' });
-    await page.waitForFunction(() => document.querySelectorAll('#ytc-list .c').length >= 30 && location.pathname === '/');
-    await page.waitForTimeout(300);
-    const y = await page.evaluate(() => scrollY);
-    assert.ok(Math.abs(y - 1500) < 60, `scrollY ${y}`);
-    assert.equal(apiCount('browse'), n, 'no Home request');
-    await page.evaluate(() => scrollTo(0, 0));
+    const noReadyBefore = await page.evaluate(() => localStorage.getItem('ytc-test-noready'));
+    try {
+      // Ready Home can refill its own continuation while Back restores this snapshot. Its
+      // separately tested prefetch is unrelated to the restoration's zero-request guarantee.
+      await page.evaluate(() => localStorage.setItem('ytc-test-noready', '1'));
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
+      // The fresh feed may show only its first chunk (page shorter than 1500 + viewport):
+      // scroll on until more cards have been appended and the position sticks.
+      await page.waitForFunction(() => { scrollTo(0, 1500); return scrollY === 1500; }, null, { timeout: 8000, polling: 50 });
+      await page.waitForTimeout(100);
+      await page.goto('https://www.youtube.com/results?search_query=back+test', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      const n = apiCount('browse');
+      await page.goBack({ waitUntil: 'commit' });
+      await page.waitForFunction(() => document.querySelectorAll('#ytc-list .c').length >= 30 && location.pathname === '/');
+      await page.waitForTimeout(300);
+      const y = await page.evaluate(() => scrollY);
+      assert.ok(Math.abs(y - 1500) < 60, `scrollY ${y}`);
+      assert.equal(apiCount('browse'), n, 'no Home request');
+      await page.evaluate(() => scrollTo(0, 0));
+    } finally {
+      await page.evaluate(previous => {
+        if (previous === null) localStorage.removeItem('ytc-test-noready');
+        else localStorage.setItem('ytc-test-noready', previous);
+      }, noReadyBefore);
+    }
   });
 
   await step('feeds and continuation tokens never reach chrome.storage or localStorage', async () => {

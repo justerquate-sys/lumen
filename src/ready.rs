@@ -24,9 +24,10 @@ use crate::config::Auth;
 use crate::features::home_chips::Chip;
 use crate::json::{self, Value as In};
 use crate::parse::{Item, Track, is_tracking};
-use crate::snap::{item_from, item_json};
+use crate::snap::{item_from, ItemRecords};
 use crate::util::safe_img;
-use serde_json::{Value, json};
+use serde::{Serialize, Serializer, ser::SerializeMap};
+use serde_json::json;
 use std::cell::Cell;
 
 pub const KEY: &str = "ytc:ready";
@@ -170,24 +171,68 @@ pub fn usable(r: &Ready, acct: &str, now: f64) -> bool {
     r.acct == acct && now >= r.at - 60_000.0 && now - r.at < MAX_AGE_MS && !r.items.is_empty()
 }
 
+struct ChipRecord<'a>(&'a Chip);
+
+impl Serialize for ChipRecord<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut m = serializer.serialize_map(Some(4))?;
+        m.serialize_entry("k", &self.0.key)?;
+        m.serialize_entry("l", &self.0.label)?;
+        m.serialize_entry("s", &self.0.selected)?;
+        m.serialize_entry("t", &self.0.token)?;
+        m.end()
+    }
+}
+
+struct ChipRecords<'a>(&'a [Chip]);
+
+impl Serialize for ChipRecords<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(ChipRecord))
+    }
+}
+
+struct TopbarRecord<'a>(&'a Topbar);
+
+impl Serialize for TopbarRecord<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut m = serializer.serialize_map(Some(3))?;
+        m.serialize_entry("a", &self.0.avatar)?;
+        m.serialize_entry("n", &self.0.count)?;
+        m.serialize_entry("o", &self.0.signed_out)?;
+        m.end()
+    }
+}
+
+struct TrackRecords<'a>(&'a [Track]);
+
+impl Serialize for TrackRecords<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|t| (&t.id, &t.item, &t.own)))
+    }
+}
+
+impl Serialize for Ready {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut m = serializer.serialize_map(Some(12))?;
+        m.serialize_entry("a", &self.acct)?;
+        m.serialize_entry("al", &self.all)?;
+        m.serialize_entry("b", &self.topbar.as_ref().map(TopbarRecord))?;
+        m.serialize_entry("c", &self.cont)?;
+        m.serialize_entry("e", &self.eid)?;
+        m.serialize_entry("f", &self.first.min(MAX_ITEMS))?;
+        m.serialize_entry("h", &ChipRecords(&self.chips[..self.chips.len().min(MAX_CHIPS)]))?;
+        m.serialize_entry("i", &ItemRecords(&self.items[..self.items.len().min(MAX_ITEMS)]))?;
+        m.serialize_entry("k", &TrackRecords(&self.track[..self.track.len().min(MAX_ITEMS)]))?;
+        m.serialize_entry("lo", &self.logged_out)?;
+        m.serialize_entry("t", &self.at)?;
+        m.serialize_entry("v", &VERSION)?;
+        m.end()
+    }
+}
+
 pub fn to_json(r: &Ready) -> String {
-    let chips: Vec<Value> = r.chips.iter().take(MAX_CHIPS).map(|c| json!({"l": c.label, "k": c.key, "t": c.token, "s": c.selected})).collect();
-    let tb = r.topbar.as_ref().map(|t| json!({"n": t.count, "a": t.avatar, "o": t.signed_out}));
-    json!({
-        "v": VERSION,
-        "t": r.at,
-        "a": r.acct,
-        "i": r.items.iter().take(MAX_ITEMS).map(item_json).collect::<Vec<_>>(),
-        "f": r.first.min(MAX_ITEMS),
-        "c": r.cont,
-        "h": chips,
-        "al": r.all,
-        "b": tb,
-        "lo": r.logged_out,
-        "e": r.eid,
-        "k": r.track.iter().take(MAX_ITEMS).map(|t| json!([t.id, t.item, t.own])).collect::<Vec<_>>(),
-    })
-    .to_string()
+    serde_json::to_string(r).expect("ready Home serializes to JSON")
 }
 
 fn so<'a>(v: &'a In<'a>, k: &str) -> Option<&'a str> {
@@ -304,6 +349,50 @@ mod tests {
             eid: Some("08zpaoXgNPKx-cAP6oehsQQ".into()),
             track: vec![Track { id: "abcdefghijk".into(), item: Some("CL4DEJmN".into()), own: Some("CL8DENww".into()) }, Track { id: "bbcdefghijk".into(), item: None, own: Some("CAMQ".into()) }],
         }
+    }
+
+    #[test]
+    fn compact_schema_bytes_optional_fields_and_caps_stay_compatible() {
+        let r = sample();
+        assert_eq!(to_json(&r), json!({
+            "a":"oabc:en", "al":"all", "b":{"a":"https://yt3.ggpht.com/a.jpg", "n":3, "o":false}, "c":"tok", "e":"08zpaoXgNPKx-cAP6oehsQQ", "f":1,
+            "h":[{"k":"gaming", "l":"Gaming", "s":false, "t":"4qmFsgtok"}],
+            "i":[{"i":"abcdefghijk", "k":"v", "s":"https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg", "t":"<b>one</b>"}, {"i":"bbcdefghijk", "k":"v", "t":"two"}],
+            "k":[["abcdefghijk", "CL4DEJmN", "CL8DENww"], ["bbcdefghijk", null, "CAMQ"]], "lo":false, "t":1000.0, "v":1,
+        }).to_string());
+        assert_eq!(to_json(&Ready::default()), json!({"a":"", "al":null, "b":null, "c":null, "e":null, "f":0, "h":[], "i":[], "k":[], "lo":null, "t":0.0, "v":1}).to_string());
+
+        let text = "\"\\\n\0東京🦀";
+        let mut r = Ready { acct: text.into(), first: MAX_ITEMS + 1, items: vec![r.items[0].clone(); MAX_ITEMS + 1], chips: vec![r.chips[0].clone(); MAX_CHIPS + 1], track: vec![r.track[1].clone(); MAX_ITEMS + 1], topbar: Some(Topbar::default()), all: Some(String::new()), at: f64::NAN, ..Default::default() };
+        r.chips[0].label = text.into();
+        let v: serde_json::Value = serde_json::from_str(&to_json(&r)).unwrap();
+        assert_eq!((v["i"].as_array().unwrap().len(), v["h"].as_array().unwrap().len(), v["k"].as_array().unwrap().len()), (MAX_ITEMS, MAX_CHIPS, MAX_ITEMS));
+        assert_eq!(v["f"], MAX_ITEMS);
+        assert_eq!(v["a"], text);
+        assert_eq!(v["h"][0]["l"], text);
+        assert_eq!(v["al"], "");
+        assert_eq!(v["b"], json!({"a":null, "n":null, "o":false}));
+        assert!(v["t"].is_null());
+    }
+
+    /// `cargo test --release --locked serialization_benchmark -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual serialization CPU benchmark, not a timing assertion"]
+    fn serialization_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        fn measure(name: &str, encode: impl Fn() -> String) {
+            const RUNS: usize = 1000;
+            let bytes = encode().len();
+            let start = Instant::now();
+            for _ in 0..RUNS { black_box(encode()); }
+            println!("{name}: {bytes} bytes, {:.3} ms per record", start.elapsed().as_secs_f64() * 1000.0 / RUNS as f64);
+        }
+        let feed = crate::parse::search(&crate::util::test_fixture("search.json"));
+        let items: Vec<_> = feed.items.iter().cycle().take(MAX_ITEMS).cloned().collect();
+        let r = Ready { items: items.clone(), ..sample() };
+        let sn = crate::snap::Snap { url: "/".into(), head: crate::render::feed_head("Home"), items, shown: 30, cont: Some("tok".into()), cont_ep: "browse", scroll: 0.0, at: 1000.0 };
+        measure("snapshot", || crate::snap::to_json(black_box(&sn)));
+        measure("ready Home", || to_json(black_box(&r)));
     }
 
     #[test]
