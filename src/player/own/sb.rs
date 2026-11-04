@@ -5,7 +5,7 @@
 //! it was. Skips are checked on the player tick and on `timeupdate`, plus one
 //! timer aimed at the exact start when a skip is closer than a tick.
 
-use super::{Out, Own, Req, Tm, mv, ui};
+use super::{Own, Req, Tm, mv, ui};
 use crate::bridge;
 use crate::motion;
 use crate::player::sponsor::{self, Cat, Seg};
@@ -45,13 +45,35 @@ pub(super) struct SbSt {
 
 #[derive(Clone, Copy)]
 pub(super) enum SbTm {
-    Timeout,
+    Timeout(u32),
     /// The next skip starts within a tick.
     At,
     Toast(u32),
 }
 
 impl Own {
+    pub fn apply_sponsor_prefs(&mut self, on: bool, mask: u16) {
+        if self.prefs.sb_on == on && self.prefs.sb_skip == mask { return; }
+        if self.prefs.sb_skip != mask { self.sb.manual = Some(self.time()); }
+        self.prefs.sb_skip = mask;
+        self.prefs.sb_on = on;
+        self.sb.dirty = true;
+        if on {
+            self.sb_lookup();
+        } else {
+            if let Some(id) = self.sb.req.take() { self.abort_fetch(id); self.sb.done = false; }
+            self.sb_toast_hide();
+        }
+        self.ui();
+    }
+
+    pub fn toolbar_sponsor_status(&self) -> serde_json::Value {
+        let counts: Vec<usize> = sponsor::SKIPPABLE.iter().map(|c| self.sb.segs.iter().filter(|s| s.cat == *c).count()).collect();
+        serde_json::json!({"counts":counts,"undo":self.sb.undo.is_some() && self.sb.toast_on})
+    }
+
+    pub fn toolbar_sponsor_undo(&mut self) { self.sb_act("undo"); }
+
     /// Sends the k-anonymous lookup (or takes this tab's cached answer).
     pub(super) fn sb_lookup(&mut self) {
         if !self.prefs.sb_on || self.sb.done || self.sb.req.is_some() || self.failed {
@@ -67,7 +89,7 @@ impl Own {
         let id = self.get(Req::Sponsor, &url, r#"{"credentials":"omit","referrerPolicy":"no-referrer","cache":"no-store","priority":"low"}"#);
         self.sb.req = Some(id);
         self.sb.status = "asked".into();
-        self.timer(Tm::Sb(SbTm::Timeout), sponsor::TIMEOUT_MS);
+        self.timer(Tm::Sb(SbTm::Timeout(id)), sponsor::TIMEOUT_MS);
     }
 
     pub(super) fn on_sponsor(&mut self, status: u32, body: &[u8]) {
@@ -99,9 +121,6 @@ impl Own {
             if self.live.is_none() && self.time() < p - HINT_AHEAD_S {
                 self.sb_toast(None, format!("Highlight at {}", ui::clock(p)), Cat::Highlight);
             }
-        }
-        if self.mc.open == Some("sb") {
-            self.render_menu();
         }
         self.sb_check();
         self.ui();
@@ -168,7 +187,8 @@ impl Own {
 
     pub(super) fn sb_timer(&mut self, k: SbTm) {
         match k {
-            SbTm::Timeout => {
+            SbTm::Timeout(request) => {
+                if self.sb.req != Some(request) { return; }
                 if let Some(id) = self.sb.req.take() {
                     bridge::abort(id);
                     self.fetches.remove(&id);
@@ -236,41 +256,6 @@ impl Own {
             }
             _ => {}
         }
-    }
-
-    /// Menu choice `sb:<category>` (auto-skip on/off) or `sb:toggle` (SponsorBlock on/off). Remembered.
-    pub(super) fn sb_set(&mut self, v: &str) {
-        if v == "toggle" {
-            self.prefs.sb_on = !self.prefs.sb_on;
-            self.sb.dirty = true;
-            if self.prefs.sb_on {
-                self.sb_lookup();
-            } else {
-                self.sb_toast_hide();
-            }
-        } else if let Some(c) = Cat::from_key(v).filter(|c| *c != Cat::Highlight) {
-            self.prefs.sb_skip ^= c.bit();
-            // Turned on while playing inside one: that one shows (it was not entered by an automatic skip).
-            self.sb.manual = Some(self.time());
-        } else {
-            return;
-        }
-        self.out.push(Out::Prefs(self.prefs.clone()));
-    }
-
-    pub(super) fn sb_menu_html(&self) -> String {
-        sponsor::menu_html(self.prefs.sb_on, self.prefs.sb_skip, &self.sb.segs)
-    }
-
-    /// A choice changes the open menu in place (class/attribute toggles).
-    pub(super) fn sb_sync_menu(&self) {
-        for c in sponsor::SKIPPABLE {
-            let on = self.prefs.sb_skip & c.bit() != 0;
-            let id = format!("ytc-m-sb:{}", c.key());
-            bridge::attr(&id, "aria-pressed", if on { "true" } else { "false" });
-            bridge::class_all(&format!("#{} [data-arg=\"sb:{}\"]", ui::MENU, c.key()), "on", on);
-        }
-        bridge::attr(sponsor::MENU_SW, "aria-checked", if self.prefs.sb_on { "true" } else { "false" });
     }
 
     /// The seek-bar tooltip's category label for time `t`.

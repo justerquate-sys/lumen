@@ -247,6 +247,16 @@ extern "C" {
     pub fn storage_get(key: &str);
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn storage_set(key: &str, json: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn extension_page() -> bool;
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn storage_watch(key: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn storage_write(id: u32, key: &str, json: &str);
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn message_listen();
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn active_message(id: u32, message: &str);
     /// Calls `on_timer(id)` after `ms`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn timer(id: u32, ms: u32);

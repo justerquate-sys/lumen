@@ -453,6 +453,7 @@ pub fn boot() {
     // first request goes out now; chrome.storage only refines later requests.
     let mirror = bridge::session_get(CFG_SESSION);
     let cfg = if mirror.is_empty() { Config::default() } else { Config::from_json(&mirror) };
+    cfg.palette.apply();
     // YouTube's own document for this tab (the extension's loader leaves it running): when it is the Home answer
     // the client would fetch anyway (a Home load from YouTube's document, `homeready::on_doc_script`), it keeps
     // streaming with its nodes held out of the page; else it stops now, before any request of ours goes out (a
@@ -596,6 +597,8 @@ pub fn boot() {
     let main = snap.map(|s| app.adopt_snap(s, trim));
     app.side_at = render::side_index(app.route.nav_key()).unwrap_or(0);
     bridge::doc(&render::shell(&app.route, &app.url, main.as_deref()));
+    bridge::storage_watch(config::STORAGE_KEY);
+    bridge::message_listen();
     if keep_doc {
         bridge::doc_hold("var ytInitialData = ", "ytcfg.set(");
         app.hr.nav_doc = homeready::NavDoc::Held;
@@ -1228,6 +1231,7 @@ impl App {
             bridge::session_set(CFG_SESSION, &self.cfg.to_json());
         }
         self.cfg_ready = true;
+        self.cfg.palette.apply();
         let hold = std::mem::take(&mut self.home_hold);
         if hold && !au_changed && self.route == Route::Home && !self.rendered {
             if self.cfg.visitor.is_some() {
@@ -1252,6 +1256,27 @@ impl App {
             let id = self.timer(Timer::ConfigRefresh);
             bridge::timer(id, CONFIG_REFRESH_DELAY_MS);
         }
+    }
+
+    /// Toolbar changes apply in place, without navigation or restarting playback.
+    pub fn on_storage_change(&mut self, key: &str, json: &str) {
+        if key != config::STORAGE_KEY { return; }
+        let cfg = Config::from_json(json);
+        self.cfg.palette = cfg.palette;
+        self.cfg.prefs.sb_on = cfg.prefs.sb_on;
+        self.cfg.prefs.sb_skip = cfg.prefs.sb_skip;
+        self.cfg.palette.apply();
+        bridge::session_set(CFG_SESSION, &self.cfg.to_json());
+        if let Some(p) = self.player.as_mut() { p.apply_sponsor_prefs(cfg.prefs.sb_on, cfg.prefs.sb_skip); }
+    }
+
+    pub fn toolbar_message(&mut self, message: &str) -> String {
+        if !matches!(message, "sponsor-status" | "sponsor-undo") { return "{}".into(); }
+        if message == "sponsor-undo" {
+            if let Some(p) = self.player.as_mut() { p.toolbar_sponsor_undo(); }
+            self.after_player();
+        }
+        self.player.as_ref().map_or_else(|| "{}".into(), |p| p.toolbar_sponsor_status().to_string())
     }
 
     /// chrome.storage (persistent) plus this tab's sessionStorage mirror.

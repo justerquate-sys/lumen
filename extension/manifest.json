@@ -1,12 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Lumen",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "description": "Your own YouTube front-end at youtube.com: Rust-rendered, fast, no bloat. Experimental.",
   "permissions": [
     "storage",
     "declarativeNetRequest"
   ],
+  "action": {
+    "default_title": "Lumen preferences",
+    "default_popup": "popup.html"
+  },
   "host_permissions": [
     "https://www.youtube.com/*",
     "https://*.googlevideo.com/*",

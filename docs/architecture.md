@@ -24,7 +24,10 @@ loader and a generic bridge (`browser/bridge.js`).
   `browser/manifest.json`. The public build drops every `/* @dev-start */ … /* @dev-end */` block; the development
   build keeps them and adds the debug-center host permission, a "(dev)" name and a build id (`version_name` and
   `build-id.txt`, which drive the auto-reload).
-- `client.css`, `native.css` and `rules.json` are hand-written and live directly in `extension/`.
+- `client.css`, `popup.css`, `native.css` and `rules.json` are hand-written and live directly in `extension/`.
+- `extension/popup.html` is copied from `browser/popup.html`. The browser action loads the same public
+  `content.js`/Wasm in an extension document; Rust `popup.rs` renders and handles it. The loader skips stopping
+  or navigating extension documents. No duplicate Wasm or JavaScript feature logic.
 
 Browser targets: `browser/build.cjs` has a `TARGETS` table with one entry today, `chromium` → `extension/`.
 A second browser (Firefox: `background.scripts` instead of a service worker, `browser_specific_settings`)
@@ -58,7 +61,7 @@ mode (`boot_native`); client pages are untouched.
   Auto-dubbed badges, hashtags above the title, Summary / How this was made / Games / Transcript / repeated
   channel / Video details sections, and without the related chip row; player without the fullscreen More
   videos grid, quick actions, title overlay, channel watermark, gradients and cinematics, black around the
-  picture, mint progress; the client's charcoal/mint palette over YouTube's theme variables.
+  picture; the chosen Lumen or YouTube palette over YouTube’s theme variables, including logo and progress.
 - **`src/native/clean.rs`** (what needs logic; pure parts unit-tested): captions in the client's look
   and place (cyan Arial with a dark outline, no backgrounds, upper-left corner and size from the same
   `ytcConfigV1.p.cs` the client player uses, via CSS variables on `<html>`); drag a cue to move it, wheel
@@ -777,11 +780,17 @@ quickly (lines that stay never move). Keyboard shortcuts add no motion.
   SponsorBlock's: sponsor, self-promotion and interaction reminders skip; intro, outro, preview, non-music and
   filler only show. *Seek bar:* every range is drawn in its category's color inside the chapter segments (above the
   fills; they fade in when the data arrives), the highlight as a pink tick, and hovering a range names it in the
-  tooltip; a highlight further ahead is offered once as **Highlight at m:ss · Jump**. *Menu:* a shortcut left of
-  CC (an arc jumping over the track; slashed when off) opens like the others: **Auto-skip** choices in two columns
-  with this video's counts, then a remembered **SponsorBlock** On/Off switch (off: no lookup at all, no ranges, no
-  skips). Remembered in `ytcConfigV1` `p`: `sbo:false` only when off, `sb` (category keys) only when not the
-  default.
+  tooltip; a highlight further ahead is offered once as **Highlight at m:ss · Jump**. *Controls:* the browser’s
+  Lumen extension popup owns the **SponsorSkip** switch, eight category choices and the active video’s counts.
+  **Undo last skip** appears there while the video’s transient Undo notice is available. Settings no longer
+  occupy a video-control button. Off aborts any in-flight lookup and hides ranges/notices; a new video makes no
+  lookup at all. Re-enabling looks up the current video. Remembered in `ytcConfigV1` `p`: `sbo:false` only when
+  off, `sb` (category keys) only when not the default. The popup reads the latest config before each serialized
+  write, patches only edited fields/category bits, and preserves other preferences. Optimistic changes roll
+  back with a visible error if storage rejects the write. Existing client tabs adopt the palette and
+  SponsorSkip settings in place; native-fallback tabs follow palette changes. Status/Undo use
+  same-extension messages to the active tab; one local poll per
+  second while the popup is visible, no external request.
 - **Caption language**: the source language is YouTube's speech-recognition (ASR) track's
   language. Russian or English source → captions in that language; any other source → an offered English
   track, else YouTube's English translation of a source-language track (`&tlang=en`, listed as
@@ -921,7 +930,7 @@ Other modules plug into the markup without editing `render.rs` or the player:
 | `bridge::wheel(id, name)` → `on_wheel(name, dir)`, `bridge::read_value(id)` | input | Wheel notches over one element (−1 up / 1 down; trackpad deltas add up to a 50 px notch; a handled one does not scroll the page; Ctrl/⌘ stays zoom), bound once per element. The `value` of a textarea/input (the import paste box). |
 | `#ytc[data-still="1"]` | CSS | Set during the first frame of keyboard and back/forward paints: gate every `@starting-style` entrance with `#ytc:not([data-still="1"])`. |
 
-Shared design tokens are CSS variables on `:root` (client.css, one palette, no stray hex colors):
+Shared design tokens are CSS variables on `:root` (client.css, two selectable palettes):
 surfaces `--bg --pn --rs --cb` (background, panel/popover, raised, control), `--hv` (the one hover wash),
 `--on`/`--onh` (selected row tint / its hover), `--fi --bd` (text field, field/outline border), `--tk`
 (switch track), `--ln` (hairline), `--wa` (translucent wash over video), `--sc` (scrim behind badges and
@@ -929,7 +938,13 @@ toasts); text `--tx --mu --fa` (≥ 10:1, ≥ 5:1, ≥ 4.5:1 on bg/pn/rs), accen
 (hover), `--rd` (live, destructive), `--er` (error text); `--sh` (popover shadow); radii `--r-card` 14,
 `--r-pop` 12 (popovers, panels), `--r-ctl` 10 (chips, buttons); press depths `--pd` .97, `--pd-card` .985,
 `--pd-icon` .95 (icon-only buttons), `--pd-glyph` .84 (an icon squeezing inside its control). Selected:
-rows get `--on` + mint text; chips and segments solid `--ac` with `--bg` text.
+rows get `--on` + accent text; chips and segments solid `--ac` with `--bg` text.
+The default remains charcoal/mint. `html[data-ytc-palette=youtube]` selects graphite surfaces, white controls
+and focus, red logo/progress, and blue content links. `--brand --brand-ink --progress --link --link-h`
+separate these roles; they alias the original mint tokens by default. Geometry and motion are shared.
+`src/appearance.rs` validates the bounded enum and patches preferences; `src/popup.rs` owns the browser
+toolbar UI. `ytcConfigV1.theme` stores only `"youtube"` (default Lumen omitted), so it adds no new storage key
+or page/account data. Its purpose is remembering the user’s chosen color palette.
 
 ### Google TV interaction layer
 
@@ -1020,7 +1035,8 @@ only in `chrome.storage.local` `ytcVoiceKeyV1` (local, not synced), read only by
 page, Wasm, logs, incidents, the debug overlay or the repo (e2e checks storage, incidents, the page and the overlay).
 Transcripts live in the field until the search; nothing of the audio or text is kept.
 
-Privacy: only `ytcConfigV1` (client version, visitor data, session index, refresh time, player preferences) and
+Privacy: only `ytcConfigV1` (client version, visitor data, session index, refresh time, player preferences,
+and the two-value color-palette choice) and
 `ytcPlayerLogV1` (the last 10 player failures: time, video id, position, reason) are persisted. A fresh visitor from the bot-check
 recovery and the chosen VISIONOS route live in memory only (never stored, never in reports).
 SponsorBlock (an outside service, besides YouTube itself): requests carry only the 4-hex SHA-256 prefix

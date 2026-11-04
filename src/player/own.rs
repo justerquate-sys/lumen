@@ -3497,7 +3497,6 @@ impl Own {
                     .collect();
                 ui::quality_menu(&rungs, self.shown_quality(), cur, &codecs, &self.prefs.codec)
             }
-            Some("sb") => self.sb_menu_html(),
             Some(_) => {
                 let names: Vec<String> = self.cc_tracks().iter().map(|t| if t.name.is_empty() { t.lang.clone() } else { t.name.clone() }).collect();
                 let audio = self.audio_tracks();
@@ -3564,8 +3563,6 @@ impl Own {
                 mark(ui::MQ, Some(format!("q:{}", self.shown_quality())));
                 mark(ui::MCO, Some(format!("codec:{}", self.prefs.codec)));
             }
-            // Several categories can be chosen: their rows toggle in place, no sliding mark.
-            Some("sb") => {}
             Some(_) => {
                 let arg = if self.cc_audio && !self.audio_tracks().is_empty() {
                     Some(format!("au:{}", self.audio.as_ref().map(|f| f.audio_id.clone()).unwrap_or_default()))
@@ -3598,7 +3595,6 @@ impl Own {
                 pick(".mql button", (cur > 0).then(|| format!("q:{cur}")), "cur");
                 pick(".mco button", Some(format!("codec:{}", self.prefs.codec)), "on");
             }
-            Some("sb") => self.sb_sync_menu(),
             Some(_) => {
                 let on = self.prefs.captions;
                 pick(".mls [data-arg^=\"cc:\"]", self.cc_sel.filter(|_| on).map(|i| format!("cc:{i}")), "on");
@@ -3960,7 +3956,6 @@ impl Own {
                         }
                     }
                     "au" => self.set_audio(v),
-                    "sb" => self.sb_set(v),
                     _ => {}
                 }
                 // Menus stay open after a choice; a mouse-pinned one closes when the pointer leaves.
@@ -4018,7 +4013,6 @@ impl Own {
         match m {
             "speed" => ui::SPEED,
             "quality" => ui::QUAL,
-            "sb" => ui::SBB,
             _ => ui::CCB,
         }
     }

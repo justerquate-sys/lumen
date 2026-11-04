@@ -31,7 +31,8 @@ _To be added:_
   Extensions, quality and codec choice, speed 0.25–2.5×, chapters with storyboard frames on the seek bar,
   captions you can drag and resize, live streams with DVR, resume positions, watch history kept in your
   account. Failures stay in the player with the reason and a **Try again** / **Open on YouTube** choice.
-- **SponsorBlock skipping** built into the player, privacy-preserving (see "Privacy").
+- **SponsorSkip** built into the player, with its switch and category choices in the browser’s **Lumen**
+  extension popup. Segment data from SponsorBlock; privacy-preserving (see "Privacy").
 - **No Shorts unless you want them**, no ads, no Premium/membership upsells. Optional filters: minimum length, Music, Live, popularity order, playlists only.
 - **Your own Home topics** next to YouTube's own chips (rename, reorder, hide them).
 - **Block websites**: hide videos whose description links to a domain you blocked.
@@ -42,7 +43,9 @@ _To be added:_
 - **Keyboard first**: `?` lists the shortcuts; `/` focuses search; `g h` Home, `g s` Subscriptions…
 - **Motion that never costs speed**: every result is usable on its first frame; animation rides on top
   ([docs/motion.md](docs/motion.md)).
-- Charcoal + mint theme.
+- **Two color palettes:** Lumen’s charcoal and mint, or YouTube’s graphite, white and red. Choose
+  **Color palette** in the browser’s **Lumen** extension popup; open tabs update immediately, with the
+  same layout, player and motion.
 
 ## Install (no build needed)
 
@@ -150,7 +153,7 @@ Every outside service it talks to, and when:
 | Service | When | What it sends |
 |---|---|---|
 | **YouTube** (`www.youtube.com`, `*.googlevideo.com`, `i.ytimg.com`, `yt3.ggpht.com`) | Whenever you use it, like youtube.com itself | The same kind of requests YouTube's own site makes, with your YouTube session if you are signed in. Video streams come from googlevideo. YouTube's own logging/ad endpoints (`log_event`, `/pagead/`, `csi_204`, doubleclick) are blocked. |
-| **SponsorBlock** (`sponsor.ajay.app`) | When a video starts, unless you switch SponsorBlock off in the player | Only the first 4 hex characters of the SHA-256 hash of the video id (k-anonymity: the answer covers ~150 videos and yours is picked locally). No cookies, no referrer, nothing reported back. Switched off, nothing is sent. |
+| **SponsorBlock** (`sponsor.ajay.app`) | When a video starts, unless you switch SponsorSkip off in the Lumen extension popup | Only the first 4 hex characters of the SHA-256 hash of the video id (k-anonymity: the answer covers ~150 videos and yours is picked locally). No cookies, no referrer, nothing reported back. Switched off, nothing is sent. |
 | **Deepgram** (`api.deepgram.com`) | Only while you are dictating a voice search, and only if you saved a key | Your microphone audio (16 kHz mono) for that dictation and your key. The key never enters the YouTube page; the extension's background worker adds it. |
 | **Google sign-in** (`oauth2.googleapis.com`), TV app only | While the sign-in code is shown, and to refresh or revoke the TV's access | YouTube's TV device sign-in: the request for a code, polls until you approved it, then token refreshes. The tokens stay on the TV, sealed with the Android Keystore. |
 | **GitHub** (`api.github.com`, release downloads), TV app only | At launch and every 6 hours | A request for this repository's releases and, when there is a newer one, its files. Nothing about you or your viewing. |
