@@ -17,6 +17,17 @@ pub const PAGE_URL: &str = "/playlist?list=WL";
 /// Newest-save order from YouTube's own owned-playlist menu. Using the menu's order and params
 /// also changes the order of continuations; reversing one loaded page cannot do that.
 pub fn newest_order(v: &In<'_>) -> Option<crate::api::Req> {
+    let item = newest_item(v)?;
+    if item.get("selected").and_then(In::as_bool) == Some(true) { return None; }
+    let ep = item.pointer("/serviceEndpoint/playlistEditEndpoint")?;
+    if ep.get("playlistId").and_then(In::as_str) != Some("WL") { return None; }
+    let action = ep.get("actions")?.as_array()?.iter().find(|a| a.get("action").and_then(In::as_str) == Some("ACTION_SET_PLAYLIST_VIDEO_ORDER"))?;
+    let order = action.get("playlistVideoOrder")?.as_u64().and_then(|n| u32::try_from(n).ok())?;
+    Some(crate::api::Req::WatchLaterOrder { order, params: ep.get("params").and_then(In::as_str).map(str::to_string) })
+}
+
+/// The menu's "Date added (newest)" item (English labels).
+fn newest_item<'a>(v: &'a In<'a>) -> Option<&'a In<'a>> {
     fn find<'a>(v: &'a In<'a>) -> Option<&'a In<'a>> {
         if let Some(menu) = v.get("sortFilterSubMenuRenderer") { return Some(menu); }
         match v {
@@ -25,15 +36,13 @@ pub fn newest_order(v: &In<'_>) -> Option<crate::api::Req> {
             _ => None,
         }
     }
-    let menu = find(v)?;
-    let items = menu.get("subMenuItems")?.as_array()?;
-    let item = items.iter().find(|i| i.get("title").and_then(In::as_str).is_some_and(|t| t.eq_ignore_ascii_case("Date added (newest)")))?;
-    if item.get("selected").and_then(In::as_bool) == Some(true) { return None; }
-    let ep = item.pointer("/serviceEndpoint/playlistEditEndpoint")?;
-    if ep.get("playlistId").and_then(In::as_str) != Some("WL") { return None; }
-    let action = ep.get("actions")?.as_array()?.iter().find(|a| a.get("action").and_then(In::as_str) == Some("ACTION_SET_PLAYLIST_VIDEO_ORDER"))?;
-    let order = action.get("playlistVideoOrder")?.as_u64().and_then(|n| u32::try_from(n).ok())?;
-    Some(crate::api::Req::WatchLaterOrder { order, params: ep.get("params").and_then(In::as_str).map(str::to_string) })
+    let items = find(v)?.get("subMenuItems")?.as_array()?;
+    items.iter().find(|i| i.get("title").and_then(In::as_str).is_some_and(|t| t.eq_ignore_ascii_case("Date added (newest)")))
+}
+
+/// YouTube already keeps this Watch later newest first (its menu says so).
+pub fn newest_selected(v: &In<'_>) -> bool {
+    newest_item(v).and_then(|i| i.get("selected")).and_then(In::as_bool) == Some(true)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -263,6 +272,23 @@ mod tests {
         raw["header"]["sortFilterSubMenuRenderer"]["subMenuItems"][1]["serviceEndpoint"]["playlistEditEndpoint"]["playlistId"] = "OTHER".into();
         assert!(read(&raw).is_none(), "never sort another playlist");
         assert!(newest_order(&crate::json::parse_str("{}").unwrap()).is_none());
+        // Selected newest is known only from the English label: a menu in another language, or none, is not.
+        let sel = |v: &Value| newest_selected(&crate::json::parse_str(&v.to_string()).unwrap());
+        assert!(!sel(&raw));
+        raw["header"]["sortFilterSubMenuRenderer"]["subMenuItems"][1]["selected"] = true.into();
+        assert!(sel(&raw));
+        raw["header"]["sortFilterSubMenuRenderer"]["subMenuItems"][1]["title"] = "Hinzugefügt (neueste)".into();
+        assert!(!sel(&raw));
+        assert!(!sel(&json!({})));
+    }
+
+    #[test]
+    fn the_page_is_in_the_users_language_and_only_the_menu_check_is_english() {
+        let page: Value = serde_json::from_str(&crate::api::Req::Browse { id: "VLWL".into(), params: None }.body(&Config::default(), "de", PAGE_URL)).unwrap();
+        assert_eq!(page["context"]["client"]["hl"], "de");
+        let check: Value = serde_json::from_str(&crate::api::Req::WatchLaterMenu.body(&Config::default(), "de", PAGE_URL)).unwrap();
+        assert_eq!(check["context"]["client"]["hl"], "en");
+        assert_eq!(check["browseId"], "VLWL");
     }
 
     #[test]

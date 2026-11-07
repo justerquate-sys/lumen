@@ -242,7 +242,7 @@ impl App {
     pub(super) fn tv_account_req(&self, req: &Req) -> bool {
         match req {
             Req::Browse { id, .. } => tv::account_browse(id),
-            Req::WatchLaterOrder { .. } => true,
+            Req::WatchLaterOrder { .. } | Req::WatchLaterMenu => true,
             Req::Cont { ep: "browse", .. } => matches!(self.route, Route::Home | Route::Subs | Route::History | Route::Playlists | Route::Playlist { .. }),
             _ => false,
         }

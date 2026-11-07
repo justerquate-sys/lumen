@@ -955,7 +955,10 @@ and focus, red logo/progress, and blue content links. `--brand --brand-ink --pro
 separate these roles; they alias the original mint tokens by default. Geometry and motion are shared.
 `src/appearance.rs` validates the bounded enum and patches preferences; `src/popup.rs` owns the browser
 toolbar UI. `ytcConfigV1.theme` stores only `"youtube"` (default Lumen omitted), so it adds no new storage key
-or page/account data. Its purpose is remembering the user’s chosen color palette.
+or page/account data. Its purpose is remembering the user’s chosen color palette. A new tab has no config
+before `chrome.storage` answers, so its first frame takes the palette from one `localStorage` flag
+(`ytc-palette-youtube` = `1`, set only while the YouTube palette is chosen; `Palette::hint`): no flash of the
+other palette, no wait.
 
 ### Google TV interaction layer
 
@@ -1084,9 +1087,13 @@ for the hedge deadline.
   Before its first fresh paint, `watch_later::newest_order` reads YouTube’s **Date added (newest)** menu
   choice and applies the supplied `playlistEditEndpoint` order/params through `api::Req::WatchLaterOrder`,
   then browses the newly ordered playlist. This uses YouTube’s native playlist preference, so subsequent
-  pages and other YouTube views follow it too. Already-selected newest makes no edit. Owned Watch later
-  requests use English menu labels; order values and context params are copied from the response. A failed
-  sort shows the normal Retry panel instead of an oldest-first list. Old Watch later snapshots, identified
+  pages and other YouTube views follow it too. Already-selected newest makes no edit, and once a tab has seen
+  it selected it neither checks nor waits again. The page is in the user's language; the menu is read by its
+  English labels, so in another language a small English copy of the first page (`Req::WatchLaterMenu`) goes
+  out beside it (same moment, no extra round trip) and only the sort command is English. A page that is not
+  newest first waits for the sort; a failed sort (or check) shows the list as YouTube sent it, with
+  "Couldn’t sort newest first · Try again" under the heading, never a blocked page. Order values and context
+  params are copied from the response. Old Watch later snapshots, identified
   by their pre-0.13.4 playlist metadata header, are rejected; other snapshots keep their existing behavior.
 - **Filters** (`#ytc-filters` on Home and Search; hover opens after 40 ms, 180 ms departure grace; keyboard
   focus or a click opens it too): minimum length Any/10+/20+/30+/60+ or a slider to 180 min (Home + Search,

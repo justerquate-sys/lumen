@@ -539,12 +539,14 @@ pub enum Head {
     Feed { title: String },
     Channel { title: String, avatar: Option<String>, meta: Vec<String>, about: String },
     Playlist { title: String, meta: Vec<String> },
+    /// Watch later in the order YouTube sent it: its newest-first sort failed (a note and Try again).
+    Unsorted { title: String },
 }
 
 impl Head {
     pub fn title(&self) -> &str {
         match self {
-            Head::Feed { title } | Head::Channel { title, .. } | Head::Playlist { title, .. } => title,
+            Head::Feed { title } | Head::Channel { title, .. } | Head::Playlist { title, .. } | Head::Unsorted { title } => title,
         }
     }
 }
@@ -579,6 +581,12 @@ pub fn page(head: &Head, items: &[Item], more_items: bool, empty: &str, plan: Im
             esc_into(&mut out, &meta.join(" · "));
             out.push_str("</div>");
         }
+        Head::Unsorted { title } => {
+            feed_heading(&mut out, title);
+            out.push_str("<div class=\"m sub\" role=\"status\">Couldn’t sort newest first · <a href=\"");
+            out.push_str(crate::features::watch_later::PAGE_URL);
+            out.push_str("\" data-act=\"retry\">Try again</a></div>");
+        }
     }
     if items.is_empty() {
         out.push_str("<p class=\"empty\">");
@@ -603,7 +611,8 @@ pub fn channel_head(c: &ChannelPage) -> Head {
     Head::Channel { title: c.title.clone(), avatar: c.avatar.clone(), meta: c.meta.clone(), about: c.about.clone() }
 }
 
-pub fn playlist_head(p: &PlaylistPage, wl: bool) -> Head {
+pub fn playlist_head(p: &PlaylistPage, wl: bool, unsorted: bool) -> Head {
+    if unsorted { return Head::Unsorted { title: "Watch later".into() }; }
     if wl { return feed_head("Watch later"); }
     Head::Playlist { title: p.title.clone(), meta: p.meta.clone() }
 }

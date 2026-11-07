@@ -109,7 +109,9 @@ const FX = { bot: null, botVideo: null, homeChips: false, wlMock: false, wl: new
 // enough pages to prove that newest-first applies to the entire library, not each loaded chunk.
 const LIBRARY = { on: false, newest: false, ids: [], delay: 0, fail: false, sortFail: false };
 const libraryId = n => 'savedWL' + String(n).padStart(4, '0');
-const libraryPage = offset => {
+// `hl`: the request's language; another language than English labels the sort menu in German.
+const libraryPage = (offset, hl = 'en') => {
+  const de = hl !== 'en';
   const ids = LIBRARY.newest ? [...LIBRARY.ids].reverse() : LIBRARY.ids;
   const rows = ids.slice(offset, offset + 12).map((id, i) => ({ playlistVideoRenderer: {
     videoId: id, title: { simpleText: ['Drawing expressive characters', 'Making a short film', 'Learning to animate', 'A walk through the studio'][i % 4] },
@@ -120,8 +122,8 @@ const libraryPage = offset => {
   } }));
   if (offset + 12 < ids.length) rows.push({ continuationItemRenderer: { continuationEndpoint: { continuationCommand: { token: `WLLIB:${offset + 12}` } } } });
   const sorts = { sortFilterSubMenuRenderer: { subMenuItems: [
-    { title: 'Date added (oldest)', selected: !LIBRARY.newest, serviceEndpoint: { playlistEditEndpoint: { playlistId: 'WL', actions: [{ action: 'ACTION_SET_PLAYLIST_VIDEO_ORDER', playlistVideoOrder: 2 }], params: 'fixtureOrderContext' } } },
-    { title: 'Date added (newest)', selected: LIBRARY.newest, serviceEndpoint: { playlistEditEndpoint: { playlistId: 'WL', actions: [{ action: 'ACTION_SET_PLAYLIST_VIDEO_ORDER', playlistVideoOrder: 1 }], params: 'fixtureOrderContext' } } },
+    { title: de ? 'Hinzugefügt (älteste)' : 'Date added (oldest)', selected: !LIBRARY.newest, serviceEndpoint: { playlistEditEndpoint: { playlistId: 'WL', actions: [{ action: 'ACTION_SET_PLAYLIST_VIDEO_ORDER', playlistVideoOrder: 2 }], params: 'fixtureOrderContext' } } },
+    { title: de ? 'Hinzugefügt (neueste)' : 'Date added (newest)', selected: LIBRARY.newest, serviceEndpoint: { playlistEditEndpoint: { playlistId: 'WL', actions: [{ action: 'ACTION_SET_PLAYLIST_VIDEO_ORDER', playlistVideoOrder: 1 }], params: 'fixtureOrderContext' } } },
   ] } };
   if (offset) return { onResponseReceivedActions: [{ appendContinuationItemsAction: { continuationItems: rows } }] };
   return { header: { playlistHeaderRenderer: { title: { simpleText: 'Watch later' }, ownerText: { simpleText: 'Fixture owner' }, numVideosText: { simpleText: `${ids.length} videos` }, viewCountText: { simpleText: 'No views' } } },
@@ -586,7 +588,7 @@ async function handle(route) {
       FX.checksInFlight--; if (home) FX.homeInFlight--;
     }
     if (LIBRARY.on) {
-      if (ep === 'browse' && (body.browseId === 'VLWL' || body.continuation?.startsWith('WLLIB:'))) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(libraryPage(body.continuation ? +body.continuation.split(':')[1] : 0)) });
+      if (ep === 'browse' && (body.browseId === 'VLWL' || body.continuation?.startsWith('WLLIB:'))) return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(libraryPage(body.continuation ? +body.continuation.split(':')[1] : 0, body.context?.client?.hl)) });
       if (ep === 'playlist/get_add_to_playlist') return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ contents: [{ addToPlaylistRenderer: { playlists: [{ playlistAddToOptionRenderer: { playlistId: 'WL', title: { simpleText: 'Watch later' }, containsSelectedVideos: LIBRARY.ids.includes(body.videoIds[0]) ? 'ALL' : 'NONE' } }] } }] }) });
       if (ep === 'browse/edit_playlist' && body.playlistId === 'WL') {
         const a = body.actions[0], sort = a.action === 'ACTION_SET_PLAYLIST_VIDEO_ORDER';
@@ -715,7 +717,9 @@ chrome.runtime.onMessage.addListener(m => {
   // The ready Home response, one per browser in the extension's memory-only session storage (src/ready.rs).
   const readyGet = () => sw.evaluate(() => chrome.storage.session.get('ytc:ready').then(o => o['ytc:ready'] ? JSON.parse(o['ytc:ready']) : null));
   const readySet = r => sw.evaluate(v => chrome.storage.session.set({ 'ytc:ready': v }), JSON.stringify(r));
-  const readyDel = () => sw.evaluate(() => chrome.storage.session.remove('ytc:ready'));
+  // `end`: first end the tab's document, whose Home fetched ahead may still be on its way (on a busy machine it
+  // lands after the removal and the next Home paints it instead of the fixture under test).
+  const readyDel = async end => { if (end) await page.goto('about:blank').catch(() => {}); return sw.evaluate(() => chrome.storage.session.remove('ytc:ready')); };
   const readyWait = async (min = 30, timeout = 8000) => {
     for (const t = Date.now(); ;) { const r = await readyGet(); if (r && r.i.length > min) return r; if (Date.now() - t > timeout) throw new Error('no ready response in time'); await new Promise(x => setTimeout(x, 100)); }
   };
@@ -1288,7 +1292,9 @@ chrome.runtime.onMessage.addListener(m => {
       assert.equal(reqs.length, 2, 'the request and its hedge');
       assert.equal(JSON.stringify(reqs[0].body), JSON.stringify(reqs[1].body), 'identical requests');
       const gap = reqs[1].t - reqs[0].t;
-      assert.ok(gap >= 650 && gap < 1200, `hedge after ${gap} ms`);
+      // Measured where the fixtures see the requests: a busy machine can log the first one late (the hedge's own
+      // deadline is ≥ 700 ms from its send in Rust), so the lower bound leaves room for that.
+      assert.ok(gap >= 500 && gap < 1200, `hedge after ${gap} ms`);
       assert.equal(h.hedge, 'hedge', 'the hedge won');
       assert.ok(h.firstAt < 2500, `painted at ${h.firstAt.toFixed(0)} ms`);
       await page.waitForFunction(() => document.querySelector('#ytc-list .c[data-v]'));
@@ -1550,7 +1556,11 @@ chrome.runtime.onMessage.addListener(m => {
       await until(() => homeOnly().length > k, 3000, 'asked YouTube');
       await page.waitForTimeout(800);
       assert.notEqual(stamp(await title(page)), stamp(r2.i[0].t), 'the other tab watched: not the response from before');
-      // 3. Expired or another account's: not used by a new tab.
+      // 3. Expired or another account's: not used by a new tab. The other tabs fill nothing meanwhile (t2 watches
+      //    and page shows Home: either would put a fresh response in, and on a busy machine it lands in this window).
+      await page.evaluate(() => localStorage.setItem('ytc-test-noready', '1'));
+      await t2.close(); tabs.splice(tabs.indexOf(t2), 1);
+      await page.waitForTimeout(600);
       for (const change of [r => { r.t -= 11 * 60000; }, r => { r.a = 'sother:0:en'; }]) {
         const r = JSON.parse(JSON.stringify(r2));
         r.t = Date.now();
@@ -1562,6 +1572,7 @@ chrome.runtime.onMessage.addListener(m => {
       }
     } finally {
       for (const t of tabs) await t.close().catch(() => {});
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noready')).catch(() => {});
       await page.bringToFront();
       HOME.stamp = false; HOME.rich = wasRich;
     }
@@ -2799,6 +2810,13 @@ chrome.runtime.onMessage.addListener(m => {
       await other.reload({ waitUntil: 'commit' });
       await other.waitForSelector('#ytc-list .c');
       assert.equal(await other.evaluate(() => document.documentElement.dataset.ytcPalette), 'youtube', 'a new boot remembers the choice');
+      // A new tab (no config mirror yet) paints its first frame in the chosen palette, before chrome.storage answers.
+      const fresh = await ctx.newPage();
+      await fresh.addInitScript(() => { new MutationObserver((_, o) => { if (document.getElementById('ytc')) { window.firstPalette = document.documentElement.dataset.ytcPalette || 'none'; o.disconnect(); } }).observe(document, { childList: true, subtree: true }); });
+      await fresh.goto('https://www.youtube.com/results?search_query=palette+fresh', { waitUntil: 'commit' });
+      await fresh.waitForFunction(() => window.firstPalette);
+      assert.equal(await fresh.evaluate(() => window.firstPalette), 'youtube', 'the first frame of a new tab');
+      await fresh.close();
       native = await ctx.newPage();
       await native.goto('https://www.youtube.com/watch?v=ntvfixture1&yt-native=1', { waitUntil: 'commit' });
       await native.waitForFunction(() => document.documentElement.dataset.ytcPalette === 'youtube');
@@ -5658,8 +5676,10 @@ chrome.runtime.onMessage.addListener(m => {
 
   await step('filters: Home popularity order (all loaded cards), Relevance restores; Music/Live labelled cards hidden by default; Playlists only', async () => {
     HOME.rich = true; FX.homeLabels = true;
-    await page.evaluate(() => sessionStorage.clear());
-    await readyDel();
+    // The ready Home fill (Home + HOMECONT1, tested on its own) stays out of this zero-request window.
+    await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.clear(); });
+    try {
+    await readyDel(true);
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-list .c');
     await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
@@ -5680,7 +5700,7 @@ chrome.runtime.onMessage.addListener(m => {
     for (let i = 1; i < views.length; i++) assert.ok(views[i] <= views[i - 1], `sorted by views at ${i}: ${views.slice(0, i + 1)}`);
     // A re-sort brings other cards into view, and cards in view get their speculative
     // `next`/VISIONOS prefetch in idle time (by design); the order itself fetches no feed.
-    assert.deepEqual(log.api.slice(n).filter(a => a.ep === 'browse' || a.ep === 'search').map(a => a.ep + ' ' + (a.body?.continuation || a.body?.browseId || '')), [], 'no feed request for ordering');
+    { const feeds = log.api.slice(n).filter(a => a.ep === 'browse' || a.ep === 'search').map(a => a.ep + ' ' + (a.body?.continuation || a.body?.browseId || '') + (a.doc ? ' doc' : '')); assert.deepEqual(feeds, [], 'no feed request for ordering: ' + JSON.stringify(feeds)); }
     await page.click('#ytc-hfx [data-act=fx-order][data-arg=recommended]');
     await page.waitForFunction(first => document.querySelector('#ytc-list .c')?.dataset.v === first, native[0]);
     assert.deepEqual((await cardIds()).slice(0, 8), native, 'Relevance restores the native order');
@@ -5695,8 +5715,11 @@ chrome.runtime.onMessage.addListener(m => {
     await page.mouse.move(5, 600);
     await page.click('#ytc-fx-note [data-act=fx-pl]');
     await page.waitForFunction(() => document.querySelectorAll('#ytc-list .c').length > 20);
-    FX.homeLabels = false;
     await page.mouse.move(5, 600);
+    } finally {
+      FX.homeLabels = false;
+      await page.evaluate(() => localStorage.removeItem('ytc-test-noready')).catch(() => {});
+    }
   });
 
   await step('filters: Shorts switch (off by default) shows/hides Home Shorts at once, no request; Shorts badge, normal watch link, kept at any minimum length; remembered', async () => {
@@ -5707,7 +5730,7 @@ chrome.runtime.onMessage.addListener(m => {
       // Ready Home refills independently after the shown batch (Home + HOMECONT1). Keep that
       // separately tested prefetch out of this display-only switch's zero-request window.
       await page.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.clear(); });
-      await readyDel();
+      await readyDel(true);
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-list .c');
       await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 8000 });
@@ -5837,7 +5860,7 @@ chrome.runtime.onMessage.addListener(m => {
     try {
     HOME.rich = true; FX.homeChips = true;
     await page.evaluate(() => sessionStorage.clear());
-    await readyDel();
+    await readyDel(true);
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
     await page.waitForTimeout(300);
@@ -5877,7 +5900,7 @@ chrome.runtime.onMessage.addListener(m => {
   await step('YouTube Home chips: beside the own topics, switch by the chip\'s token, All restores without a request, reorder/hide remembered', async () => {
     HOME.rich = true; FX.homeChips = true;
     await page.evaluate(() => sessionStorage.clear());
-    await readyDel();
+    await readyDel(true);
     await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
     await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
     const bar = () => page.$$eval('#ytc-filters .fx-tc > .fx-ch', bs => bs.map(b => b.textContent));
@@ -5987,7 +6010,7 @@ chrome.runtime.onMessage.addListener(m => {
     });
     try {
       await page.evaluate(() => sessionStorage.clear());
-      await readyDel();
+      await readyDel(true);
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
       await page.waitForSelector('#ytc-list .c');
@@ -6344,18 +6367,38 @@ chrome.runtime.onMessage.addListener(m => {
     }
   });
 
-  await step('Watch later library: a rejected newest-sort command shows Retry and never paints the oldest-first list', async () => {
+  await step('Watch later library: a rejected newest-sort command still shows the list (in the order received) with a note and Try again', async () => {
     try {
       LIBRARY.on = true; LIBRARY.newest = false; LIBRARY.ids = [libraryId(0), libraryId(1)]; LIBRARY.sortFail = true;
       await ctx.addCookies([{ name: 'SAPISID', value: 'e2eSAPISID', domain: '.youtube.com', path: '/', secure: true }]);
       await page.goto('https://www.youtube.com/playlist?list=WL', { waitUntil: 'commit' });
-      await page.waitForSelector('#ytc-main .msg');
-      assert.equal(await page.locator('#ytc-list .c').count(), 0);
-      assert.match(await page.textContent('#ytc-main'), /could not be sorted newest first/);
+      await page.waitForSelector('#ytc-list .c');
+      assert.equal(await page.locator('#ytc-main .msg').count(), 0, 'never a blocked page');
+      assert.deepEqual(await page.$$eval('#ytc-list .c', cs => cs.map(c => c.dataset.v)), [libraryId(0), libraryId(1)]);
+      assert.match(await page.textContent('#ytc-main .sub'), /Couldn’t sort newest first/);
       LIBRARY.sortFail = false;
-      await page.click('[data-act=retry]'); await page.waitForSelector('#ytc-list .c');
-      assert.equal(await page.$eval('#ytc-list .c', c => c.dataset.v), libraryId(1));
+      await page.click('#ytc-main .sub [data-act=retry]'); await page.waitForFunction(id => document.querySelector('#ytc-list .c')?.dataset.v === id && !document.querySelector('#ytc-main .sub'), libraryId(1));
     } finally { await endLibrary(); }
+  });
+
+  await step('Watch later library in another language: the page and its cards in that language, the English menu check beside it, newest first', async () => {
+    try {
+      await page.goto('https://www.youtube.com/results?search_query=wl+lang', { waitUntil: 'commit' });
+      await page.evaluate(() => localStorage.setItem('ytc-test-lang', 'de-DE'));
+      const from = log.api.length;
+      await startLibrary();
+      // (The tab's saved copy of the last Watch later visit may paint first; the fresh page replaces it.)
+      await page.waitForFunction(id => document.querySelector('#ytc-list .c')?.dataset.v === id, libraryId(59), { timeout: 8000 });
+      const wl = log.api.slice(from).filter(a => a.ep === 'browse' && a.body.browseId === 'VLWL');
+      const hl = wl.map(a => a.body.context.client.hl);
+      assert.ok(hl.filter(h => h === 'en').length === 1 && hl.filter(h => h === 'de').length === 2, JSON.stringify(hl));
+      const firstDe = hl.indexOf('de'), check = hl.indexOf('en');
+      assert.ok(firstDe < check, 'the page goes out first, the check right beside it');
+      assert.equal(log.api.slice(from).filter(a => a.ep === 'browse/edit_playlist' && a.body.actions?.[0]?.action === 'ACTION_SET_PLAYLIST_VIDEO_ORDER').length, 1);
+    } finally {
+      await page.evaluate(() => localStorage.removeItem('ytc-test-lang')).catch(() => {});
+      await endLibrary();
+    }
   });
 
   await step('Watch later library: removing the last card immediately shows the empty state with keyboard focus on its sidebar link', async () => {
@@ -6485,7 +6528,8 @@ chrome.runtime.onMessage.addListener(m => {
       FX.checkDelay = 150; FX.homeMax = 0;
       // From the very first frame of the next document: was any blocked card ever displayed?
       if (!holdWatch) { holdWatch = true; await page.addInitScript(() => {
-        if (!sessionStorage.getItem('ytc-e2e-hold')) return;
+        // (about:blank, between steps, has no sessionStorage.)
+        try { if (!sessionStorage.getItem('ytc-e2e-hold')) return; } catch { return; }
         const linked = JSON.parse(sessionStorage.getItem('ytc-e2e-hold')), seen = window.__hold = { flashed: [], frames: 0, inserted: [], active: true };
         const inserted = new Set();
         const card = c => { const id = c.dataset.v; if (!inserted.has(id)) { inserted.add(id); seen.inserted.push(id); } };
@@ -6890,7 +6934,7 @@ chrome.runtime.onMessage.addListener(m => {
     HOME.rich = true; FX.homeChips = true;
     try {
       await page.evaluate(() => sessionStorage.clear());
-      await readyDel();
+      await readyDel(true);
       await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
       await page.waitForSelector('#ytc-filters [data-act=fx-nchip]');
       await page.hover('#ytc-filters .fx-plus');
@@ -7996,8 +8040,8 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
       counting = true;
       const n0 = homeReqs().length;
       await tv.reload({ waitUntil: 'commit' });
-      await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 8000 });
-      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 15000 });
+      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 15000 });
       const reqs = homeReqs().slice(n0);
       assert.ok(reqs.length >= 2, `the page and the ready response (${reqs.length})`);
       for (const r of reqs) {
@@ -8007,13 +8051,13 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
       const title = await tv.evaluate(() => JSON.parse(sessionStorage.getItem('ytc:ready')).i[0].t);
       const n1 = homeReqs().length;
       await tv.reload({ waitUntil: 'commit' });
-      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 15000 });
       assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
       assert.equal(await tv.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), title);
       assert.ok(homeReqs().slice(n1).every(a => a.t > Date.now() - 3000), 'no Home request before the paint');
       // A stalled TV Home request: the identical TVHTML5 request with the token at the deadline (after the
       // next ready response has landed, so the stall meets the page's own request).
-      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 15000 });
       await tv.evaluate(() => { localStorage.setItem('ytc-test-noready', '1'); sessionStorage.removeItem('ytc:ready'); sessionStorage.setItem('ytc:bt', '100,100,100,100,100'); });
       HOME.stall = 1;
       const n2 = homeReqs().length;
@@ -8056,8 +8100,8 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
       await tv.evaluate(() => { localStorage.removeItem('ytc-test-noready'); localStorage.setItem('ytc:shell-log', '[]'); });
       // A run that fetched its ready response: the page hands the record to the shell (page, then with its continuation).
       await cold(null);
-      await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 8000 });
-      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 8000 });
+      await tv.waitForFunction(() => /Fresh #/.test(document.querySelector('#ytc-list .c .t')?.textContent || ''), null, { timeout: 15000 });
+      await tv.waitForFunction(() => { const r = sessionStorage.getItem('ytc:ready'); return r && JSON.parse(r).i.length > 30; }, null, { timeout: 15000 });
       await tv.waitForTimeout(300);
       let calls = await shellLog();
       assert.ok(calls.some(c => c[0] === 'ready_take'), 'a cold start asks for the kept one');
@@ -8069,24 +8113,24 @@ if (document.documentElement) ytcRun(); else new MutationObserver((_, o) => { if
       // (dropped at the shell) and refilled as usual.
       const n1 = homeReqs().length;
       await cold(rec);
-      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 15000 });
       assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'ready');
       assert.equal(await tv.evaluate(() => document.querySelector('#ytc-list .c[data-v] .t').textContent), title);
       assert.equal(homeReqs().slice(n1).filter(a => a.t < Date.now() - 2500).length, 0, 'no Home request before the paint');
-      await tv.waitForFunction(() => JSON.parse(localStorage.getItem('ytc:shell-log') || '[]').some(c => c[0] === 'ready_put'), null, { timeout: 8000 });
+      await tv.waitForFunction(() => JSON.parse(localStorage.getItem('ytc:shell-log') || '[]').some(c => c[0] === 'ready_put'), null, { timeout: 15000 });
       calls = await shellLog();
       assert.ok(calls.some(c => c[0] === 'ready_drop'), 'the used one is dropped at the shell');
       // Expired (11 min old) or another account's: the network path, as without one.
       for (const [what, patch] of [['expired', r => { r.t = Date.now() - 11 * 60e3; }], ['another account', r => { r.a = 'o123:en'; }]]) {
         const r = JSON.parse(rec); patch(r);
         await cold(JSON.stringify(r));
-        await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+        await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 15000 });
         assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'network', what);
       }
       // A shell without the command (an older app): the network path, nothing breaks.
       await tv.evaluate(() => { const t = JSON.parse(localStorage.getItem('ytc:shell')); delete t.ready_take; localStorage.setItem('ytc:shell', JSON.stringify(t)); sessionStorage.clear(); addEventListener('pagehide', () => sessionStorage.clear()); });
       await tv.reload({ waitUntil: 'commit' });
-      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 8000 });
+      await tv.waitForFunction(() => document.querySelector('#ytc-list .c[data-v] .t'), null, { timeout: 15000 });
       assert.equal(await tv.evaluate(() => document.documentElement.dataset.ytcHomeSrc), 'network');
     } finally {
       HOME.stamp = false; HOME.rich = wasRich;

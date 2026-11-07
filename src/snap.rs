@@ -202,7 +202,8 @@ impl Serialize for HeadRecord<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut m = serializer.serialize_map(None)?;
         match self.0 {
-            Head::Feed { title } => {
+            // A failed sort's note is not kept: a restored page is a plain feed.
+            Head::Feed { title } | Head::Unsorted { title } => {
                 m.serialize_entry("k", "f")?;
                 m.serialize_entry("t", title)?;
             }

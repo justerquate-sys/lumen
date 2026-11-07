@@ -26,7 +26,7 @@ pub fn route_kind(r: &Route) -> &'static str {
 
 fn purpose(p: &Purpose) -> &'static str {
     match p {
-        Purpose::Page { .. } | Purpose::WatchLaterOrder { .. } => "page",
+        Purpose::Page { .. } | Purpose::WatchLaterOrder { .. } | Purpose::WatchLaterMenu { .. } => "page",
         Purpose::Resolve { .. } => "resolve",
         Purpose::Cont { .. } => "cont",
         Purpose::Prefetch { spec: true, .. } => "spec",

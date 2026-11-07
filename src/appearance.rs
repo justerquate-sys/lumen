@@ -3,6 +3,9 @@
 use crate::{config::Config, player::sponsor};
 use serde_json::{Value, json};
 
+/// `localStorage` flag: the YouTube palette was the last one applied.
+const HINT: &str = "ytc-palette-youtube";
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Palette {
     #[default]
@@ -21,6 +24,16 @@ impl Palette {
 
     pub fn apply(self) {
         crate::bridge::root_attr("data-ytc-palette", Some(self.key().into()));
+        // Remembered for the first frame of the next new tab, which has no config yet (one flag, the palette only).
+        let yt = self == Self::Youtube;
+        if crate::bridge::local_flag(HINT) != yt {
+            crate::bridge::local_flag_set(HINT, yt);
+        }
+    }
+
+    /// The palette to paint before `chrome.storage` answers: the one this browser applied last.
+    pub fn hint() -> Self {
+        if crate::bridge::local_flag(HINT) { Self::Youtube } else { Self::Lumen }
     }
 }
 

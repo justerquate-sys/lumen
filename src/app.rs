@@ -149,11 +149,28 @@ const BG_TICK_MS: u32 = 30_000;
 const BG_ACTIVE_MS: f64 = 5.0 * 60_000.0;
 const CONT_CACHE: usize = 4;
 
+/// Watch later opens newest first (YouTube's own "Date added (newest)", which YouTube remembers for
+/// the account). The page and, in another language than English, the English menu check go out
+/// together; a page that is not newest first waits only for the sort.
+#[derive(Clone, Copy, PartialEq)]
+enum WlSort {
+    /// Nothing known yet for this visit.
+    Open,
+    /// The English menu check is out.
+    Checking,
+    /// YouTube's sort command is out.
+    Sorting,
+    /// Decided: the next page answer renders.
+    Settled,
+}
+
 enum Purpose {
     /// Is the network there at all? (`generate_204`; a player failure that looked like a dropped connection)
     NetProbe,
     Page { nav: u32 },
     WatchLaterOrder { nav: u32 },
+    /// The English sort-menu check of Watch later (`Req::WatchLaterMenu`).
+    WatchLaterMenu { nav: u32 },
     Resolve { nav: u32, path: String },
     Cont { nav: u32, generation: u32 },
     /// `spec` = speculative (cards in view, idle time): cancelled on navigation.
@@ -270,8 +287,16 @@ pub struct App {
     /// chrome.storage config read. Feeds never wait for it (they use the tab's
     /// mirror or the fallback); the player does, for its prefs and switches.
     cfg_ready: bool,
-    /// This visit already requested the owned playlist's newest-save order.
-    wl_ordering: bool,
+    /// This visit's newest-first decision for Watch later (`WlSort`).
+    wl: WlSort,
+    /// Watch later's page, held while that decision is open (shown in the order received if the
+    /// sort fails: the list never waits on YouTube accepting the sort).
+    wl_held: Option<Vec<u8>>,
+    /// The sort failed: the list shows in the order received, with a note and Try again.
+    wl_note: bool,
+    /// YouTube already keeps this account's Watch later newest first (seen in this tab): no check
+    /// and no hold for the rest of the document.
+    wl_newest: bool,
     auth: Auth,
     hl: String,
     route: Route,
@@ -308,6 +333,9 @@ pub struct App {
     hover: String,
     /// The latest video intent and when its uninterrupted rest started.
     media_rest: Option<(String, f64)>,
+    /// The rest (its start time) whose end already has a wake queued: later answers during the
+    /// same rest add no timers.
+    media_wake: f64,
     preview_v: String,
     preview_on: bool,
     suggest_q: String,
@@ -456,7 +484,8 @@ pub fn boot() {
     // first request goes out now; chrome.storage only refines later requests.
     let mirror = bridge::session_get(CFG_SESSION);
     let cfg = if mirror.is_empty() { Config::default() } else { Config::from_json(&mirror) };
-    cfg.palette.apply();
+    // A new tab has no mirror: its first frame takes the palette this browser applied last.
+    if mirror.is_empty() { crate::appearance::Palette::hint().apply(); } else { cfg.palette.apply(); }
     // YouTube's own document for this tab (the extension's loader leaves it running): when it is the Home answer
     // the client would fetch anyway (a Home load from YouTube's document, `homeready::on_doc_script`), it keeps
     // streaming with its nodes held out of the page; else it stops now, before any request of ours goes out (a
@@ -473,7 +502,10 @@ pub fn boot() {
     }
     let mut app = App {
         cfg_ready: false,
-        wl_ordering: false,
+        wl: WlSort::Open,
+        wl_held: None,
+        wl_note: false,
+        wl_newest: false,
         cfg,
         auth: crate::tv::auth(),
         hl,
@@ -506,6 +538,7 @@ pub fn boot() {
         timers: HashMap::new(),
         hover: String::new(),
         media_rest: None,
+        media_wake: -1.0,
         preview_v: String::new(),
         preview_on: false,
         suggest_q: String::new(),
@@ -751,8 +784,51 @@ impl App {
             self.mark("request");
         }
         let nav = self.nav;
+        let wl = matches!(&req, Req::Browse { id, .. } if id == "VLWL");
         let id = self.send(req, Purpose::Page { nav }, false);
         self.home_sent(id);
+        if wl {
+            self.wl_check();
+        }
+    }
+
+    fn wl_reset(&mut self) {
+        self.wl = if self.wl_newest { WlSort::Settled } else { WlSort::Open };
+        self.wl_held = None;
+        self.wl_note = false;
+    }
+
+    /// Not English: the page's own menu labels cannot be read, so the English menu goes out beside it.
+    fn wl_check(&mut self) {
+        if self.wl == WlSort::Open && !self.hl.eq_ignore_ascii_case("en") {
+            self.wl = WlSort::Checking;
+            let nav = self.nav;
+            self.send(Req::WatchLaterMenu, Purpose::WatchLaterMenu { nav }, false);
+        }
+    }
+
+    /// The sort decision is in: the held page (if it is here) renders now.
+    fn wl_settle(&mut self) {
+        self.wl = WlSort::Settled;
+        if let Some(body) = self.wl_held.take() {
+            self.on_page_body(200, &body);
+        }
+    }
+
+    /// A menu (from the page in English, or the English check) that is not newest first: YouTube's
+    /// own sort command (`Sorting`); otherwise `Settled`.
+    fn wl_menu(&mut self, json: &Value) {
+        match crate::features::watch_later::newest_order(json) {
+            Some(req) => {
+                self.wl = WlSort::Sorting;
+                let nav = self.nav;
+                self.send(req, Purpose::WatchLaterOrder { nav }, false);
+            }
+            None => {
+                self.wl_newest = crate::features::watch_later::newest_selected(json);
+                self.wl = WlSort::Settled;
+            }
+        }
     }
 
     fn refresh_config(&mut self, retry_nav: Option<u32>) {
@@ -769,7 +845,7 @@ impl App {
         let stale: Vec<u32> = self
             .pending
             .iter()
-            .filter(|(_, p)| matches!(p.purpose, Purpose::Page { .. } | Purpose::WatchLaterOrder { .. } | Purpose::Resolve { .. } | Purpose::Cont { .. }))
+            .filter(|(_, p)| matches!(p.purpose, Purpose::Page { .. } | Purpose::WatchLaterOrder { .. } | Purpose::WatchLaterMenu { .. } | Purpose::Resolve { .. } | Purpose::Cont { .. }))
             .map(|(id, _)| *id)
             .collect();
         for id in stale {
@@ -961,7 +1037,7 @@ impl App {
         self.marks = vec![("navigate", 0.0)];
         self.rendered = false;
         self.retried = false;
-        self.wl_ordering = false;
+        self.wl_reset();
         self.generation += 1;
         self.feed = FeedState { cont_ep: "browse", ..Default::default() };
         self.cont_busy = false;
@@ -1089,7 +1165,7 @@ impl App {
 
     /// Immediate UI for the current route, then `load()`.
     fn start_route(&mut self) {
-        self.wl_ordering = false;
+        self.wl_reset();
         let native = native_url(&self.url);
         match self.route.clone() {
             Route::Unknown { .. } => {
@@ -1369,7 +1445,11 @@ impl App {
                     self.prefetch_page(&url);
                 }
             }
-            Some(Timer::MediaPre(v, n)) => self.media_pre(&v, n),
+            Some(Timer::MediaPre(v, n)) => {
+                // A wake that fires a little early queues the next one.
+                self.media_wake = -1.0;
+                self.media_pre(&v, n);
+            }
             Some(Timer::Preview(v)) => {
                 if self.preview_v == v {
                     if let Some(a) = self.known.get(&v).and_then(|k| k.anim.clone()) {
@@ -1473,17 +1553,23 @@ impl App {
         if !self.hovering(v) || matches!(&self.route, Route::Watch { v: w, .. } if w == v) || self.player.as_ref().is_some_and(|p| p.v == v) {
             return;
         }
-        let Some((_, at)) = self.media_rest.as_ref().filter(|(rest, _)| rest == v) else { return };
+        let Some(&(_, at)) = self.media_rest.as_ref().filter(|(rest, _)| rest == v) else { return };
         let wait = (MEDIA_PRE_MS as f64 - (bridge::now() - at)).ceil();
         if wait > 0.0 {
-            let id = self.timer(Timer::MediaPre(v.to_string(), n));
-            bridge::timer(id, wait as u32);
+            if self.media_wake != at {
+                self.media_wake = at;
+                let id = self.timer(Timer::MediaPre(v.to_string(), n));
+                bridge::timer(id, wait as u32);
+            }
+            return;
+        }
+        // Its media came with an earlier rest: the first frame can be decoded now, and nothing more is asked.
+        self.warm_frame(v);
+        if player::own::prefetched(v) {
             return;
         }
         let Some(body) = self.vision_cached(v) else { return };
         let start = self.fx_resume(v).or_else(|| self.resume.get(v).copied()).unwrap_or(0.0);
-        // Its media came with an earlier rest: the first frame can be decoded now.
-        self.warm_frame(v);
         if !player::own::prefetch_media(v, &body, &self.cfg.prefs, self.bw.bps, start) && n < 2 {
             let id = self.timer(Timer::MediaPre(v.to_string(), n + 1));
             bridge::timer(id, MEDIA_PRE_MS);
@@ -2432,11 +2518,33 @@ impl App {
             Purpose::WatchLaterOrder { nav } => {
                 if nav != self.nav { return; }
                 if ok && json::parse(body).and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_string)).as_deref() == Some("STATUS_SUCCEEDED") {
+                    self.wl_newest = true;
+                    self.wl = WlSort::Settled;
+                    self.wl_held = None;
+                    // A first page still on its way is in the old order: only the newly ordered one renders.
+                    let old: Vec<u32> = self.pending.iter().filter(|(_, p)| matches!(p.purpose, Purpose::Page { nav: n } if n == nav)).map(|(id, _)| *id).collect();
+                    for id in old {
+                        self.pending.remove(&id);
+                        self.abort_req(id);
+                    }
                     self.fx_wl_invalidate();
                     self.cont_cache.clear();
                     self.page_request(Req::Browse { id: "VLWL".into(), params: None });
                 } else {
-                    self.fail(status, "Watch later could not be sorted newest first.");
+                    // The list in the order received, with a note and Try again: never a blocked page.
+                    self.wl_note = true;
+                    self.wl_settle();
+                }
+            }
+            Purpose::WatchLaterMenu { nav } => {
+                if nav != self.nav || self.wl != WlSort::Checking { return; }
+                match ok.then(|| json::parse(body)).flatten() {
+                    Some(json) => {
+                        self.wl_menu(&json);
+                        if self.wl == WlSort::Settled { self.wl_settle(); }
+                    }
+                    // The check failed: the page shows as YouTube sent it.
+                    None => self.wl_settle(),
                 }
             }
         }
@@ -2492,10 +2600,15 @@ impl App {
             self.fail(status, if ok { "YouTube returned an unreadable response." } else { "YouTube did not return this page." });
             return;
         };
-        if matches!(&self.route, Route::Playlist { list } if list == "WL") && !self.wl_ordering {
-            if let Some(req) = crate::features::watch_later::newest_order(&json) {
-                self.wl_ordering = true;
-                self.send(req, Purpose::WatchLaterOrder { nav: self.nav }, false);
+        if matches!(&self.route, Route::Playlist { list } if list == "WL") && self.wl != WlSort::Settled {
+            // A page from a prefetch or the page cache has no check out yet.
+            self.wl_check();
+            if self.wl == WlSort::Open {
+                // English: the page's own menu decides.
+                self.wl_menu(&json);
+            }
+            if self.wl != WlSort::Settled {
+                self.wl_held = Some(body.to_vec());
                 return;
             }
         }
@@ -2592,7 +2705,7 @@ impl App {
             }
             Route::Playlist { list } => {
                 let p = parse::playlist(json);
-                let head = render::playlist_head(&p, list == "WL");
+                let head = render::playlist_head(&p, list == "WL", self.wl_note && list == "WL");
                 (head.clone(), head.title().to_string(), p.feed, "browse", "This playlist is empty.")
             }
             Route::Home => {

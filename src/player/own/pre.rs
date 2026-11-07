@@ -96,6 +96,11 @@ fn plan(body: &[u8], prefs: &Prefs, bw: Option<f64>) -> Option<(Format, Format)>
     Some((ladder[i].clone(), audio))
 }
 
+/// `v`'s first media is prefetched (or on its way).
+pub fn prefetched(v: &str) -> bool {
+    PRE.with(|p| p.borrow().iter().any(|e| e.v == v))
+}
+
 /// Prefetch `v`'s first media (VISIONOS `body`), starting at `start` seconds. False when nothing
 /// was asked (live, already prefetched, decodingInfo not known yet).
 pub fn prefetch_media(v: &str, body: &[u8], prefs: &Prefs, bw: Option<f64>, start: f64) -> bool {

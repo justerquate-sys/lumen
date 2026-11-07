@@ -157,7 +157,7 @@ const YTC = (() => {
     epoch: () => Date.now(),
     href: () => location.pathname + location.search + location.hash,
     cookie: () => d.cookie,
-    lang: () => navigator.language || 'en',
+    lang: () => { try { const t = localStorage.getItem('ytc-test-lang'); if (t) return t; } catch {} return navigator.language || 'en'; },
     doc(html) {
       const root = d.documentElement;
       for (const a of [...root.attributes]) if (!a.name.startsWith('data-ytc')) root.removeAttribute(a.name);
@@ -636,6 +636,7 @@ const YTC = (() => {
     replace_doc(url) { location.replace(url); },
     ua: () => navigator.userAgent,
     local_flag(key) { try { return localStorage.getItem(key) === '1'; } catch { return false; } },
+    local_flag_set(key, on) { try { if (on) localStorage.setItem(key, '1'); else localStorage.removeItem(key); } catch {} },
     // ---- app shell (the TV app, tv/). An app shell sets YTC_PLATFORM ('tv') and YTC_SHELL before this
     // script runs (tv/shim/shim.js); localStorage 'ytc:platform' is a development switch for testing in a browser,
     // and 'ytc:shell' (JSON {cmd: answer string, or null = the call fails}) stands in for the shell there; with

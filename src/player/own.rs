@@ -31,7 +31,7 @@ mod stream;
 mod tel;
 mod warm;
 
-pub use pre::{pre_answer, pre_cancel, pre_progress, prefetch_media};
+pub use pre::{pre_answer, pre_cancel, pre_progress, prefetch_media, prefetched};
 pub use warm::{warm_keep, warm_media, warm_take, warm_timer, warm_try};
 
 /// What the app needs from a request: session values and the page.

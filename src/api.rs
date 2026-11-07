@@ -12,6 +12,9 @@ pub enum Req {
     Browse { id: String, params: Option<String> },
     /// YouTube's own Watch later sort-menu command (values supplied by the page).
     WatchLaterOrder { order: u32, params: Option<String> },
+    /// Watch later's first page in English, read only for its sort menu (parsed by its English
+    /// label) when the page itself goes out in another language.
+    WatchLaterMenu,
     /// `params` = YouTube's own search-filter value (verbatim).
     Search { q: String, params: Option<String> },
     Next { v: String },
@@ -38,7 +41,7 @@ pub fn context(cfg: &Config, hl: &str, page_url: &str) -> Value {
 impl Req {
     pub fn endpoint(&self) -> &'static str {
         match self {
-            Req::Browse { .. } => "browse",
+            Req::Browse { .. } | Req::WatchLaterMenu => "browse",
             Req::WatchLaterOrder { .. } => "browse/edit_playlist",
             Req::Search { .. } => "search",
             Req::Next { .. } | Req::NextList { .. } => "next",
@@ -62,11 +65,15 @@ impl Req {
 
     pub fn body(&self, cfg: &Config, hl: &str, page_url: &str) -> String {
         let mut body = Map::new();
-        let wl = matches!(self, Req::Browse { id, .. } if id == "VLWL") || matches!(self, Req::WatchLaterOrder { .. });
-        // The owned playlist's sort menu is parsed by its English label; the order value and
+        // The owned playlist's sort menu is parsed by its English label (the menu check and the sort
+        // command go out in English); the page itself is in the user's language. The order value and
         // context params still come from YouTube, never from a locally reversed chunk.
-        body.insert("context".into(), context(cfg, if wl { "en" } else { hl }, page_url));
+        let en = matches!(self, Req::WatchLaterMenu | Req::WatchLaterOrder { .. });
+        body.insert("context".into(), context(cfg, if en { "en" } else { hl }, page_url));
         match self {
+            Req::WatchLaterMenu => {
+                body.insert("browseId".into(), "VLWL".into());
+            }
             Req::Browse { id, params } => {
                 body.insert("browseId".into(), id.clone().into());
                 if let Some(p) = params {

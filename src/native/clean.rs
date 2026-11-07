@@ -144,6 +144,7 @@ fn with<R: Default>(f: impl FnOnce(&mut Clean) -> R) -> R {
 
 pub fn boot() {
     bridge::root_attr("data-ytc-native", Some("1".into()));
+    crate::appearance::Palette::hint().apply();
     bridge::storage_watch(config::STORAGE_KEY);
     bridge::storage_get(config::STORAGE_KEY);
     bridge::storage_get(KEY_SHORTS);

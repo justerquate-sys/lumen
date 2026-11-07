@@ -9,6 +9,9 @@ extern "C" {
     /// `localStorage.getItem(key) === '1'` (test switches only).
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn local_flag(key: &str) -> bool;
+    /// `localStorage.setItem(key, '1')` when `on`, else `removeItem(key)`.
+    #[wasm_bindgen(js_namespace = YTC)]
+    pub fn local_flag_set(key: &str, on: bool);
     /// `document.hidden`.
     #[wasm_bindgen(js_namespace = YTC)]
     pub fn hidden() -> bool;

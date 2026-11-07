@@ -35,8 +35,9 @@ _To be added:_
   is outlined when off and filled when on. From the keyboard, Enter/Space toggle and ↑/↓ open options.
 - **Hover navigation:** rest on a desktop sidebar link for 250 ms to open it. A short pass, dragging,
   typing or an open menu never activates it. Clicks and keyboard shortcuts work immediately.
-- **Watch later, newest saves first.** The list uses YouTube’s date-added order across pages. Removing
-  a bookmark removes the card immediately; a failed request restores it in place with a retry action.
+- **Watch later, newest saves first.** The list uses YouTube’s date-added order across pages, in your
+  language. If YouTube refuses the sort, the list still shows (with **Try again**). Removing a bookmark
+  removes the card immediately; a failed request restores it in place with a retry action.
 - **SponsorSkip** built into the player, with its switch and category choices in the browser’s **Lumen**
   extension popup. Segment data from SponsorBlock; privacy-preserving (see "Privacy").
 - **No Shorts unless you want them**, no ads, no Premium/membership upsells. Optional filters: minimum length, Music, Live, popularity order, playlists only.
