@@ -86,6 +86,10 @@ const CHUNK: usize = 24;
 const FEED_PRELOAD: usize = 100;
 /// Other feeds keep this many items buffered beyond the screen.
 const AHEAD: usize = 12;
+/// Home and Subscriptions keep this many items buffered beyond the screen once 100 are shown (two
+/// continuations: a fast scroll through one chunk never reaches the end while the next is asked for;
+/// measured at 10,000 px/s with 400 ms continuations: the end in view 373 → 138 ms).
+const FEED_AHEAD: usize = 2 * CHUNK;
 /// Background continuation waits for an idle main thread, at most this long.
 const PRELOAD_IDLE_MS: u32 = 1500;
 /// Hover-prefetched channel/playlist/feed responses (raw bytes, memory only).
@@ -280,6 +284,9 @@ struct FeedState {
     cont: Option<String>,
     cont_ep: &'static str,
     seen: HashSet<String>,
+    /// The user scrolled this list (a chunk came in at the sentinel, or a watch page was scrolled):
+    /// from now on the next continuation is kept ahead and asked for as soon as the buffer runs low.
+    scrolled: bool,
 }
 
 pub struct App {
@@ -957,6 +964,7 @@ impl App {
             buf,
             cont: sn.cont,
             cont_ep: sn.cont_ep,
+            ..Default::default()
         };
         self.fx_new_feed();
         let title = self.head_title();
@@ -2093,6 +2101,10 @@ impl App {
         if self.fx_on_visible() {
             return;
         }
+        // Only a real scroll counts: a short list's end is in range at load (a watch page's related column always).
+        if bridge::scroll_y() > 0.0 {
+            self.feed.scrolled = true;
+        }
         if !self.feed.buf.is_empty() {
             self.render_chunk();
         } else if self.feed.cont.is_some() {
@@ -2134,8 +2146,11 @@ impl App {
     fn preload_target(&self) -> usize {
         let shown = self.counted(&self.feed.shown);
         match self.route {
-            Route::Home | Route::Subs => FEED_PRELOAD.max(shown + CHUNK),
-            Route::Watch { .. } => shown,
+            Route::Home | Route::Subs => FEED_PRELOAD.max(shown + FEED_AHEAD),
+            // The related column: nothing ahead until the page is scrolled (most watch pages never are).
+            Route::Watch { .. } if !self.feed.scrolled => shown,
+            Route::Watch { .. } => shown + CHUNK,
+            // (Search answers ~20 per page, one page after the other: more ahead would not arrive sooner.)
             _ => shown + AHEAD,
         }
     }
@@ -2153,6 +2168,13 @@ impl App {
         if self.want {
             let token = self.feed.cont.clone().unwrap_or_default();
             self.send_cont(token, false);
+            return;
+        }
+        // Scrolling, with less than a chunk buffered: the next one is asked for now (low priority),
+        // not after the main thread goes idle, which a scroll can delay for up to `PRELOAD_IDLE_MS`.
+        if self.feed.scrolled && self.counted(&self.feed.buf) < CHUNK {
+            let token = self.feed.cont.clone().unwrap_or_default();
+            self.send_cont(token, true);
             return;
         }
         if !self.pump_scheduled {
@@ -2784,6 +2806,7 @@ impl App {
             buf: extra,
             cont: feed.cont,
             cont_ep: ep,
+            ..Default::default()
         };
         self.fx_new_feed();
         let head = self.feed.head.as_ref().expect("head set above");
@@ -2823,6 +2846,7 @@ impl App {
             buf: Vec::new(),
             cont: w.related.cont.clone(),
             cont_ep: "next",
+            ..Default::default()
         };
         self.set_title(&w.title);
         self.up_render(w, &v);

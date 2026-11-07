@@ -97,6 +97,11 @@ impl App {
     }
 
     pub fn on_scroll_end(&mut self, y: f64) {
+        // A watch page scrolled down: the related column's next page is fetched ahead from now on.
+        if matches!(self.route, Route::Watch { .. }) && y > 120.0 && !self.feed.scrolled {
+            self.feed.scrolled = true;
+            self.pump();
+        }
         if self.route != Route::Home {
             return;
         }

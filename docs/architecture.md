@@ -325,7 +325,14 @@ folds back into it when it expires.
 - **Preloading:** after the first screen, feed continuations are fetched in idle time with
   `priority: 'low'` until **100 videos** are in memory on Home and Subscriptions (one page ahead on
   search, channel and playlist pages). Scrolling moves them into the page 24 cards per DOM write
-  (`content-visibility:auto` cards), so reaching 100 cards needs no network wait.
+  (`content-visibility:auto` cards), so reaching 100 cards needs no network wait. Past 100, Home and
+  Subscriptions keep two chunks (48 cards) ahead. A watch page's related column fetches nothing ahead until the
+  page is scrolled (most never are); from the first scroll it keeps one chunk ahead. Once a list is scrolled, a
+  buffer below one chunk asks for the next page at once (low priority) instead of waiting for idle time.
+  Measured (e2e fixtures, the end of the list in view while more loads; 7 Nov 2026): the related column at
+  ~2,000 px/s with 900 ms continuations 3× / 572 ms → 0; Home at ~10,000 px/s with 400 ms continuations
+  373 → 138 ms (at ~5,000 px/s both 0). Search is not changed: its pages come one after the other (each token is
+  in the previous answer), so more ahead would not arrive sooner.
 - **Home reload** (3 Nov 2026, owner: "the home reload should be the fastest thing out there, but it should
   actually reload whole videos with the same exact way the YouTube does"; `src/ready.rs`, `app/homeready.rs`).
   A reload of Home, opening it by URL, the logo (click or dwell), the sidebar and `g h` show **what YouTube

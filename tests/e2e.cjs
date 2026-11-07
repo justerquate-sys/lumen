@@ -360,7 +360,7 @@ ytcfg.set({"EVENT_ID":"e2eHomeEvent${String(n).padStart(4, '0')}","INNERTUBE_CLI
 <body><script nonce="n1">var ytInitialData = ${data};</script><script nonce="n1">window.__ytAppRan=1;</script></body></html>`;
 const gunzipJSON = buf => { try { return JSON.parse(zlib.gunzipSync(buf).toString('utf8')); } catch { try { return JSON.parse(buf.toString('utf8')); } catch { return null; } } };
 // Simulated `next` latency (speed table).
-const NEXT = { latency: 0 };
+const NEXT = { latency: 0, contLatency: 0 };
 const ids11 = str => [...new Set([...str.matchAll(/"contentId":"([A-Za-z0-9_-]{11})"/g)].map(m => m[1]))];
 const homeId = (id, n) => id.slice(0, 8) + 'H' + n + 'z';
 const homePage = (str, n, next) => {
@@ -483,7 +483,8 @@ function apiFixture(ep, body) {
   if (ep === 'search' && body.query === 'shelves' && !body.params && !body.continuation) return shelvesSearchStr;
   if (ep === 'search') return body.continuation ? fx('search_cont.json') : body.query === 'xss' ? evilSearchStr : body.params ? fx('search_filtered.json') : searchStr;
   if (ep === 'next') {
-    if (body.continuation) return fx('next_cont.json');
+    // (NEXT.contLatency: the scroll measurement, which needs fresh related videos on every page.)
+    if (body.continuation) return NEXT.contLatency ? homePage(fx('next_cont.json').toString('utf8'), (NEXT.contN = (NEXT.contN || 0) + 1) % 10, 'RELCONT' + NEXT.contN) : fx('next_cont.json');
     // In a playlist: the recorded list= response (1 Nov 2026), reporting the requested video as current.
     if (body.playlistId) return fx('next_list.json').toString('utf8').slice(0, -1) + `,"currentVideoEndpoint":{"watchEndpoint":{"videoId":"${body.videoId}"}}}`;
     if (body.videoId === EVIL_ID) return evilNextStr;
@@ -625,6 +626,7 @@ async function handle(route) {
     }
     if (home && (HOME.latency || (HOME.delay && !body.continuation))) await new Promise(r => setTimeout(r, HOME.latency + (body.continuation ? 0 : HOME.delay)));
     if (ep === 'next' && NEXT.latency && !body.continuation && !masked) await new Promise(r => setTimeout(r, NEXT.latency));
+    if (ep === 'next' && NEXT.contLatency && body.continuation) await new Promise(r => setTimeout(r, NEXT.contLatency));
     if (out && pageMask) { NEXT_MASK.served++; out = JSON.stringify(applyMask(parseMask(pageMask), JSON.parse(out))); }
     if (out && visionMask) { VISION_MASK.served++; out = JSON.stringify(applyMask(parseMask(visionMask), JSON.parse(out))); }
     return out ? route.fulfill({ status: 200, contentType: ct, body: wrap(out) }).catch(() => {}) : route.fulfill({ status: 404, body: '{}' });
@@ -1175,6 +1177,56 @@ chrome.runtime.onMessage.addListener(m => {
     const pre = await page.$$eval('link[rel=preconnect]', ls => ls.map(l => l.href));
     // Image hosts from the shell; video servers are warmed separately once a player response is known.
     assert.deepEqual(pre.filter(h => !h.endsWith('.googlevideo.com/')), ['https://i.ytimg.com/', 'https://yt3.ggpht.com/']);
+  });
+
+  await step('fast scrolling never reaches the end of Home while more is on its way: two continuations ahead, asked at once while scrolling (400 ms YouTube)', async () => {
+    HOME.rich = true; HOME.latency = 400;
+    try {
+      await page.evaluate(() => sessionStorage.clear());
+      await readyDel(true);
+      await page.goto('https://www.youtube.com/', { waitUntil: 'commit' });
+      await page.waitForFunction(() => +document.documentElement.dataset.ytcItems >= 100, null, { timeout: 12000 });
+      await page.waitForTimeout(300);
+      // A fast flick-scroll (about 5,000 px/s; YTC_STEP changes it) down to card 170 of 180. "Waited": the end of the list in view
+      // while more is still loading.
+      const r = await page.evaluate(async STEP => {
+        const more = document.getElementById('ytc-more'); let since = 0, waited = 0, waits = 0;
+        const io = new IntersectionObserver(es => { for (const e of es) { if (e.isIntersecting && !more.classList.contains('done')) { if (!since) { since = performance.now(); waits++; } } else if (since) { waited += performance.now() - since; since = 0; } } });
+        io.observe(more);
+        const t0 = performance.now();
+        while (document.querySelectorAll('#ytc-list .c').length < 170 && performance.now() - t0 < 20000) { scrollBy(0, STEP); await new Promise(r => setTimeout(r, 120)); }
+        if (since) waited += performance.now() - since;
+        io.disconnect();
+        return { waits, waited: Math.round(waited), cards: document.querySelectorAll('#ytc-list .c').length, ms: Math.round(performance.now() - t0) };
+      }, +(process.env.YTC_STEP || 600));
+      console.log('  fast scroll through Home: ' + JSON.stringify(r));
+      assert.ok(r.cards >= 170, JSON.stringify(r));
+      assert.ok(r.waited < 200, `the end was in view for ${r.waited} ms (${r.waits}×)`);
+      await page.evaluate(() => scrollTo(0, 0));
+    } finally { HOME.latency = 0; }
+  });
+
+  await step('scrolling a watch page: the related column\'s next page is on its way before its end comes into view (900 ms YouTube)', async () => {
+    NEXT.contLatency = 900;
+    try {
+      await page.goto('https://www.youtube.com/watch?v=-Bxc4gJluC0', { waitUntil: 'commit' });
+      await page.waitForSelector('#ytc-list .c');
+      await page.waitForTimeout(2500);
+      const r = await page.evaluate(async STEP => {
+        const more = document.getElementById('ytc-more'); let since = 0, waited = 0, waits = 0;
+        const io = new IntersectionObserver(es => { for (const e of es) { if (e.isIntersecting && !more.classList.contains('done')) { if (!since) { since = performance.now(); waits++; } } else if (since) { waited += performance.now() - since; since = 0; } } });
+        io.observe(more);
+        const t0 = performance.now();
+        while (document.querySelectorAll('#ytc-list .c').length < 100 && performance.now() - t0 < 20000) { scrollBy(0, STEP); await new Promise(r => setTimeout(r, 120)); }
+        if (since) waited += performance.now() - since;
+        io.disconnect();
+        return { waits, waited: Math.round(waited), cards: document.querySelectorAll('#ytc-list .c').length, ms: Math.round(performance.now() - t0) };
+      }, +(process.env.YTC_STEP || 250));
+      console.log('  scroll through related: ' + JSON.stringify(r));
+      assert.ok(r.cards >= 100, JSON.stringify(r));
+      // 0.13.6 (nothing ahead on watch pages): the end in view 3× for ~570 ms at this speed.
+      assert.ok(r.waited < 200, `the end was in view for ${r.waited} ms (${r.waits}×)`);
+    } finally { NEXT.contLatency = 0; await page.evaluate(() => scrollTo(0, 0)).catch(() => {}); }
   });
 
   await step('Home reload: YouTube\'s answer on the first frame, from the ready response (fetched ahead once, used once, never the old Home first); expiry, sign-in change and watching discard it', async () => {
